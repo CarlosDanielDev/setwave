@@ -2,16 +2,20 @@
 """A stand-in for `gh` that answers from tests/fixtures/*.json, keyed by the request.
 
   gh api [-X GET] repos/o/r/issues/1/sub_issues?per_page=100   -> repos_o_r_issues_1_sub_issues.json
-  gh pr list --state open ...                                   -> pr_list_open.json
+  gh pr list -R a/one --state open ...                          -> pr_list_open_a_one.json, else pr_list_open.json
   gh pr checks 20 ...                                           -> pr_checks_20.json
   gh pr view 20 ...                                             -> pr_view_20.json
-  gh issue list ...                                             -> issue_list.json
+  gh issue list -R a/one ...                                    -> issue_list_a_one.json, else issue_list.json
+  gh auth token --user X                                        -> prints tok-X (an obvious fake, never a real token)
   gh repo view ...                                              -> repo_view.json
 
 A missing fixture answers like GitHub does for an unknown path: exit 1. Anything that would
 write (a non-GET api call, pr merge, issue create/edit/close/comment) is refused with exit 97,
 so a test notices a command that tried to change GitHub. Every call is appended to
-$FAKE_GH_LOG, one JSON list per line, when that variable is set.
+$FAKE_GH_LOG, one JSON list per line, when that variable is set; and to $FAKE_GH_ENV_LOG as
+{"args": [...], "GH_TOKEN": value or null}, so a test can tell which account a call ran as. Only
+GH_TOKEN is recorded: a copy of the whole environment would carry whatever the developer's shell holds.
+With FAKE_GH_CREATE=N, `issue create -R o/r` answers https://github.com/o/r/issues/N instead of refusing.
 """
 import json
 import os
@@ -31,10 +35,28 @@ def answer(name: str, slurp: bool = False) -> int:
     return 0
 
 
+def per_repo(args: list[str], stem: str) -> str:
+    """`<stem>_<owner>_<name>.json` for the repo after -R when that fixture exists, else `<stem>.json`."""
+    if "-R" in args:
+        name = f"{stem}_{args[args.index('-R') + 1].replace('/', '_')}.json"
+        if (FIXTURES / name).exists():
+            return name
+    return f"{stem}.json"
+
+
 def main(args: list[str]) -> int:
     if os.environ.get("FAKE_GH_LOG"):
         with open(os.environ["FAKE_GH_LOG"], "a") as log:
             log.write(json.dumps(args) + "\n")
+    if os.environ.get("FAKE_GH_ENV_LOG"):
+        with open(os.environ["FAKE_GH_ENV_LOG"], "a") as log:
+            log.write(json.dumps({"args": args, "GH_TOKEN": os.environ.get("GH_TOKEN")}) + "\n")
+    if args[:3] == ["auth", "token", "--user"]:
+        print(f"tok-{args[3]}")
+        return 0
+    if args[:2] == ["issue", "create"] and os.environ.get("FAKE_GH_CREATE"):
+        print(f"https://github.com/{args[args.index('-R') + 1]}/issues/{os.environ['FAKE_GH_CREATE']}")
+        return 0
     if args[:2] == ["auth", "status"]:
         print("Logged in to github.com (fake gh)")
         return 0
@@ -57,11 +79,11 @@ def main(args: list[str]) -> int:
             return 97
         return answer(path.split("?")[0].strip("/").replace("/", "_") + ".json", slurp="--slurp" in args)
     if args[:2] == ["pr", "list"]:
-        return answer(f"pr_list_{args[args.index('--state') + 1]}.json")
+        return answer(per_repo(args, f"pr_list_{args[args.index('--state') + 1]}"))
     if args[:2] in (["pr", "checks"], ["pr", "view"]):
         return answer(f"pr_{args[1]}_{args[2]}.json")
     if args[:2] == ["issue", "list"]:
-        return answer("issue_list.json")
+        return answer(per_repo(args, "issue_list"))
     if args[:2] == ["repo", "view"]:
         return answer("repo_view.json")
     print(f"fake gh: refusing {' '.join(args)}", file=sys.stderr)

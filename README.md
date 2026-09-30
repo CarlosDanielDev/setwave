@@ -10,7 +10,7 @@ The state lives in **GitHub** (sub-issues, `blocked_by`, PRs) and in **git** (wo
 /setwave:wave 77
 ```
 
-**Status:** v0.3.x. Built on and proven against one epic (30 issues, 11 PRs merged in one wave, [numbers below](#what-has-been-measured)). Cross-repo and multi-account are implemented and untested. What is planned lives in [epic #1](https://github.com/CarlosDanielDev/setwave/issues/1); nowhere in this file is a planned feature described as existing.
+**Status:** v0.3.x. Built on and proven against one epic (30 issues, 11 PRs merged in one wave, [numbers below](#what-has-been-measured)). Cross-repo and multi-account are pinned by tests against a fake `gh` (two repos, two accounts); no real epic has spanned two repos yet. What is planned lives in [epic #1](https://github.com/CarlosDanielDev/setwave/issues/1); nowhere in this file is a planned feature described as existing.
 
 ## Install
 
@@ -93,6 +93,19 @@ Conflicts are resolved by merging the base branch *into* the PR's branch and pus
 
 - Epics can span repositories: sub-issues and blockers are followed by `repository_url`. Refs are `owner/name#N`; a bare `N` means the repo of the current directory.
 - `~/.config/setwave/repos.json` maps repositories to local checkouts, `gh` accounts, base branches, gate commands, protected and serial paths. Unknown repos are found by scanning `~/projects`. Per-repo calls use that repo's account token (`gh auth token --user`); your global `gh` login is never switched.
+- Two accounts, one registry — a personal repo and a work repo, each under its own `gh` login (`gh auth login` once per account; `gh auth status` lists both):
+
+```json
+{
+  "search_paths": ["~/projects"],
+  "repos": {
+    "a/one": {"path": "/Users/me/projects/one", "account": "me"},
+    "b/two": {"path": "/Users/me/work/two",     "account": "me-at-work"}
+  }
+}
+```
+
+  `wave facts b/two` is the one command that proves the account works: it asks `gh auth token --user me-at-work` and stops naming the account if `gh` has none, prints `"account": "me-at-work"`, and, when no `base` is configured, reads the default branch with that token. An epic in `a/one` may then list `b/two#5` as a sub-issue or a blocker; `next`, `why` and `status` key it `b/two#5`, its worktree goes next to `b/two`'s checkout, and every call for it runs with `GH_TOKEN` of `me-at-work`. `wave plan <dir> --slug b/two` creates in `b/two` from anywhere.
 - A `.wave.json` at the repo root carries the shareable part for everyone who clones:
 
 ```json
@@ -135,7 +148,7 @@ From the epic this was built on ([CarlosDanielDev/dev-cleaner#77](https://github
 | semantic conflicts (not predictable textually) | 1, caught by the base branch's CI |
 | `wave next` vs. the hand-picked next wave | 9 / 9 |
 
-What is *not* measured: cross-repo, multi-account, a merge driven end to end by `merge --plan --yes`. Those are [#7](https://github.com/CarlosDanielDev/setwave/issues/7) and [#9](https://github.com/CarlosDanielDev/setwave/issues/9). `wave stats` accumulates yours.
+What is *not* measured: cross-repo and multi-account on a real epic (tests pin them against a fake `gh`, [#7](https://github.com/CarlosDanielDev/setwave/issues/7)), a merge driven end to end by `merge --plan --yes` ([#9](https://github.com/CarlosDanielDev/setwave/issues/9)). `wave stats` accumulates yours.
 
 ## Roadmap — v0.4.0, [epic #1](https://github.com/CarlosDanielDev/setwave/issues/1)
 

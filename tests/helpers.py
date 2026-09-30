@@ -32,6 +32,7 @@ os.environ.update({
     "GIT_CONFIG_GLOBAL": str(TMP / "gitconfig"),
     "GIT_CONFIG_NOSYSTEM": "1",
     "FAKE_GH_LOG": str(TMP / "gh.log"),
+    "FAKE_GH_ENV_LOG": str(TMP / "gh-env.log"),
 })
 os.environ.pop("GH_TOKEN", None)
 # a fake gh that lost its executable bit would let the real one answer, against real GitHub: refuse to run
@@ -96,4 +97,10 @@ def run_wave(*args, cwd=None) -> subprocess.CompletedProcess:
 
 def gh_calls() -> list[list[str]]:
     log = TMP / "gh.log"
+    return [json.loads(l) for l in log.read_text().splitlines()] if log.exists() else []
+
+
+def gh_env_calls() -> list[dict]:
+    """Every gh call with the GH_TOKEN it ran with (None when unset): {"args": [...], "GH_TOKEN": ...}."""
+    log = TMP / "gh-env.log"
     return [json.loads(l) for l in log.read_text().splitlines()] if log.exists() else []

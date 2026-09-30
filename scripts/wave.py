@@ -1316,7 +1316,8 @@ GUARANTEES = [
     ("the chain gate runs in a detached throwaway worktree, removed whatever happened; doctor names a leftover", "run_gate (finally) + cmd_doctor", "! no leftover chain-gate worktree: leftover <path>", True),
     ("no merge of a plan whose chain failed the gate, unless --force", "cmd_merge (--plan)", "the plan's chain failed the gate at #N", True),
     ("lint flags text/data contradictions", "cmd_lint", "CONTRADICTION: ...", True),
-    ("per-repo gh account token, global login untouched", "Repo._env", "GH_TOKEN per call", False),
+    ("per-repo gh account token, global login untouched", "Repo._env", "GH_TOKEN per call", True),
+    ("an epic follows sub-issues and blockers into other repos; plan --slug creates there", "tree + candidates, cmd_plan", "keys owner/name#N, gh -R owner/name", True),
     ("every run is logged", "log_run", "~/.config/setwave/log.jsonl", False),
     ("the script never force-pushes, resets, stashes, or deletes", "by absence", "grep the source for 'force', 'reset --hard', 'stash', 'rm -rf': zero hits", True),
 ]
