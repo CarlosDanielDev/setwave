@@ -1,0 +1,12 @@
+{
+  "name": "setwave",
+  "owner": { "name": "Carlos Daniel", "url": "https://github.com/CarlosDanielDev" },
+  "plugins": [
+    {
+      "name": "setwave",
+      "source": "./",
+      "description": "Drive a GitHub epic to merged PRs wave by wave, with one Claude Code agent per git worktree.",
+      "version": "0.1.0"
+    }
+  ]
+}
