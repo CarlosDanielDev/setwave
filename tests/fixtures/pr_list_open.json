@@ -88,5 +88,41 @@
     "body": "A notice row above the body.",
     "mergeable": "MERGEABLE",
     "url": "https://github.com/o/r/pull/26"
+  },
+  {
+    "number": 27,
+    "title": "PR 27",
+    "headRefName": "feat/50-other",
+    "baseRefName": "main",
+    "body": "Adds o.txt.\n\nCloses #50",
+    "mergeable": "MERGEABLE",
+    "url": "https://github.com/o/r/pull/27"
+  },
+  {
+    "number": 28,
+    "title": "PR 28",
+    "headRefName": "feat/51-commit-only",
+    "baseRefName": "main",
+    "body": "Adds p.txt.",
+    "mergeable": "MERGEABLE",
+    "url": "https://github.com/o/r/pull/28"
+  },
+  {
+    "number": 29,
+    "title": "PR 29",
+    "headRefName": "feat/52-both",
+    "baseRefName": "main",
+    "body": "Adds q.txt.\n\nCloses #52",
+    "mergeable": "MERGEABLE",
+    "url": "https://github.com/o/r/pull/29"
+  },
+  {
+    "number": 30,
+    "title": "PR 30",
+    "headRefName": "feat/52-both",
+    "baseRefName": "main",
+    "body": "Adds q.txt.\n\nCloses #52\n\nAlso fixes: o/r#61, which nobody meant to close.",
+    "mergeable": "MERGEABLE",
+    "url": "https://github.com/o/r/pull/30"
   }
 ]

@@ -158,7 +158,7 @@ class MergePointsAtResolve(unittest.TestCase):
             with self.subTest(pr=n):
                 p = run_wave("merge", str(n), "--yes", cwd=M)
                 self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
-                self.assertIn(f"wave resolve o/m#{n}", p.stdout)
+                self.assertIn(f"`wave resolve` on PR o/m#{n}", p.stdout)
 
 
 if __name__ == "__main__":

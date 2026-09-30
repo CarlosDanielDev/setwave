@@ -83,6 +83,11 @@ def sandbox() -> Path:
     commit_on("t/locked", "locked/k.txt", "k\n")
     # the global config is a throwaway one, so no commit-msg hook strips this trailer: verify must see it
     commit_on("t/trailer", "t.txt", "t\n", "Add t.txt\n\nCo-Authored-By: Claude <noreply@anthropic.com>")
+    # closing keywords GitHub reads in commit messages at merge: one quotes a hint that closes another issue,
+    # one closes its own issue only there, one says it in both places
+    commit_on("feat/50-other", "o.txt", "o\n", "Add o.txt\n\nCloses #50\n\nThe old hint read: `wave resolve o/r#60`.")
+    commit_on("feat/51-commit-only", "p.txt", "p\n", "Add p.txt\n\nCloses #51")
+    commit_on("feat/52-both", "q.txt", "q\n", "Add q.txt\n\nCloses: #52")
     (TMP / "r-5").mkdir()  # the worktree path of #5: its existence is the fact `candidates` reads
     (TMP / "config").mkdir()
     (TMP / "config" / "repos.json").write_text(json.dumps({"search_paths": [str(TMP)], "repos": {"o/r": {"path": str(CLONE)}}}))
