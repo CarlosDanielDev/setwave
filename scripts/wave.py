@@ -1431,6 +1431,8 @@ GUARANTEES = [
     ("an epic follows sub-issues and blockers into other repos; plan --slug creates there", "tree + candidates, cmd_plan", "keys owner/name#N, gh -R owner/name", True),
     ("every run is logged", "log_run", "~/.config/setwave/log.jsonl", False),
     ("the script never force-pushes, resets, stashes, or deletes", "by absence", "grep the source for 'force', 'reset --hard', 'stash', 'rm -rf': zero hits", True),
+    ("the e2e run writes only to a sandbox: never the plugin's own repo, a name without -sandbox only with --any-repo", "scripts/e2e.py check_target", "e2e refused: ...", True),
+    ("the e2e fake agent pushes only its issue's own branch, never the base", "scripts/fake_agent.py check_branch", "<branch> is not the branch of #N", True),
 ]
 
 
@@ -1439,10 +1441,11 @@ def cmd_guarantees(default: Repo | None, a):
     # the one guarantee this command proves by itself: no command line in this file is a forbidden git operation.
     # Only argument lists are scanned (a token in quotes next to its verb), so prose and this table do not count.
     forbidden = [('"push"', '--force'), ('"reset"', '"--hard"'), ('"stash"',), ('"clean"', '"-f'), ('"branch"', '"-D"'), ('"rm"', '"-rf"'), ('"gc"', '--prune'), ('"reflog"', '"expire"')]
-    for i, line in enumerate(Path(__file__).read_text().splitlines(), 1):
-        for combo in forbidden:
-            if all(tok in line for tok in combo) and "forbidden = [" not in line:
-                raise SystemExit(f"line {i} builds a forbidden git command: {line.strip()}")
+    for src in sorted(HERE.glob("*.py")):  # wave.py and the scripts beside it: e2e.py, fake_agent.py
+        for i, line in enumerate(src.read_text().splitlines(), 1):
+            for combo in forbidden:
+                if all(tok in line for tok in combo) and "forbidden = [" not in line:
+                    raise SystemExit(f"{src.name} line {i} builds a forbidden git command: {line.strip()}")
     rows = [(g, w, h, t) for g, w, h, t in GUARANTEES]
     if a.json:
         print(json.dumps([{"guard": g, "enforced_by": w, "visible_as": h, "tested": t} for g, w, h, t in rows], indent=2)); return

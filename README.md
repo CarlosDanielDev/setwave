@@ -149,7 +149,7 @@ From the epic this was built on ([CarlosDanielDev/dev-cleaner#77](https://github
 | semantic conflicts (not predictable textually) | 1, caught by the base branch's CI |
 | `wave next` vs. the hand-picked next wave | 9 / 9 |
 
-What is *not* measured: cross-repo and multi-account on a real epic (tests pin them against a fake `gh`, [#7](https://github.com/CarlosDanielDev/setwave/issues/7)), a merge driven end to end by `merge --plan --yes` ([#9](https://github.com/CarlosDanielDev/setwave/issues/9)). `wave stats` accumulates yours.
+What is *not* measured: cross-repo and multi-account on a real epic (tests pin them against a fake `gh`, [#7](https://github.com/CarlosDanielDev/setwave/issues/7)). A merge driven end to end by `merge --plan --yes` has run once, on a sandbox: [Proving it](#proving-it). `wave stats` accumulates yours.
 
 ## Roadmap — v0.4.0, [epic #1](https://github.com/CarlosDanielDev/setwave/issues/1)
 
@@ -166,6 +166,31 @@ The plugin runs on itself: the epic was created by `wave plan`, and `/setwave:wa
 - [#10](https://github.com/CarlosDanielDev/setwave/issues/10) `wave epics`: every open epic across your repos, and what is ready
 - [#11](https://github.com/CarlosDanielDev/setwave/issues/11) `wave adopt`: an existing milestone or label becomes an epic
 - [#12](https://github.com/CarlosDanielDev/setwave/issues/12) the Done-when ledger, refused by `verify` when missing and applied by `merge`
+
+## Proving it
+
+`scripts/e2e.py` runs the whole loop against a real repository, every step through `wave` itself: `plan` an epic of three leaves from `tests/e2e-plan/`, `dispatch` them, `scripts/fake_agent.py` plays each agent (the change its issue's `fake-agent` block asks for, a commit with `Closes #N`, a push, a PR), `verify --epic`, `order` (two leaves both append to `app.py`, so the chain names the one that will conflict), `order --plan` and `merge --plan --yes --wait-base-ci` for the others, `wave resolve` on the conflicting one (it stops on the conflict, by design), the fake agent keeps both sides, `resolve --continue` gates and pushes, `merge` for it, then `close-parents --include-epic`, `cleanup` and `status --post`. Each step is timed, and a step that exits other than expected stops the run and names what is left open.
+
+Against your own sandbox, once:
+
+```bash
+gh repo create <you>/setwave-sandbox --private --add-readme
+gh repo clone <you>/setwave-sandbox ~/projects/setwave-sandbox
+cd ~/projects/setwave-sandbox
+echo '"""The setwave sandbox."""' > app.py
+echo '{"base": "main", "gate": ["python3 -m py_compile app.py"]}' > .wave.json
+# plus .github/workflows/ci.yml running `python3 -m py_compile app.py` on pull_request and on push to main:
+# `merge` merges only on green checks
+git add . && git commit -m "Give the sandbox a gate" && git push
+```
+
+Then, each run:
+
+```bash
+python3 scripts/e2e.py ~/projects/setwave-sandbox
+```
+
+Running it is your OK for the merges it makes, in that repository only: it refuses the plugin's own repository always, and a repository whose name does not end in `-sandbox` unless `--any-repo`. The sandbox is persistent: nothing is ever deleted, each run adds an epic, its PRs and its lines to `wave stats`, and that history is the evidence. CI does not run it: it needs a real account.
 
 ## Developing
 
@@ -210,9 +235,12 @@ A guard is only as good as the test that fails without it: when you add one, rem
 .wave.json                      this repo's own gate and serial files
 skills/wave/SKILL.md            the orchestrator procedure Claude follows
 scripts/wave.py                 the deterministic steps (stdlib only)
+scripts/e2e.py                  one end-to-end run against a sandbox repository
+scripts/fake_agent.py           the agent the e2e run plays: change, commit, push, PR; keeps both sides of a conflict
 templates/agent.md              the per-issue prompt handed to each agent
 templates/issue-contract.md     what an issue must carry
 tests/                          the suite: a fake gh, recorded fixtures, a temporary git repo
+tests/e2e-plan/                 the epic e2e.py plans each run: three leaves, two arranged to conflict
 .github/workflows/ci.yml        the suite and the guarantees on Ubuntu and macOS
 ```
 
