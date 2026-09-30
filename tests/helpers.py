@@ -89,9 +89,9 @@ def sandbox() -> Path:
     return CLONE
 
 
-def run_wave(*args) -> subprocess.CompletedProcess:
-    """`wave.py <args>` as a user runs it, from inside the clone, against the fake gh."""
-    return subprocess.run([sys.executable, str(WAVE), *args], cwd=sandbox(), capture_output=True, text=True)
+def run_wave(*args, cwd=None) -> subprocess.CompletedProcess:
+    """`wave.py <args>` as a user runs it, from inside the clone (or `cwd`), against the fake gh."""
+    return subprocess.run([sys.executable, str(WAVE), *args], cwd=cwd or sandbox(), capture_output=True, text=True)
 
 
 def gh_calls() -> list[list[str]]:

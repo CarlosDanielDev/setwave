@@ -31,7 +31,7 @@ From inside a checkout of the repo you want to work on. `wave` below means `pyth
 wave doctor
 ```
 
-Every ✗ is something a wave would trip on: `gh` not logged in, tracked changes in your main checkout (the plugin never works there), no real gate. `wave facts` shows what was discovered — remote, base branch, gate commands read from your CI, protected paths. If the gate is incomplete (a CI step that is an *action* rather than a `run:` line is not seen yet, [#3](https://github.com/CarlosDanielDev/setwave/issues/3)), declare it once:
+Every ✗ is something a wave would trip on: `gh` not logged in, tracked changes in your main checkout (the plugin never works there), no real gate. `wave facts` shows what was discovered — remote, base branch, gate commands read from your CI, protected paths. `facts` names where each command came from (`run:`, `uses:`, manifest, or config); a CI step that is an action the plugin does not know is a `!` in `doctor` until you list it under `ignore_actions` in `.wave.json`. If the gate is incomplete, declare it once:
 
 ```bash
 wave repos add . --gate "cargo fmt --check" "cargo test" --protected src/safety

@@ -34,6 +34,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from fnmatch import fnmatch
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -47,6 +48,16 @@ BRANCH_IN_BODY = re.compile(r"git worktree add -b\s+(\S+)")
 CODEGRAPH_IN_BODY = re.compile(r'codegraph explore "([^"]+)"')
 REF = re.compile(r"^(?:(?P<slug>[\w.-]+/[\w.-]+))?#?(?P<n>\d+)$")
 ORIGIN = re.compile(r"[:/]([^/:]+)/([^/]+?)(?:\.git)?/?$")
+# CI steps that are actions: the ones that are gates in practice, and the command each runs. Keys are
+# lowercase `owner/repo` without `@ref`. An action in neither table is named by `doctor`, never guessed.
+GATE_ACTIONS = {
+    "embarkstudios/cargo-deny-action": "cargo deny check",
+    "golangci/golangci-lint-action": "golangci-lint run",
+    "actions-rs/clippy-check": "cargo clippy --all-targets -- -D warnings",
+}
+# setup and plumbing, not gates (fnmatch patterns); a repo adds its own with `ignore_actions` in .wave.json
+IGNORE_ACTIONS = ["actions/checkout", "actions/setup-*", "actions/cache", "actions/cache/*", "actions/upload-artifact",
+                  "actions/download-artifact", "dtolnay/rust-toolchain", "swatinem/rust-cache"]
 
 
 # ---------------------------------------------------------------- plumbing
@@ -214,19 +225,48 @@ class Repo:
             return p.parent.resolve() / f"{p.name}{n}"
         return self.root.parent / f"{self.root.name}-{n}"
 
-    def gate(self) -> list[str]:
-        if self.cfg.get("gate"):
-            return list(self.cfg["gate"])
-        cmds: list[str] = []
+    def ci_gate(self) -> tuple[list[tuple[str, str]], list[str]]:
+        """The gate commands CI runs, each with its source (`run:` or `uses:`), and the `uses:` steps that
+        neither GATE_ACTIONS nor the ignore list (IGNORE_ACTIONS + `ignore_actions`) knows: only the owner can say what those run."""
+        cmds: list[tuple[str, str]] = []
+        unknown: list[str] = []
+        own = self.cfg.get("ignore_actions", [])
+        ignore = [p.lower() for p in IGNORE_ACTIONS + ([own] if isinstance(own, str) else list(own))]  # a bare string is one pattern, not its letters
         wf_dir = self.root / ".github" / "workflows"
         for wf in sorted(wf_dir.glob("*.y*ml")) if wf_dir.exists() else []:
             for line in wf.read_text().splitlines():
-                m = re.match(r"\s*(?:-\s*)?run:\s*(.+?)\s*$", line)
-                if m and re.match(r"(cargo|npm|pnpm|yarn|bun|pytest|python -m|uv run|go |make|mix|gradle|\./gradlew|swift|xcodebuild|dotnet|flutter|dart)", m.group(1)):
-                    if m.group(1) not in cmds:
-                        cmds.append(m.group(1))
+                m = re.match(r"\s*(?:-\s*)?(run|uses):\s*(.+?)\s*$", line)
+                if not m:
+                    continue
+                kind, val = m.groups()
+                if kind == "run":
+                    if re.match(r"(cargo|npm|pnpm|yarn|bun|pytest|python -m|uv run|go |make|mix|gradle|\./gradlew|swift|xcodebuild|dotnet|flutter|dart)", val) and val not in [c for c, _ in cmds]:
+                        cmds.append((val, "run:"))
+                    continue
+                action = re.sub(r"\s+#.*$", "", val).strip("'\"")
+                name = action.split("@")[0].lower()
+                if name.startswith("./.github/workflows/"):
+                    continue  # a local reusable workflow: its file is in wf_dir and is read on its own
+                if name in GATE_ACTIONS:
+                    if GATE_ACTIONS[name] not in [c for c, _ in cmds]:
+                        cmds.append((GATE_ACTIONS[name], "uses:"))
+                elif not any(fnmatch(name, p) or fnmatch(action.lower(), p) for p in ignore) and action not in unknown:
+                    unknown.append(action)
+        return cmds, unknown
+
+    def gate(self) -> list[str]:
+        return [c for c, _ in self.gate_sources()]
+
+    def gate_sources(self) -> list[tuple[str, str]]:
+        """(command, source): source is `config` (.wave.json or the registry), `run:` or `uses:` (CI), or `manifest`."""
+        if self.cfg.get("gate"):
+            return [(c, "config") for c in self.cfg["gate"]]
+        cmds = self.ci_gate()[0]
         if cmds:
             return cmds
+        return [(c, "manifest" if not c.startswith("<") else "none") for c in self._manifest_gate()]
+
+    def _manifest_gate(self) -> list[str]:
         r = self.root
         if (r / "Cargo.toml").exists():
             return ["cargo fmt --check", "cargo clippy --all-targets -- -D warnings", "cargo test"]
@@ -481,7 +521,7 @@ def cmd_facts(default: Repo | None, a):
     repos = [Repo.get(s) for s in a.slugs] if a.slugs else [default] if default else []
     for r in repos:
         print(json.dumps({"slug": r.slug, "root": str(r.root), "account": r.account or "(active)", "base": r.base,
-                          "gate": r.gate(), "protected": r.protected, "codegraph": r.has_codegraph(),
+                          "gate": r.gate(), "gate_sources": dict(r.gate_sources()), "protected": r.protected, "codegraph": r.has_codegraph(),
                           "worktree_example": str(r.worktree(1)), "handoffs": str(r.handoffs)}, indent=2))
 
 
@@ -956,6 +996,8 @@ def cmd_doctor(default: Repo | None, a) -> None:
                        (f"{len(dirty.splitlines())} modified path(s)" if dirty else "clean") + (f", {untracked} untracked (fine)" if untracked else ""), True))
         gate = r.gate()
         checks.append(("gate is declared and real", bool(gate) and not gate[0].startswith("<"), " && ".join(gate), True))
+        for action in r.ci_gate()[1]:
+            checks.append((f"CI runs `{action}` and the gate does not", False, "if it is a gate step, declare its command in `.wave.json`; then add it to `ignore_actions`", False))
         checks.append(("protected paths declared", bool(r.protected), ", ".join(r.protected) or "none: verify cannot guard anything — `repos add . --protected <paths>`", False))
         r.fetch()
         merged = {l.strip().replace("origin/", "") for l in r.git(["branch", "-r", "--merged", f"origin/{r.base}"]).splitlines()}
@@ -1000,6 +1042,7 @@ GUARANTEES = [
     ("no merge of a PR that verify rejects", "cmd_merge -> verify_one", "attribution, protected, CI, contradictions re-checked at merge time", False),
     ("no merge before CI is green, one PR at a time", "cmd_merge", "waits for checks, stops on FAILED", False),
     ("base CI red after a merge stops the queue", "cmd_merge --wait-base-ci", "exit 4 with the semantic-conflict note", False),
+    ("doctor names every CI action the gate does not cover", "cmd_doctor -> Repo.ci_gate", "! CI runs `x/y@v1` and the gate does not", True),
     ("no dispatch when doctor finds a hard failure", "cmd_dispatch -> cmd_doctor", "dispatch refused", False),
     ("no dispatch of an issue that is not READY", "cmd_dispatch -> premises_for", "refusal lists the failed premises", False),
     ("an existing worktree is kept, never recreated", "cmd_dispatch", "prints 'worktree exists'", False),
