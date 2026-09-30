@@ -104,10 +104,11 @@ class Agents(unittest.TestCase):
         self.assertIn("changed 45 min ago", rows[9])
         self.assertIn("PR #20", rows[4])
 
-    def test_inside_a_worktree_it_says_where_to_run_it(self):
+    def test_inside_a_worktree_it_lists_the_siblings_too(self):
         p = run_wave("agents", cwd=TMP / "l-9")
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertIn("this is a linked worktree: run `wave agents` from the main checkout", p.stdout)
+        rows = {int(l.split()[0].split("#")[1]) for l in p.stdout.splitlines() if l.startswith("  o/l#")}
+        self.assertTrue({4, 9, 10, 11, 12} <= rows, p.stdout)
 
 
 class Doctor(unittest.TestCase):
