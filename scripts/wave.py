@@ -209,7 +209,8 @@ class Repo:
     def worktree(self, n: int) -> Path:
         prefix = self.cfg.get("worktree_prefix")
         if prefix:
-            p = (self.root / prefix)
+            p = Path(prefix).expanduser()
+            p = p if p.is_absolute() else (self.root / p)
             return p.parent.resolve() / f"{p.name}{n}"
         return self.root.parent / f"{self.root.name}-{n}"
 
@@ -451,7 +452,7 @@ def cmd_repos(default: Repo | None, a):
         slug = a.slug or slug_of_url(sh(["git", "remote", "get-url", "origin"], cwd=root))
         entry = reg["repos"].setdefault(slug, {})
         entry["path"] = str(root)
-        for k in ("account", "base"):
+        for k in ("account", "base", "worktree_prefix"):
             if getattr(a, k):
                 entry[k] = getattr(a, k)
         if a.gate:
@@ -1114,7 +1115,7 @@ def main(argv=None):
     s = p.add_subparsers(dest="cmd", required=True)
 
     x = s.add_parser("repos", help="registry: list | add <path> [--slug] [--account] [--base] [--gate ...] [--protected ...] | scan")
-    x.add_argument("action", choices=["list", "add", "scan"]); x.add_argument("path", nargs="?"); x.add_argument("--slug"); x.add_argument("--account"); x.add_argument("--base"); x.add_argument("--gate", nargs="*"); x.add_argument("--protected", nargs="*")
+    x.add_argument("action", choices=["list", "add", "scan"]); x.add_argument("path", nargs="?"); x.add_argument("--slug"); x.add_argument("--account"); x.add_argument("--base"); x.add_argument("--worktree-prefix", help="where worktrees go, e.g. ~/kyte-worktrees/demeter-  (default ../<repo>-)"); x.add_argument("--gate", nargs="*"); x.add_argument("--protected", nargs="*")
     x = s.add_parser("facts", help="what was discovered about repos"); x.add_argument("slugs", nargs="*")
     x = s.add_parser("next", help="leaf issues ready to dispatch"); x.add_argument("epic"); x.add_argument("--batch", type=int, default=4); x.add_argument("--json", action="store_true")
     x = s.add_parser("dispatch", help="create worktrees + prompt files (runs doctor and refuses issues that are not READY)"); x.add_argument("issues", nargs="+"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--force", action="store_true")
