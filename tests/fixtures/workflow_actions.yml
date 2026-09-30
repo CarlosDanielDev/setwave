@@ -1,0 +1,17 @@
+# A CI workflow for tests/test_gate.py: gate steps as `run:` lines and as actions.
+name: ci
+on: [push]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+      - name: secrets
+        uses: "acme/secret-lint@v1"  # no command the gate knows
+  shared:
+    uses: ./.github/workflows/shared.yml
