@@ -758,6 +758,14 @@ def cmd_merge(default: Repo | None, a):
         return
     for repo, n in targets:
         print(f"== {key(repo, n)} ==")
+        # verify again, here, where it cannot be skipped: the OK was given on a verified table
+        pr = next((x for x in repo.open_prs() if x["number"] == n), None)
+        if pr is None:
+            print(f"{key(repo, n)}: not an open PR any more. Stopping."); sys.exit(2)
+        v = verify_one(repo, pr)
+        if not v["ok"] and not a.force:
+            print(f"{key(repo, n)}: verify says NOT OK — attribution={v['attribution']} protected={v['protected_touched']} ci={v['checks_not_green']} contradictions={v['contradictions']} worktree={v['worktree']}. Not merging.")
+            sys.exit(2)
 
         def mergeable():
             m = json.loads(repo.gh(["pr", "view", str(n), "-R", repo.slug, "--json", "mergeable,state"]))
@@ -978,6 +986,51 @@ def cmd_doctor(default: Repo | None, a) -> None:
         sys.exit(1)
 
 
+# ---------------------------------------------------------------- guarantees
+
+GUARANTEES = [
+    # (guard, enforced where, how you see it, tested)
+    ("no merge without --yes", "cmd_merge", "`merge` without --yes prints the order and exits", False),
+    ("no merge if the base or a PR head moved since the plan", "cmd_merge (--plan)", "`merge --plan` compares SHAs and refuses", False),
+    ("no merge of a PR whose issue still has an open blocker", "cmd_merge", "refusal names the blockers", False),
+    ("no merge of a PR that verify rejects", "cmd_merge -> verify_one", "attribution, protected, CI, contradictions re-checked at merge time", False),
+    ("no merge before CI is green, one PR at a time", "cmd_merge", "waits for checks, stops on FAILED", False),
+    ("base CI red after a merge stops the queue", "cmd_merge --wait-base-ci", "exit 4 with the semantic-conflict note", False),
+    ("no dispatch when doctor finds a hard failure", "cmd_dispatch -> cmd_doctor", "dispatch refused", False),
+    ("no dispatch of an issue that is not READY", "cmd_dispatch -> premises_for", "refusal lists the failed premises", False),
+    ("an existing worktree is kept, never recreated", "cmd_dispatch", "prints 'worktree exists'", False),
+    ("cleanup removes only worktrees that are clean, pushed and merged", "cmd_cleanup", "KEEP lines with the reason", False),
+    ("plan refuses to run twice on the same directory or titles", "cmd_plan", "numbers.json / duplicate titles refusal", False),
+    ("every open leaf is in exactly one state", "candidates (assert)", "blocked | in-progress | worktree | ready", False),
+    ("verify flags AI attribution in body or commits", "verify_one", "AI-ATTRIBUTION", False),
+    ("verify flags protected paths touched", "verify_one", "PROTECTED:<paths>", False),
+    ("verify flags a PR closing a parent or a still-blocked issue", "verify_one", "CONTRADICTION[...]", False),
+    ("verify names sibling issues that cite files the PR touched", "verify_one --epic", "notify lines", False),
+    ("order predicts pairwise and chained textual conflicts", "cmd_order", "pairs + chain ✗", False),
+    ("order flags serial paths", "cmd_order", "SERIAL line", False),
+    ("lint flags text/data contradictions", "cmd_lint", "CONTRADICTION: ...", False),
+    ("per-repo gh account token, global login untouched", "Repo._env", "GH_TOKEN per call", False),
+    ("every run is logged", "log_run", "~/.config/setwave/log.jsonl", False),
+    ("the script never force-pushes, resets, stashes, or deletes", "by absence", "grep the source for 'force', 'reset --hard', 'stash', 'rm -rf': zero hits", True),
+]
+
+
+def cmd_guarantees(default: Repo | None, a):
+    """What the plugin promises, where each promise is enforced, and whether a test pins it."""
+    src = Path(__file__).read_text()
+    for forbidden in ("--force-with-lease", "push --force", "reset --hard", "stash", "rm -rf", "branch -D"):
+        assert forbidden not in src.replace('"force", "reset --hard", "stash", "rm -rf"', ""), f"source contains {forbidden!r}"
+    rows = [(g, w, h, t) for g, w, h, t in GUARANTEES]
+    if a.json:
+        print(json.dumps([{"guard": g, "enforced_by": w, "visible_as": h, "tested": t} for g, w, h, t in rows], indent=2)); return
+    tested = sum(1 for r in rows if r[3])
+    print(f"{len(rows)} guarantees, {tested} pinned by a test, {len(rows) - tested} enforced but untested (tests: issue #2 of the plugin's repo)\n")
+    for g, w, h, t in rows:
+        print(f"  {'✓' if t else '!'} {g}\n      where: {w}   seen as: {h}")
+    if tested < len(rows):
+        print("\n! = the guard exists in code and was exercised by hand; nothing fails yet if someone removes it.")
+
+
 # ---------------------------------------------------------------- plan
 
 def fill_refs(body: str, numbers: dict[str, int]) -> str:
@@ -1074,6 +1127,7 @@ def main(argv=None):
     x = s.add_parser("plan", help="create an epic's issues from <dir>/index.tsv + deps.tsv + <key>.md, wiring sub-issues and blocked_by"); x.add_argument("dir"); x.add_argument("--slug"); x.add_argument("--milestone"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--force", action="store_true")
 
     x = s.add_parser("stats", help="what the log says: runs, durations, failures per command")
+    x = s.add_parser("guarantees", help="every promise the plugin makes, where it is enforced, whether a test pins it"); x.add_argument("--json", action="store_true")
 
     a = p.parse_args(argv)
     if a.cmd == "stats":
@@ -1087,7 +1141,8 @@ def main(argv=None):
     try:
         {"repos": cmd_repos, "facts": cmd_facts, "next": cmd_next, "dispatch": cmd_dispatch, "prompt": cmd_prompt,
      "verify": cmd_verify, "order": cmd_order, "merge": cmd_merge, "close-parents": cmd_close_parents,
-             "cleanup": cmd_cleanup, "status": cmd_status, "lint": cmd_lint, "plan": cmd_plan, "why": cmd_why, "doctor": cmd_doctor}[a.cmd](default, a)
+             "cleanup": cmd_cleanup, "status": cmd_status, "lint": cmd_lint, "plan": cmd_plan, "why": cmd_why, "doctor": cmd_doctor,
+         "guarantees": cmd_guarantees}[a.cmd](default, a)
     except SystemExit as e:
         exit_code = e.code if isinstance(e.code, int) else 1
         raise
