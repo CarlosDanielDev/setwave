@@ -1,0 +1,8 @@
+[
+  {"number": 40, "title": "PR 40", "headRefName": "t/clean", "baseRefName": "main", "body": "Adds c.txt.", "mergeable": "MERGEABLE", "url": "https://github.com/o/m/pull/40"},
+  {"number": 41, "title": "PR 41", "headRefName": "t/conflict", "baseRefName": "main", "body": "Line one becomes mine.", "mergeable": "CONFLICTING", "url": "https://github.com/o/m/pull/41"},
+  {"number": 42, "title": "PR 42", "headRefName": "t/dirty", "baseRefName": "main", "body": "Its worktree has an uncommitted change.", "mergeable": "MERGEABLE", "url": "https://github.com/o/m/pull/42"},
+  {"number": 43, "title": "PR 43", "headRefName": "t/red", "baseRefName": "main", "body": "Adds the file the gate refuses.", "mergeable": "MERGEABLE", "url": "https://github.com/o/m/pull/43"},
+  {"number": 44, "title": "PR 44", "headRefName": "t/late", "baseRefName": "main", "body": "Listed as mergeable, conflicting by the time merge asks.", "mergeable": "MERGEABLE", "url": "https://github.com/o/m/pull/44"},
+  {"number": 45, "title": "PR 45", "headRefName": "t/behind", "baseRefName": "main", "body": "Someone pushed to it after its worktree last pulled.", "mergeable": "MERGEABLE", "url": "https://github.com/o/m/pull/45"}
+]

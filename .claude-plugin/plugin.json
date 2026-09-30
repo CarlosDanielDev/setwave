@@ -1,7 +1,7 @@
 {
   "name": "setwave",
   "description": "Drive a GitHub epic to merged PRs wave by wave: worktree per issue, one Claude Code agent per worktree, verification before relaying, merge only on the owner's explicit OK. State lives in GitHub and git, never in the chat. Any repo, any account, any stack.",
-  "version": "0.3.13",
+  "version": "0.3.14",
   "author": {
     "name": "Carlos Daniel",
     "url": "https://github.com/CarlosDanielDev"

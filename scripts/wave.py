@@ -1015,7 +1015,8 @@ def cmd_merge(default: Repo | None, a):
             print(f"{key(repo, n)}: not an open PR any more. Stopping."); sys.exit(2)
         v = verify_one(repo, pr)
         if not v["ok"] and not a.force:
-            print(f"{key(repo, n)}: verify says NOT OK — attribution={v['attribution']} protected={v['protected_touched']} ci={v['checks_not_green']} contradictions={v['contradictions']} worktree={v['worktree']}. Not merging.")
+            print(f"{key(repo, n)}: verify says NOT OK — attribution={v['attribution']} protected={v['protected_touched']} ci={v['checks_not_green']} contradictions={v['contradictions']} worktree={v['worktree']}. Not merging."
+                  + (f" It conflicts with {repo.base}: `wave resolve {key(repo, n)}`, then rerun merge from here." if v["mergeable"] == "CONFLICTING" else ""))
             sys.exit(2)
 
         def mergeable():
@@ -1026,7 +1027,7 @@ def cmd_merge(default: Repo | None, a):
 
         m = wait_for(mergeable, 180, 5)
         if m != "MERGEABLE":
-            print(f"{key(repo, n)}: {m}. In its worktree: `git merge --no-edit origin/{repo.base}`, resolve, run the gate, `git commit --no-edit`, `git push` (never --force), comment on the PR, then rerun merge from here.")
+            print(f"{key(repo, n)}: {m}." + (f" `wave resolve {key(repo, n)}` merges {repo.base} into its branch in its worktree, gates and pushes (never --force); then rerun merge from here." if m == "CONFLICTING" else ""))
             sys.exit(2)
 
         def ci():
@@ -1056,6 +1057,112 @@ def cmd_merge(default: Repo | None, a):
             if r not in ("success", None):
                 print("base branch CI is red after this merge: a semantic conflict. Fix forward before merging more.")
                 sys.exit(4)
+
+
+CONFLICT_START = re.compile(r"^<{7}(?: |$)")
+CONFLICT_END = re.compile(r"^>{7}(?: |$)")
+
+
+def conflict_hunks(path: Path) -> list[tuple[int, int]]:
+    """The 1-based line ranges, markers included, of every conflict git left in a file."""
+    hunks, start = [], None
+    for i, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
+        if CONFLICT_START.match(line):
+            start = i
+        elif CONFLICT_END.match(line) and start:
+            hunks.append((start, i))
+            start = None
+    return hunks
+
+
+def pr_worktree(repo: Repo, head: str) -> Path | None:
+    """The worktree that has the PR's branch checked out, whatever its path."""
+    wt = None
+    for line in repo.git(["worktree", "list", "--porcelain"]).splitlines():
+        if line.startswith("worktree "):
+            wt = Path(line[len("worktree "):])
+        elif line == f"branch refs/heads/{head}":
+            return wt
+    return None
+
+
+def cmd_resolve(default: Repo | None, a):
+    """Merge the base into a PR's branch in its worktree, gate the result, push without force, comment on the PR.
+    A conflict is left in the worktree for a human; `--continue` picks up after the hand resolution."""
+    repo, n = parse_ref(a.pr, default)
+    pr = next((x for x in repo.open_prs() if x["number"] == n), None)
+    if pr is None:
+        raise SystemExit(f"{key(repo, n)}: no open PR with that number")
+    head, base = pr["headRefName"], pr.get("baseRefName") or repo.base
+    wt = pr_worktree(repo, head)
+    if wt is None:
+        raise SystemExit(f"{key(repo, n)}: no worktree has {head} checked out; create one (`git worktree add <path> {head}`) and rerun")
+    repo.fetch()
+    base_sha = repo.git(["rev-parse", f"origin/{base}"]).strip()
+    merging = repo.git_ok(["rev-parse", "-q", "--verify", "MERGE_HEAD"], cwd=wt)[0]
+    if not a.cont:
+        # a merge only ever starts from a clean tree: whatever is uncommitted belongs to someone, and is never stashed
+        if merging:
+            raise SystemExit(f"{wt}: a merge is already in progress; finish it by hand, then `wave resolve {key(repo, n)} --continue`")
+        dirty = repo.git(["status", "--porcelain"], cwd=wt).strip()
+        if dirty:
+            raise SystemExit(f"{wt} has uncommitted changes; commit or move them yourself, then rerun (resolve never stashes):\n{dirty}")
+        if not repo.git_ok(["merge-base", "--is-ancestor", f"origin/{head}", "HEAD"], cwd=wt)[0]:
+            raise SystemExit(f"{wt}: {head} lacks commits that are on origin/{head}; `git pull --ff-only` there first, so the push stays a fast-forward")
+        before = repo.git(["rev-parse", "HEAD"], cwd=wt).strip()
+        rc, out, err = run(["git", "merge", "--no-edit", f"origin/{base}"], cwd=wt, env=repo.env)
+        if rc != 0:
+            files = repo.git(["diff", "--name-only", "--diff-filter=U"], cwd=wt).splitlines()
+            if not files:
+                raise SystemExit(f"git merge failed in {wt}:\n{(out + err).strip()}")
+            print(f"{key(repo, n)}: merging origin/{base} ({base_sha[:7]}) into {head} conflicts in {wt}:")
+            for f in files:
+                ranges = ", ".join(f"{s}-{e}" for s, e in conflict_hunks(wt / f))
+                print(f"  {f}: lines {ranges}" if ranges else f"  {f}: no text markers (a delete, rename or binary conflict)")
+            print(f"resolve by hand, then `wave resolve {key(repo, n)} --continue`")
+            sys.exit(2)
+        if repo.git(["rev-parse", "HEAD"], cwd=wt).strip() == before:
+            print(f"{key(repo, n)}: {head} already contains origin/{base} ({base_sha[:7]}); nothing to merge or push")
+            return
+    else:
+        unmerged = repo.git(["diff", "--name-only", "--diff-filter=U"], cwd=wt).splitlines()
+        if unmerged:
+            raise SystemExit(f"{wt}: still unmerged: {', '.join(unmerged)}. Resolve and `git add` them, then rerun --continue")
+        # `git add` clears the unmerged state whether or not the markers are gone: check the text itself, against HEAD
+        changed = repo.git(["diff", "--name-only", "HEAD"], cwd=wt).splitlines()
+        marked = [f for f in changed if (wt / f).is_file() and conflict_hunks(wt / f)]
+        ok, check = repo.git_ok(["diff", "--check", "HEAD"], cwd=wt)
+        if marked or (not ok and "conflict marker" in check):
+            where = ", ".join(marked) or check.strip()
+            raise SystemExit(f"{wt}: conflict markers remain ({where}). Resolve them, `git add`, rerun --continue")
+        loose = [l for l in repo.git(["status", "--porcelain"], cwd=wt).splitlines() if l[1] != " "]
+        if loose:
+            raise SystemExit(f"{wt}: changes not staged; `git add` what belongs to the resolution, then rerun --continue:\n" + "\n".join(loose))
+        if merging:
+            repo.git(["commit", "-q", "--no-edit"], cwd=wt)
+        elif not repo.git_ok(["merge-base", "--is-ancestor", f"origin/{base}", "HEAD"], cwd=wt)[0]:
+            raise SystemExit(f"{wt}: no merge in progress and HEAD does not contain origin/{base}; run `wave resolve {key(repo, n)}` first")
+    # the gate runs on the commit about to be pushed, in a throwaway worktree: what is gated is exactly what is pushed
+    gate = repo.gate()
+    if not gate or gate[0].startswith("<"):
+        raise SystemExit(f"{repo.slug}: resolve needs a declared gate, found: {gate}")
+    sha = repo.git(["rev-parse", "HEAD"], cwd=wt).strip()
+    g = run_gate(repo, sha, gate)
+    if not g["ok"]:
+        print(f"{key(repo, n)}: the merge of origin/{base} is committed in {wt} but fails the gate at `{g['command']}`; nothing pushed.\n"
+              + "\n".join("    " + l for l in g["tail"].splitlines())
+              + f"\nfix it there, commit, then `wave resolve {key(repo, n)} --continue`")
+        sys.exit(3)
+    ok, msg = repo.git_ok(["push", "origin", f"HEAD:refs/heads/{head}"], cwd=wt)  # plain push: a rejection stops here
+    if not ok:
+        raise SystemExit(f"{key(repo, n)}: push of {head} rejected (someone pushed meanwhile?); nothing forced:\n{msg.strip()}")
+    body = (f"merged `{base}` at `{base_sha[:7]}` into this branch; gate: " + ", ".join(f"`{c}`" for c in gate)
+            + f" green on `{sha[:7]}` in {g['seconds']}s")
+    ok, msg = repo.gh_ok(["pr", "comment", str(n), "-R", repo.slug, "--body", body])
+    if not ok:
+        raise SystemExit(f"{key(repo, n)}: pushed {sha[:7]} to {head}, but the PR comment failed ({msg.strip()}).\n"
+                         f"`wave resolve {key(repo, n)} --continue` posts it again, or post by hand: {body}")
+    print(f"{key(repo, n)}: pushed {sha[:7]} to {head}; commented: {body}")
 
 
 def cmd_close_parents(default: Repo | None, a):
@@ -1315,6 +1422,10 @@ GUARANTEES = [
     ("order --run-gate names the first chain step whose tree fails the gate, and not a step when the base is red", "cmd_order -> gate_chain", "gate: #N✗ + first failing step", True),
     ("the chain gate runs in a detached throwaway worktree, removed whatever happened; doctor names a leftover", "run_gate (finally) + cmd_doctor", "! no leftover chain-gate worktree: leftover <path>", True),
     ("no merge of a plan whose chain failed the gate, unless --force", "cmd_merge (--plan)", "the plan's chain failed the gate at #N", True),
+    ("resolve refuses a dirty worktree before merging the base in; it never stashes", "cmd_resolve", "<worktree> has uncommitted changes", True),
+    ("resolve leaves a conflict for a human, naming files and line ranges", "cmd_resolve -> conflict_hunks", "exit 2: f.txt: lines 1-5", True),
+    ("resolve --continue refuses leftover conflict markers, even once staged", "cmd_resolve --continue", "conflict markers remain", True),
+    ("resolve pushes only a gated commit, with a plain push", "cmd_resolve -> run_gate", "exit 3 and nothing pushed on a red gate", True),
     ("lint flags text/data contradictions", "cmd_lint", "CONTRADICTION: ...", True),
     ("per-repo gh account token, global login untouched", "Repo._env", "GH_TOKEN per call", True),
     ("an epic follows sub-issues and blockers into other repos; plan --slug creates there", "tree + candidates, cmd_plan", "keys owner/name#N, gh -R owner/name", True),
@@ -1433,6 +1544,7 @@ def main(argv=None):
     x = s.add_parser("verify", help="check PRs: attribution, protected paths, CI, mergeability, worktree"); x.add_argument("prs", nargs="*"); x.add_argument("--epic"); x.add_argument("--json", action="store_true")
     x = s.add_parser("order", help="pairwise merge-tree -> merge order, per repo"); x.add_argument("prs", nargs="*"); x.add_argument("--epic"); x.add_argument("--json", action="store_true"); x.add_argument("--plan", help="write the approved delta (base sha + PR heads + order) to this file"); x.add_argument("--run-gate", action="store_true", help="run the repo's gate on the tree after each step of the chain, in a throwaway worktree: names the PR that turns it red")
     x = s.add_parser("merge", help="merge PRs in order, one at a time, CI green before each"); x.add_argument("prs", nargs="*"); x.add_argument("--yes", action="store_true"); x.add_argument("--plan", help="plan file from `order --plan`: refuses if the base or any PR head moved since"); x.add_argument("--force", action="store_true"); x.add_argument("--squash", action="store_true"); x.add_argument("--ci-timeout", type=int, default=1200); x.add_argument("--wait-base-ci", action="store_true")
+    x = s.add_parser("resolve", help="merge the base into a conflicting PR's branch in its worktree, gate, push (never --force), comment; a conflict is left for you, then --continue"); x.add_argument("pr"); x.add_argument("--continue", dest="cont", action="store_true")
     x = s.add_parser("close-parents", help="close parents whose sub-issues are all closed"); x.add_argument("epic"); x.add_argument("--include-epic", action="store_true"); x.add_argument("--dry-run", action="store_true")
     x = s.add_parser("cleanup", help="remove worktrees that are clean, pushed and merged"); x.add_argument("slugs", nargs="*"); x.add_argument("--dry-run", action="store_true")
     x = s.add_parser("status", help="tree with states; --post comments it on the epic"); x.add_argument("epic"); x.add_argument("--post", action="store_true")
@@ -1453,7 +1565,7 @@ def main(argv=None):
     t0 = time.time(); exit_code = 0
     try:
         {"repos": cmd_repos, "facts": cmd_facts, "next": cmd_next, "dispatch": cmd_dispatch, "prompt": cmd_prompt,
-     "verify": cmd_verify, "order": cmd_order, "merge": cmd_merge, "close-parents": cmd_close_parents,
+     "verify": cmd_verify, "order": cmd_order, "merge": cmd_merge, "resolve": cmd_resolve, "close-parents": cmd_close_parents,
              "cleanup": cmd_cleanup, "status": cmd_status, "lint": cmd_lint, "plan": cmd_plan, "why": cmd_why, "doctor": cmd_doctor,
              "agents": cmd_agents,
          "guarantees": cmd_guarantees}[a.cmd](default, a)
