@@ -1017,9 +1017,13 @@ GUARANTEES = [
 
 def cmd_guarantees(default: Repo | None, a):
     """What the plugin promises, where each promise is enforced, and whether a test pins it."""
-    src = Path(__file__).read_text()
-    for forbidden in ("--force-with-lease", "push --force", "reset --hard", "stash", "rm -rf", "branch -D"):
-        assert forbidden not in src.replace('"force", "reset --hard", "stash", "rm -rf"', ""), f"source contains {forbidden!r}"
+    # the one guarantee this command proves by itself: no command line in this file is a forbidden git operation.
+    # Only argument lists are scanned (a token in quotes next to its verb), so prose and this table do not count.
+    forbidden = [('"push"', '--force'), ('"reset"', '"--hard"'), ('"stash"',), ('"clean"', '"-f'), ('"branch"', '"-D"'), ('"rm"', '"-rf"'), ('"gc"', '--prune'), ('"reflog"', '"expire"')]
+    for i, line in enumerate(Path(__file__).read_text().splitlines(), 1):
+        for combo in forbidden:
+            if all(tok in line for tok in combo) and "forbidden = [" not in line:
+                raise SystemExit(f"line {i} builds a forbidden git command: {line.strip()}")
     rows = [(g, w, h, t) for g, w, h, t in GUARANTEES]
     if a.json:
         print(json.dumps([{"guard": g, "enforced_by": w, "visible_as": h, "tested": t} for g, w, h, t in rows], indent=2)); return
