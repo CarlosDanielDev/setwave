@@ -990,8 +990,8 @@ def fill_refs(body: str, numbers: dict[str, int]) -> str:
 def cmd_plan(default: Repo | None, a):
     """Create an epic's issues from a directory: <dir>/index.tsv, <dir>/deps.tsv, <dir>/<key>.md.
 
-    index.tsv:  key<TAB>title<TAB>labels(comma or -)<TAB>parent-key-or-'-'   (parents before children)
-    deps.tsv:   blocked-key<TAB>blocker-key
+    index.tsv:  key<TAB>title<TAB>labels(comma or -)<TAB>parent   (parent = a key created earlier, '#12' for an existing issue, or '-')
+    deps.tsv:   blocked-key<TAB>blocker   (blocker = a key, or '#12' for an existing issue)
     Bodies may reference issues as {{key}} (-> #N) or {{key.n}} (-> N, for branch names); filled once every issue exists.
     Creates in order, links sub-issues, wires blocked_by, applies --milestone, writes numbers.json.
     """
@@ -1033,10 +1033,12 @@ def cmd_plan(default: Repo | None, a):
         ids[k] = repo.issue(n)["id"]
         print(f"{k} -> #{n}")
         if parent and parent != "-":
-            repo.api(f"repos/{repo.slug}/issues/{numbers[parent]}/sub_issues", "POST", {"sub_issue_id": ids[k]})
+            parent_n = int(parent[1:]) if parent.startswith("#") else numbers[parent]   # "#12" = an existing issue
+            repo.api(f"repos/{repo.slug}/issues/{parent_n}/sub_issues", "POST", {"sub_issue_id": ids[k]})
     for blocked, blocker in deps:
-        repo.api(f"repos/{repo.slug}/issues/{numbers[blocked]}/dependencies/blocked_by", "POST", {"issue_id": ids[blocker]})
-        print(f"#{numbers[blocked]} blocked by #{numbers[blocker]}")
+        blocker_id = repo.issue(int(blocker[1:]))["id"] if blocker.startswith("#") else ids[blocker]   # "#12" = existing
+        repo.api(f"repos/{repo.slug}/issues/{numbers[blocked]}/dependencies/blocked_by", "POST", {"issue_id": blocker_id})
+        print(f"#{numbers[blocked]} blocked by {blocker if blocker.startswith('#') else '#' + str(numbers[blocker])}")
     for k, title, labels, parent in rows:  # bodies that referenced later issues get their numbers now
         body = (d / f"{k}.md").read_text()
         if re.search(r"\{\{[\w.]+\}\}", body):
