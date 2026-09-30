@@ -1,8 +1,7 @@
 {
   "base": "main",
   "gate": [
-    "python3 -m py_compile scripts/wave.py",
-    "python3 scripts/wave.py --help",
+    "python3 -m unittest discover -s tests -v",
     "python3 scripts/wave.py guarantees"
   ],
   "protected": [],

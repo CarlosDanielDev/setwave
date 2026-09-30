@@ -1,0 +1,10 @@
+{
+  "id": 1006,
+  "number": 6,
+  "title": "Closed leaf",
+  "state": "closed",
+  "body": "Closes #9\n\n## Handoff\n\n```bash\ngit worktree add -b feat/99-x ../r-99 origin/main\n```\n",
+  "labels": [],
+  "html_url": "https://github.com/o/r/issues/6",
+  "repository_url": "https://api.github.com/repos/o/r"
+}

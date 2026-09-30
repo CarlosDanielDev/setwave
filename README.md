@@ -154,7 +154,30 @@ The plugin runs on itself: the epic was created by `wave plan`, and `/setwave:wa
 
 ## Developing
 
-Today the gate is `python3 -m py_compile scripts/wave.py && python3 scripts/wave.py --help` (declared in this repo's `.wave.json`); the test suite and CI are [#2](https://github.com/CarlosDanielDev/setwave/issues/2). Stdlib only, on purpose: the plugin installs nothing. The version lives in both `.claude-plugin/*.json` (they are `serial`: one PR at a time). Releases are tags `vX.Y.Z` on `main` with notes.
+The gate, declared in this repo's `.wave.json` and run by CI on Ubuntu and macOS (`.github/workflows/ci.yml`):
+
+```bash
+python3 -m unittest discover -s tests -v
+python3 scripts/wave.py guarantees
+```
+
+Stdlib only, tests included: nothing to install. The suite runs offline. `tests/helpers.py` builds a temporary bare remote `o/r` and a clone with branches that conflict and branches that do not, points the registry and the run log at that directory, and puts `tests/bin/gh` first on `PATH`: a fake `gh` that answers from `tests/fixtures/*.json`, keyed by the request, and refuses anything that would write to GitHub.
+
+| request | fixture |
+| --- | --- |
+| `gh api repos/o/r/issues/1/sub_issues?per_page=100` | `repos_o_r_issues_1_sub_issues.json` (the path, query dropped, `/` → `_`) |
+| `gh pr list --state open …` | `pr_list_open.json` |
+| `gh pr checks 20 …` / `gh pr view 20 …` | `pr_checks_20.json` / `pr_view_20.json` |
+| `gh issue list …` / `gh repo view …` | `issue_list.json` / `repo_view.json` |
+
+A missing fixture answers like an unknown path on GitHub (exit 1): for `…/dependencies/blocked_by` that means "no blockers". To record a fixture from a real repo, save the same request, then rename `OWNER/REPO` to `o/r` in the file name and in the content (`repository_url`, `html_url`) so it matches the sandbox:
+
+```bash
+gh api 'repos/OWNER/REPO/issues/42/sub_issues?per_page=100' > tests/fixtures/repos_o_r_issues_42_sub_issues.json
+gh pr list -R OWNER/REPO --state open --json number,title,headRefName,baseRefName,body,mergeable,url > tests/fixtures/pr_list_open.json
+```
+
+A guard is only as good as the test that fails without it: when you add one, remove it once, watch a test fail, restore it, and flip its row in `GUARANTEES` to tested. The version lives in both `.claude-plugin/*.json` (they are `serial`: one PR at a time). Releases are tags `vX.Y.Z` on `main` with notes.
 
 ## Lessons baked in
 
@@ -174,6 +197,8 @@ skills/wave/SKILL.md            the orchestrator procedure Claude follows
 scripts/wave.py                 the deterministic steps (stdlib only)
 templates/agent.md              the per-issue prompt handed to each agent
 templates/issue-contract.md     what an issue must carry
+tests/                          the suite: a fake gh, recorded fixtures, a temporary git repo
+.github/workflows/ci.yml        the suite and the guarantees on Ubuntu and macOS
 ```
 
 MIT.

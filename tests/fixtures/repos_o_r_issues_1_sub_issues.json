@@ -1,0 +1,62 @@
+[
+  {
+    "id": 1002,
+    "number": 2,
+    "title": "Ready leaf",
+    "state": "open",
+    "body": "Parent: #1\n\nThe fix lives in `scripts/wave.py`, in `parse_ref`.\n\n## Done when\n\n- [ ] it works\n\n## Handoff\n\n```bash\ngit worktree add -b feat/2-ready ../r-2 origin/main\n```\n",
+    "labels": [],
+    "html_url": "https://github.com/o/r/issues/2",
+    "repository_url": "https://api.github.com/repos/o/r"
+  },
+  {
+    "id": 1003,
+    "number": 3,
+    "title": "Blocked leaf",
+    "state": "open",
+    "body": "Parent: #1\n\nDepends on #2.",
+    "labels": [],
+    "html_url": "https://github.com/o/r/issues/3",
+    "repository_url": "https://api.github.com/repos/o/r"
+  },
+  {
+    "id": 1004,
+    "number": 4,
+    "title": "Leaf with an open PR",
+    "state": "open",
+    "body": "",
+    "labels": [],
+    "html_url": "https://github.com/o/r/issues/4",
+    "repository_url": "https://api.github.com/repos/o/r"
+  },
+  {
+    "id": 1005,
+    "number": 5,
+    "title": "Leaf with a worktree",
+    "state": "open",
+    "body": "",
+    "labels": [],
+    "html_url": "https://github.com/o/r/issues/5",
+    "repository_url": "https://api.github.com/repos/o/r"
+  },
+  {
+    "id": 1006,
+    "number": 6,
+    "title": "Closed leaf",
+    "state": "closed",
+    "body": "Closes #9\n\n## Handoff\n\n```bash\ngit worktree add -b feat/99-x ../r-99 origin/main\n```\n",
+    "labels": [],
+    "html_url": "https://github.com/o/r/issues/6",
+    "repository_url": "https://api.github.com/repos/o/r"
+  },
+  {
+    "id": 1007,
+    "number": 7,
+    "title": "Leaf whose only blocker is closed",
+    "state": "open",
+    "body": "",
+    "labels": [],
+    "html_url": "https://github.com/o/r/issues/7",
+    "repository_url": "https://api.github.com/repos/o/r"
+  }
+]
