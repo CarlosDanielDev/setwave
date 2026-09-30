@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""A stand-in for `gh` that answers from tests/fixtures/*.json, keyed by the request.
+
+  gh api [-X GET] repos/o/r/issues/1/sub_issues?per_page=100   -> repos_o_r_issues_1_sub_issues.json
+  gh pr list --state open ...                                   -> pr_list_open.json
+  gh pr checks 20 ...                                           -> pr_checks_20.json
+  gh pr view 20 ...                                             -> pr_view_20.json
+  gh issue list ...                                             -> issue_list.json
+  gh repo view ...                                              -> repo_view.json
+
+A missing fixture answers like GitHub does for an unknown path: exit 1. Anything that would
+write (a non-GET api call, pr merge, issue create/edit/close/comment) is refused with exit 97,
+so a test notices a command that tried to change GitHub. Every call is appended to
+$FAKE_GH_LOG, one JSON list per line, when that variable is set.
+"""
+import json
+import os
+import sys
+from pathlib import Path
+
+FIXTURES = Path(os.environ.get("FAKE_GH_FIXTURES", Path(__file__).resolve().parent.parent / "fixtures"))
+
+
+def answer(name: str, slurp: bool = False) -> int:
+    f = FIXTURES / name
+    if not f.exists():
+        print(f"fake gh: no fixture {name} (HTTP 404)", file=sys.stderr)
+        return 1
+    data = json.loads(f.read_text())
+    print(json.dumps([data] if slurp else data))
+    return 0
+
+
+def main(args: list[str]) -> int:
+    if os.environ.get("FAKE_GH_LOG"):
+        with open(os.environ["FAKE_GH_LOG"], "a") as log:
+            log.write(json.dumps(args) + "\n")
+    if args[:2] == ["auth", "status"]:
+        print("Logged in to github.com (fake gh)")
+        return 0
+    if args and args[0] == "api":
+        # like gh itself: a field without -X makes the call a POST
+        method = "POST" if any(x in ("-f", "-F", "--field", "--raw-field") for x in args) else "GET"
+        path, rest = None, args[1:]
+        i = 0
+        while i < len(rest):
+            if rest[i] == "-X":
+                method = rest[i + 1]; i += 2
+            elif rest[i] in ("-f", "-F"):
+                i += 2
+            elif rest[i].startswith("-"):
+                i += 1
+            else:
+                path = path or rest[i]; i += 1
+        if method != "GET":
+            print(f"fake gh: refusing {method} {path}", file=sys.stderr)
+            return 97
+        return answer(path.split("?")[0].strip("/").replace("/", "_") + ".json", slurp="--slurp" in args)
+    if args[:2] == ["pr", "list"]:
+        return answer(f"pr_list_{args[args.index('--state') + 1]}.json")
+    if args[:2] in (["pr", "checks"], ["pr", "view"]):
+        return answer(f"pr_{args[1]}_{args[2]}.json")
+    if args[:2] == ["issue", "list"]:
+        return answer("issue_list.json")
+    if args[:2] == ["repo", "view"]:
+        return answer("repo_view.json")
+    print(f"fake gh: refusing {' '.join(args)}", file=sys.stderr)
+    return 97
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -42,7 +42,7 @@ CONFIG_DIR = Path(os.environ.get("SETWAVE_CONFIG", Path.home() / ".config" / "se
 REGISTRY = CONFIG_DIR / "repos.json"
 
 ATTRIBUTION = re.compile(r"co-authored-by:\s*claude|generated with \[?claude code|noreply@anthropic\.com", re.I)
-CLOSES = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+(?:([\w.-]+/[\w.-]+))?#(\d+)\b", re.I)
+CLOSES = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?::\s*|\s+)(?:([\w.-]+/[\w.-]+))?#(\d+)\b", re.I)
 BRANCH_IN_BODY = re.compile(r"git worktree add -b\s+(\S+)")
 CODEGRAPH_IN_BODY = re.compile(r'codegraph explore "([^"]+)"')
 REF = re.compile(r"^(?:(?P<slug>[\w.-]+/[\w.-]+))?#?(?P<n>\d+)$")
@@ -385,9 +385,10 @@ def candidates(nodes: dict[str, dict]) -> list[dict]:
                     "blocked_by": blockers, "pr": pr["number"] if pr else None,
                     "worktree": str(wt) if wt.exists() else None, "state": state,
                     "ready": state == "ready"})
-    # every open leaf is in exactly one state: the categories are exhaustive and exclusive by construction,
-    # and this assertion is what keeps a later edit from making them overlap
-    assert all(sum([bool(c["blocked_by"]), bool(c["pr"]), bool(c["worktree"]), c["ready"]]) >= 1 for c in out)
+    # every open leaf is in exactly one state: `state` is a single value, so the states cannot overlap;
+    # what a later edit could break is READY, so READY must mean "nothing else holds", and nothing less
+    assert all(c["ready"] == (not c["blocked_by"] and not c["pr"] and not c["worktree"]) for c in out), \
+        [c["key"] for c in out if c["ready"] != (not c["blocked_by"] and not c["pr"] and not c["worktree"])]
     return out
 
 
@@ -993,9 +994,9 @@ def cmd_doctor(default: Repo | None, a) -> None:
 
 GUARANTEES = [
     # (guard, enforced where, how you see it, tested)
-    ("no merge without --yes", "cmd_merge", "`merge` without --yes prints the order and exits", False),
+    ("no merge without --yes", "cmd_merge", "`merge` without --yes prints the order and exits", True),
     ("no merge if the base or a PR head moved since the plan", "cmd_merge (--plan)", "`merge --plan` compares SHAs and refuses", False),
-    ("no merge of a PR whose issue still has an open blocker", "cmd_merge", "refusal names the blockers", False),
+    ("no merge of a PR whose issue still has an open blocker", "cmd_merge", "refusal names the blockers", True),
     ("no merge of a PR that verify rejects", "cmd_merge -> verify_one", "attribution, protected, CI, contradictions re-checked at merge time", False),
     ("no merge before CI is green, one PR at a time", "cmd_merge", "waits for checks, stops on FAILED", False),
     ("base CI red after a merge stops the queue", "cmd_merge --wait-base-ci", "exit 4 with the semantic-conflict note", False),
@@ -1004,14 +1005,14 @@ GUARANTEES = [
     ("an existing worktree is kept, never recreated", "cmd_dispatch", "prints 'worktree exists'", False),
     ("cleanup removes only worktrees that are clean, pushed and merged", "cmd_cleanup", "KEEP lines with the reason", False),
     ("plan refuses to run twice on the same directory or titles", "cmd_plan", "numbers.json / duplicate titles refusal", False),
-    ("every open leaf is in exactly one state", "candidates (assert)", "blocked | in-progress | worktree | ready", False),
-    ("verify flags AI attribution in body or commits", "verify_one", "AI-ATTRIBUTION", False),
-    ("verify flags protected paths touched", "verify_one", "PROTECTED:<paths>", False),
-    ("verify flags a PR closing a parent or a still-blocked issue", "verify_one", "CONTRADICTION[...]", False),
+    ("every open leaf is in exactly one state", "candidates (assert)", "blocked | in-progress | worktree | ready", True),
+    ("verify flags AI attribution in body or commits", "verify_one", "AI-ATTRIBUTION", True),
+    ("verify flags protected paths touched", "verify_one", "PROTECTED:<paths>", True),
+    ("verify flags a PR closing a parent or a still-blocked issue", "verify_one", "CONTRADICTION[...]", True),
     ("verify names sibling issues that cite files the PR touched", "verify_one --epic", "notify lines", False),
-    ("order predicts pairwise and chained textual conflicts", "cmd_order", "pairs + chain ✗", False),
-    ("order flags serial paths", "cmd_order", "SERIAL line", False),
-    ("lint flags text/data contradictions", "cmd_lint", "CONTRADICTION: ...", False),
+    ("order predicts pairwise and chained textual conflicts", "cmd_order", "pairs + chain ✗", True),
+    ("order flags serial paths", "cmd_order", "SERIAL line", True),
+    ("lint flags text/data contradictions", "cmd_lint", "CONTRADICTION: ...", True),
     ("per-repo gh account token, global login untouched", "Repo._env", "GH_TOKEN per call", False),
     ("every run is logged", "log_run", "~/.config/setwave/log.jsonl", False),
     ("the script never force-pushes, resets, stashes, or deletes", "by absence", "grep the source for 'force', 'reset --hard', 'stash', 'rm -rf': zero hits", True),
@@ -1031,7 +1032,7 @@ def cmd_guarantees(default: Repo | None, a):
     if a.json:
         print(json.dumps([{"guard": g, "enforced_by": w, "visible_as": h, "tested": t} for g, w, h, t in rows], indent=2)); return
     tested = sum(1 for r in rows if r[3])
-    print(f"{len(rows)} guarantees, {tested} pinned by a test, {len(rows) - tested} enforced but untested (tests: issue #2 of the plugin's repo)\n")
+    print(f"{len(rows)} guarantees, {tested} pinned by a test, {len(rows) - tested} enforced but untested (tests: `python3 -m unittest discover -s tests -v`)\n")
     for g, w, h, t in rows:
         print(f"  {'✓' if t else '!'} {g}\n      where: {w}   seen as: {h}")
     if tested < len(rows):
