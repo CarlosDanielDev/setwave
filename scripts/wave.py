@@ -913,8 +913,10 @@ def cmd_lint(default: Repo | None, a):
             missing.append(f"CONTRADICTION: body closes {closes} but this is #{n}")
         if repo.sub_issues(n) and "## Handoff" in body and n != getattr(a, "epic", 0):
             missing.append("a parent with a Handoff block: parents are never dispatched; move the handoff to the leaves")
-        if not re.search(r"\b[\w./-]+\.(rs|ts|tsx|js|py|go|swift|kt|rb|php|cs|java):\d+", body):
-            missing.append("no `file:line` evidence")
+        has_line = re.search(r"\b[\w./-]+\.(rs|ts|tsx|js|py|go|swift|kt|rb|php|cs|java|yml|yaml|toml|json):\d+", body)
+        has_symbol = re.search(r"`[\w./-]+\.(rs|ts|tsx|js|py|go|swift|kt|rb|php|cs|java)`[^\n]{0,80}`[A-Za-z_][\w.]*`", body)
+        if not (has_line or has_symbol):
+            missing.append("no evidence: neither `file:line` nor `file` + `symbol`")
         problems += bool(missing)
         print(f"{key(repo, n)}: " + ("ok" if not missing else "; ".join(missing)))
     sys.exit(1 if problems else 0)
