@@ -74,7 +74,8 @@ The last status comment on the epic is the paper trail. A single view across all
 
 | Step | Command (Claude runs these from inside the repo) | Who decides |
 | --- | --- | --- |
-| preflight | `wave doctor` — gh, git ≥ 2.38, clean checkout, real gate, protected paths, orphan and leftover worktrees, disk for the batch; `dispatch` refuses on ✗ | the script |
+| preflight | `wave doctor` — gh, git ≥ 2.38, clean checkout, real gate, protected paths, dead-agent and leftover worktrees, disk for the batch; `dispatch` refuses on ✗ | the script |
+| watch agents | `wave agents` — every issue worktree: minutes since dispatch, minutes since the newest change, open PR, and a verdict (`working`, `quiet`, `likely dead`, `done`); `doctor` names the likely dead with their recovery | files and git, never processes |
 | discover | `wave facts` — remote, base branch, gate from CI or manifest, protected paths | the repo |
 | find the wave | `wave next <epic> --batch 4` — every open leaf in exactly one state: blocked, in progress, worktree, ready | GitHub |
 | explain | `wave why <issue>` — the premises behind READY / NOT READY, with evidence | the script |
