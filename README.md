@@ -83,11 +83,12 @@ The last status comment on the epic is the paper trail. A single view across all
 | verify | `wave verify <PR> --epic <epic>` — no AI attribution, protected paths untouched, CI green, worktree clean and pushed, no contradictions (branch number ≠ closed issue, PR closing a parent or a still-blocked issue); names sibling issues that cite files the PR touched | the script |
 | order | `wave order --epic <epic> --plan p.json` — pairwise `git merge-tree`, a chain simulation naming the step that will conflict, `serial` paths flagged, the delta pinned to a file; `--run-gate` runs the gate on the tree after each step, in a throwaway worktree, and names the first PR that turns it red (`merge --plan` then refuses without `--force`) | the script |
 | merge | `wave merge --plan p.json --yes --wait-base-ci` — refuses if the base or a PR head moved since the OK, refuses a still-blocked issue, one at a time, CI green before each, stops at the first conflict | **you**, with an explicit OK on that exact plan |
+| resolve | `wave resolve <PR>` — merges the base into the PR's branch in its worktree, gates the commit, plain push, PR comment; a conflict stops with files and line ranges, `--continue` after you fix it | the script; **you** resolve the conflict |
 | close out | `wave close-parents`, `wave cleanup`, `wave status --post` | the script |
 | plan an epic | `wave plan <dir>` — issues from bodies + `index.tsv` + `deps.tsv`; links, wires, fills references; refuses to run twice | the audit session writes the bodies |
 | measure | `wave stats` — every run logged to `~/.config/setwave/log.jsonl` | the log |
 
-Conflicts are resolved by merging the base branch *into* the PR's branch and pushing normally. Never a force push. Never `--auto`. (`wave resolve`, which automates the clean half of that, is [#8](https://github.com/CarlosDanielDev/setwave/issues/8).)
+Conflicts are resolved by merging the base branch *into* the PR's branch and pushing normally. Never a force push. Never `--auto`. `wave resolve <PR>` does that in the PR's worktree: a clean merge is gated and pushed, and the PR gets a comment naming the base SHA; a conflicting one is left in place with each file's line ranges, for you to resolve and hand back with `wave resolve <PR> --continue`, which refuses leftover conflict markers. A dirty worktree is refused, never stashed.
 
 ## Any repo, any account, any stack
 
