@@ -165,6 +165,10 @@ class Repo:
         if not ok:
             raise SystemExit("not inside a git repo; pass --repo <path> or use owner/name#N refs")
         root = Path(top.strip())
+        # inside a linked worktree the toplevel is the worktree: the registry names the main checkout, the one
+        # the common git dir belongs to, so a command run in a worktree never re-points it (a submodule keeps its toplevel)
+        common = (root / sh(["git", "rev-parse", "--git-common-dir"], cwd=root).strip()).resolve()
+        root = common.parent if common.name == ".git" else root
         slug = slug_of_url(sh(["git", "remote", "get-url", "origin"], cwd=root))
         if not slug:
             raise SystemExit("cannot parse origin url")
@@ -1320,8 +1324,6 @@ def cmd_agents(default: Repo | None, a):
         print(f"  {key(default, lv['issue']):<24} {Path(lv['worktree']).name:<20} "
               f"dispatched {'?' if lv['age_min'] is None else lv['age_min']} min ago   changed {lv['idle_min']} min ago   "
               f"{'PR #' + str(lv['pr']) if lv['pr'] else 'no PR':<8} {lv['verdict']}")
-    if not rows and (default.root / ".git").is_file():
-        print("  (this is a linked worktree: run `wave agents` from the main checkout to see its siblings)")
 
 
 def cmd_doctor(default: Repo | None, a) -> None:
@@ -1453,6 +1455,7 @@ GUARANTEES = [
     ("resolve --continue refuses leftover conflict markers, even once staged", "cmd_resolve --continue", "conflict markers remain", True),
     ("resolve pushes only a gated commit, with a plain push", "cmd_resolve -> run_gate", "exit 3 and nothing pushed on a red gate", True),
     ("lint flags text/data contradictions", "cmd_lint", "CONTRADICTION: ...", True),
+    ("a command run inside a worktree never re-points the registry: it names the main checkout", "Repo.from_cwd (--git-common-dir)", "repos.json path stays the main checkout; a worktree or missing path is repaired to it", True),
     ("per-repo gh account token, global login untouched", "Repo._env", "GH_TOKEN per call", True),
     ("an epic follows sub-issues and blockers into other repos; plan --slug creates there", "tree + candidates, cmd_plan", "keys owner/name#N, gh -R owner/name", True),
     ("every run is logged", "log_run", "~/.config/setwave/log.jsonl", False),
