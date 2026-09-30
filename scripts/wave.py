@@ -33,6 +33,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -69,6 +70,8 @@ STAMP = ".setwave.json"  # written by dispatch into each worktree, excluded from
 MAX_BATCH = 6
 # a registry package in Cargo.lock: name, version, then a registry or sparse-index source (git and path packages are not cached there)
 LOCK_PACKAGE = re.compile(r'\[\[package\]\]\s*\nname = "([^"]+)"\s*\nversion = "([^"]+)"\s*\nsource = "(?:registry|sparse)\+')
+# `order --run-gate` checks each simulated step out into a detached worktree named so; `doctor` reports any it finds
+CHAIN_GATE_PREFIX = "setwave-chain-gate-"
 
 
 # ---------------------------------------------------------------- plumbing
@@ -842,19 +845,23 @@ def cmd_order(default: Repo | None, a):
                 if any(f.startswith(sp) for f in files for sp in serial_paths):
                     serial_prs.append(n)
         # chain simulation: merge in the suggested order and report where the accumulated tree conflicts
-        chain = []
-        acc = repo.git(["rev-parse", base]).strip()
+        chain, trees = [], []  # trees: the accumulated commit after each step, None where the step conflicted
+        acc = base_sha = repo.git(["rev-parse", base]).strip()
         for n in order:
             rc, out, err = run(["git", "merge-tree", "--write-tree", acc, heads[n]], cwd=repo.root, env=repo.env)
             if rc == 0:
                 acc = repo.git(["commit-tree", out.strip(), "-p", acc, "-p", repo.git(["rev-parse", heads[n]]).strip(), "-m", f"sim {n}"]).strip()
                 chain.append((n, []))
+                trees.append(acc)
             else:
                 chain.append((n, sorted(set(re.findall(r"Merge conflict in (.+)", out + err))) or ["<conflict>"]))
+                trees.append(None)
         result[slug] = {"order": order, "pairs": {f"{x}x{y}": v for (x, y), v in pairs.items()}, "against_base": against_base,
                         "serial": serial_prs, "chain": chain,
-                        "base_sha": repo.git(["rev-parse", base]).strip(),
+                        "base_sha": base_sha,
                         "heads": {n: repo.git(["rev-parse", heads[n]]).strip() for n in nums}}
+        if a.run_gate:
+            result[slug]["chain_gate"] = gate_chain(repo, base_sha, order, trees, sys.stderr if a.json else sys.stdout)
         if not a.json:
             print(f"== {slug} (base {base}) ==")
             for n in nums:
@@ -868,13 +875,91 @@ def cmd_order(default: Repo | None, a):
                 print(f"  SERIAL (touch {', '.join(serial_paths)}): {' '.join(f'#{n}' for n in serial_prs)} — one after the other, in their issues' blocked_by order, never in one batch")
             print("  order: " + " -> ".join(f"{slug}#{n}" for n in order))
             print("  chain: " + "  ".join(f"#{n}✓" if not c else f"#{n}✗[{','.join(c)}]" for n, c in chain) + "   (✗ = merge the base into that branch right before merging it)")
+            cg = result[slug].get("chain_gate")
+            if cg:
+                skipped = sorted({st["skipped"] for st in cg["steps"] if st.get("skipped")})
+                print("  gate:  " + " ".join(f"#{st['pr']}" + {True: "✓", False: "✗", None: "·"}[st["ok"]] for st in cg["steps"])
+                      + (f"   (· = not run: {'; '.join(skipped)})" if skipped else ""))
+                bad = next((st for st in cg["steps"] if st["ok"] is False), None)
+                if cg["base_red"]:
+                    print(f"  {base} itself fails the gate (`{cg['base']['command']}`): no step can be blamed, fix the base first")
+                elif bad:
+                    print(f"  first failing step: #{bad['pr']} — `{bad['command']}`\n" + "\n".join("      " + l for l in bad["tail"].splitlines()))
     if a.plan:
         Path(a.plan).write_text(json.dumps({"made_at": now_iso(), "repos": result}, indent=2) + "\n")
         print(f"\nplan written to {a.plan} — show it, get the OK, then `merge --plan {a.plan} --yes`")
     if a.json:
         print(json.dumps(result, indent=2))
-    elif not a.plan:
-        print("\n(textual only — the base branch's CI after each merge is the truth for semantic conflicts)")
+    elif not a.plan and not a.run_gate:
+        print("\n(textual only — `--run-gate` runs the gate on every step; without it the base branch's CI after each merge is the truth for semantic conflicts)")
+
+
+def gate_seconds(slug: str) -> float | None:
+    """The newest measured gate run of a repo, from the run log."""
+    try:
+        lines = (CONFIG_DIR / "log.jsonl").read_text().splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if rec.get("cmd") == "gate" and rec.get("repo") == slug and rec.get("seconds"):
+            return float(rec["seconds"])
+    return None
+
+
+def run_gate(repo: Repo, sha: str, gate: list[str]) -> dict:
+    """Run the gate on `sha` in a detached throwaway worktree, never in a checkout anyone works in. The worktree is
+    removed whatever happened; only a killed process leaves one behind, and `doctor` names it."""
+    wt = Path(tempfile.mkdtemp(prefix=CHAIN_GATE_PREFIX))
+    t0 = time.time()
+    res = {"sha": sha, "ok": True, "command": None, "tail": ""}
+    try:
+        repo.git(["worktree", "add", "-q", "--detach", str(wt), sha])
+        for cmd in gate:
+            p = subprocess.run(cmd, shell=True, cwd=wt, text=True, capture_output=True)
+            if p.returncode != 0:
+                res.update(ok=False, command=cmd, tail="\n".join((p.stdout + p.stderr).splitlines()[-20:]))
+                break
+    finally:
+        # --force: the tree is ours, detached, and holds only what the gate wrote (build output, caches)
+        removed, why_not = repo.git_ok(["worktree", "remove", "--force", str(wt)])
+        if not removed and wt.exists() and not any(wt.iterdir()):
+            wt.rmdir()  # the add itself failed, so git never registered it
+        elif not removed:
+            print(f"could not remove {wt}: {why_not.strip()} — `wave doctor` lists it", file=sys.stderr)
+    res["seconds"] = round(time.time() - t0, 1)
+    append_log({"at": now_iso(), "cmd": "gate", "repo": repo.slug, "sha": sha, "seconds": res["seconds"], "exit": 0 if res["ok"] else 1})
+    return res
+
+
+def gate_chain(repo: Repo, base_sha: str, order: list[int], trees: list[str | None], say) -> dict:
+    """The gate on the tree after each step of the chain. The first red step is the culprit, unless the base is red too."""
+    gate = repo.gate()
+    if not gate or gate[0].startswith("<"):
+        raise SystemExit(f"{repo.slug}: --run-gate needs a declared gate, found: {gate}")
+    runs = sum(1 for t in trees if t)
+    last = gate_seconds(repo.slug)
+    print(f"{repo.slug}: {runs} gate run(s) ahead, " + (f"~{runs * last / 60:.1f} min at the last measured gate time ({last / 60:.1f} min per run)"
+          if last else "time unknown: no gate run measured yet for this repo, this one measures it"), file=say, flush=True)
+    steps, culprit, base_red, base = [], None, False, None
+    for n, sha in zip(order, trees):
+        if sha is None:
+            steps.append({"pr": n, "ok": None, "skipped": "textual conflict, not in the simulated tree"})
+        elif culprit or base_red:
+            steps.append({"pr": n, "sha": sha, "ok": None, "skipped": "after the first red step"})
+        else:
+            print(f"  gating #{n} ({sum(1 for x in steps if 'seconds' in x) + 1}/{runs}) ...", file=say, flush=True)
+            st = {"pr": n, **run_gate(repo, sha, gate)}
+            steps.append(st)
+            if not st["ok"]:
+                if not any(s["ok"] for s in steps[:-1]):  # nothing green before it: a red base would look the same
+                    base = run_gate(repo, base_sha, gate)
+                    base_red = not base["ok"]
+                culprit = None if base_red else n
+    return {"gate": gate, "steps": steps, "first_failure": culprit, "base_red": base_red, "base": base}
 
 
 def wait_for(fn, timeout: int, every: int = 10):
@@ -898,6 +983,10 @@ def cmd_merge(default: Repo | None, a):
             now_base = repo.git(["rev-parse", f"origin/{repo.base}"]).strip()
             if now_base != pl["base_sha"]:
                 raise SystemExit(f"{slug}: origin/{repo.base} moved since the plan ({pl['base_sha'][:7]} -> {now_base[:7]}). The OK was for that delta: re-run `order --plan` and ask again.")
+            cg = pl.get("chain_gate")
+            if cg and (cg["first_failure"] or cg["base_red"]) and not a.force:
+                where = f"#{cg['first_failure']}" if cg["first_failure"] else f"the base, origin/{repo.base}"
+                raise SystemExit(f"{slug}: the plan's chain failed the gate at {where}. Fix it there and re-run `order --run-gate --plan`, or pass --force and say why in the PR.")
             for n in pl["order"]:
                 pr = next((x for x in repo.open_prs() if x["number"] == n), None)
                 if not pr:
@@ -1155,6 +1244,9 @@ def cmd_doctor(default: Repo | None, a) -> None:
                         + " — resume the agent with `SendMessage` to its id, or "
                         + ", ".join(f"`wave dispatch --force {n}`" for _, n, _ in dead) + " to start over on top of what is there") if dead else "none", False))
         checks.append(("no leftover worktrees (merged or empty)", not stale, (", ".join(stale) + " — `wave cleanup`") if stale else "none", False))
+        gate_left = [w for w in re.findall(r"^worktree (.+)$", r.git(["worktree", "list", "--porcelain"]), re.M) if Path(w).name.startswith(CHAIN_GATE_PREFIX)]
+        checks.append(("no leftover chain-gate worktree (an interrupted `order --run-gate`)", not gate_left,
+                       "; ".join(f"leftover {w} — `git worktree remove --force {w}` (`git worktree prune` if the directory is gone)" for w in gate_left) or "none", False))
         if (r.root / "Cargo.lock").exists():
             home = cargo_home()
             checked, broken = broken_crates(r.root, home)
@@ -1220,6 +1312,9 @@ GUARANTEES = [
     ("verify names sibling issues that cite files the PR touched", "verify_one --epic", "notify lines", False),
     ("order predicts pairwise and chained textual conflicts", "cmd_order", "pairs + chain ✗", True),
     ("order flags serial paths", "cmd_order", "SERIAL line", True),
+    ("order --run-gate names the first chain step whose tree fails the gate, and not a step when the base is red", "cmd_order -> gate_chain", "gate: #N✗ + first failing step", True),
+    ("the chain gate runs in a detached throwaway worktree, removed whatever happened; doctor names a leftover", "run_gate (finally) + cmd_doctor", "! no leftover chain-gate worktree: leftover <path>", True),
+    ("no merge of a plan whose chain failed the gate, unless --force", "cmd_merge (--plan)", "the plan's chain failed the gate at #N", True),
     ("lint flags text/data contradictions", "cmd_lint", "CONTRADICTION: ...", True),
     ("per-repo gh account token, global login untouched", "Repo._env", "GH_TOKEN per call", False),
     ("every run is logged", "log_run", "~/.config/setwave/log.jsonl", False),
@@ -1335,7 +1430,7 @@ def main(argv=None):
     x = s.add_parser("agents", help="every issue worktree: age since dispatch, minutes since the newest change, PR, verdict (working | quiet | likely dead | done)")
     x = s.add_parser("prompt", help="print the agent prompt for one issue"); x.add_argument("issue"); x.add_argument("--parallel", type=int, default=4)
     x = s.add_parser("verify", help="check PRs: attribution, protected paths, CI, mergeability, worktree"); x.add_argument("prs", nargs="*"); x.add_argument("--epic"); x.add_argument("--json", action="store_true")
-    x = s.add_parser("order", help="pairwise merge-tree -> merge order, per repo"); x.add_argument("prs", nargs="*"); x.add_argument("--epic"); x.add_argument("--json", action="store_true"); x.add_argument("--plan", help="write the approved delta (base sha + PR heads + order) to this file")
+    x = s.add_parser("order", help="pairwise merge-tree -> merge order, per repo"); x.add_argument("prs", nargs="*"); x.add_argument("--epic"); x.add_argument("--json", action="store_true"); x.add_argument("--plan", help="write the approved delta (base sha + PR heads + order) to this file"); x.add_argument("--run-gate", action="store_true", help="run the repo's gate on the tree after each step of the chain, in a throwaway worktree: names the PR that turns it red")
     x = s.add_parser("merge", help="merge PRs in order, one at a time, CI green before each"); x.add_argument("prs", nargs="*"); x.add_argument("--yes", action="store_true"); x.add_argument("--plan", help="plan file from `order --plan`: refuses if the base or any PR head moved since"); x.add_argument("--force", action="store_true"); x.add_argument("--squash", action="store_true"); x.add_argument("--ci-timeout", type=int, default=1200); x.add_argument("--wait-base-ci", action="store_true")
     x = s.add_parser("close-parents", help="close parents whose sub-issues are all closed"); x.add_argument("epic"); x.add_argument("--include-epic", action="store_true"); x.add_argument("--dry-run", action="store_true")
     x = s.add_parser("cleanup", help="remove worktrees that are clean, pushed and merged"); x.add_argument("slugs", nargs="*"); x.add_argument("--dry-run", action="store_true")
@@ -1370,10 +1465,13 @@ def main(argv=None):
 
 def log_run(a, default: Repo | None, seconds: float, exit_code: int) -> None:
     """Append one line per run: the raw material for `stats`. Never fails the command."""
+    append_log({"at": now_iso(), "cmd": a.cmd, "args": [x for x in sys.argv[1:] if x != a.cmd], "repo": default.slug if default else None,
+                "seconds": round(seconds, 1), "exit": exit_code})
+
+
+def append_log(rec: dict) -> None:
     try:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        rec = {"at": now_iso(), "cmd": a.cmd, "args": [x for x in sys.argv[1:] if x != a.cmd], "repo": default.slug if default else None,
-               "seconds": round(seconds, 1), "exit": exit_code}
         with (CONFIG_DIR / "log.jsonl").open("a") as f:
             f.write(json.dumps(rec) + "\n")
     except Exception:
