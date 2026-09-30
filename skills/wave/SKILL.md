@@ -9,7 +9,7 @@ description: Drive a GitHub epic to merged PRs, wave by wave, from any repo, acc
 /setwave:wave <epic>          e.g. /setwave:wave 77   or   /setwave:wave owner/repo#77
 ```
 
-That is the whole prompt, every time. The data comes from GitHub and git at run time, so the same words work in the next session, the next wave, the next repo, the next account.
+That is the whole prompt, every time. Invoked with no epic, ask for the ref (`wave epics`, the cross-repo overview, is planned: #10 in this plugin's own repo). The data comes from GitHub and git at run time, so the same words work in the next session, the next wave, the next repo, the next account.
 
 Script: `${CLAUDE_PLUGIN_ROOT}/scripts/wave.py` (Python 3 stdlib; needs `gh` logged in, `git` ≥ 2.38; `codegraph` optional). Define once per session:
 
@@ -27,7 +27,7 @@ alias wave='python3 "${CLAUDE_PLUGIN_ROOT}/scripts/wave.py"'
 4. **On each completion**, before telling the user anything: `wave verify <PR> --epic <epic>` → attribution grep = 0, protected paths untouched, CI, mergeability, worktree clean and pushed. Its `notify` lines name open sibling issues that cite files the PR touched: make sure the agent (or you) left a one-line comment there. Relay the *verified* report: PR, diff size, what the agent corrected in the issue's premises, what it left alone. An agent killed by a rate limit (429) is **resumed with `SendMessage` to the same agentId** ("resume where you stopped; first `git status` in your worktree") — its context survives; never redispatch from zero. An "interim" report (gate running in background) resumes by itself.
 5. **All green → order.** `wave order --epic <epic>` → per repo: pairwise `git merge-tree`, a chain simulation in the suggested order (✗ marks the PR that needs the base merged into it first), and the `SERIAL` list (PRs touching paths declared `serial` in `.wave.json`/registry — one after the other, in `blocked_by` order, never in one batch). Run it with `--plan wave-plan.json`: the file pins the base SHA and every PR head. Show the user the table (PR, issue, diff, CI) and the order, and **ask for an explicit OK** (`AskUserQuestion`). No OK, no merge. `--auto` never.
 6. **Merge.** `wave merge --plan wave-plan.json --yes --wait-base-ci` → refuses if the base or any PR head moved since the plan (the OK was for that delta, not another), refuses a PR whose issue still has an open blocker, then merges one at a time, `MERGEABLE` and CI green before each, `--merge` (pass `--squash` if that is the repo's convention). It stops at the first conflict: in that PR's worktree, `git merge --no-edit origin/<base>`, resolve by hand (append-at-the-same-spot is the common case: keep both blocks and check the closing brace git treated as common), run the gate, `git commit --no-edit`, `git push` — **never force push** — comment on the PR what you resolved, rerun `merge` from that PR. If the base branch's CI turns red after a merge with no textual conflict, that is a **semantic** conflict: fix forward inside the next PR's base-merge (with a comment) or in a small `fix/` PR; merge nothing more until the base is green.
-7. **Close out.** `wave close-parents <epic>`; `wave cleanup` (removes only worktrees that are clean, pushed and merged; branches stay); `wave status <epic> --post` (the tree with states, posted on the epic — the paper trail that replaces any handoff document). Report, then offer the next wave with the same command.
+7. **Close out.** `wave close-parents <epic>`; `wave cleanup` (removes only worktrees that are clean, pushed and merged; branches stay); `wave status <epic> --post` (the tree with states and the next wave, posted on the epic — the paper trail that replaces any handoff document, and the answer to "where are we?" tomorrow). Report, then offer the next wave with the same command.
 
 ## Multi-repo, multi-account
 
@@ -53,6 +53,7 @@ Every conclusion the tool prints is the last line of a syllogism whose premises 
 - No AI attribution in commits or PRs. None of: `git gc --prune`, `reflog expire`, `stash`, `reset --hard`, `clean -f`, `push --force*`, `branch -D`, `rm -rf`. No `gh pr merge --auto`. Merge only with an explicit OK in this conversation.
 - Never touch the main checkout or a worktree that is not yours. Evidence before assertion. Every guard mutation-checked.
 - Relay nothing you have not verified with `wave verify`.
+- Every PR body carries a `## Done when` ledger — the issue's list with `[x]`, `[ ]` + why, or `~~item~~ — dropped: reason`. Today you check it by eye; from v0.4.0 `verify` refuses a PR without it and `merge` applies it to the issue (#12 in this plugin's repo).
 
 ## What an issue must look like
 

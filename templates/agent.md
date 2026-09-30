@@ -49,7 +49,7 @@ cd {{WORKTREE}}
 
 ## 5. Entrega
 
-`git add <só seus arquivos>`; commit em inglês, imperativo, no estilo do log (`git log --oneline -15`), com `Closes #{{N}}` no corpo; `git push -u origin {{BRANCH}}`; `gh pr create --base {{BASE}} --title "<uma frase em inglês dizendo o que muda>" --body-file <arquivo>`. Corpo: o que mudou e por quê; ADR em três frases; premissas erradas da issue; saída do gate; mutation-check antes/depois. Sem atribuição de IA.
+`git add <só seus arquivos>`; commit em inglês, imperativo, no estilo do log (`git log --oneline -15`), com `Closes #{{N}}` no corpo; `git push -u origin {{BRANCH}}`; `gh pr create --base {{BASE}} --title "<uma frase em inglês dizendo o que muda>" --body-file <arquivo>`. Corpo: o que mudou e por quê; ADR em três frases; premissas erradas da issue; saída do gate; mutation-check antes/depois; e o **ledger** — a lista `## Done when` da issue copiada com cada item marcado: `- [x]` feito, `- [ ]` não feito + uma linha do porquê, `- [ ] ~~item~~ — dropped: motivo`. É o ledger que diz ao próximo agente o que ainda falta. Sem atribuição de IA.
 
 ## 6. Relatório final (sua última mensagem)
 

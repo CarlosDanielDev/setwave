@@ -31,7 +31,14 @@ Quando um PR muda um símbolo que outra issue aberta cita, o agente comenta ness
 {"base": "main",
  "gate": ["cargo fmt --check", "cargo clippy --all-targets -- -D warnings", "cargo test", "cargo deny check"],
  "protected": ["src/safety"],
+ "serial": ["src/store/mod.rs"],
  "worktree_prefix": "../dev-cleaner-"}
 ```
+
+`protected`: um PR que toca aqui falha no `verify`. `serial`: dois PRs que tocam aqui nunca entram no mesmo lote (lista de migrations, índice gerado, arquivo de versão) — `order` os põe em fila na ordem do `blocked_by`.
+
+## O PR fecha o ciclo: o ledger
+
+O corpo do PR repete a lista `## Done when` da issue com cada item marcado: `- [x]` feito, `- [ ]` não feito com uma linha do porquê, `- [ ] ~~item~~ — dropped: motivo`. Hoje é lido por olho; na v0.4.0 (#12 do repo do plugin) `verify` recusa PR sem ledger e `merge` aplica as marcas na issue — o próximo agente recebe só o que falta.
 
 Sem o arquivo, `/wave` descobre: branch default via `gh`, gate lendo `run:` dos workflows do CI (ou o manifesto: Cargo/npm/pyproject/go), nenhum caminho protegido.
