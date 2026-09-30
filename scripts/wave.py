@@ -11,7 +11,7 @@ every node carries its own repo. Multi-account: each repo may name the `gh`
 account that owns it; calls for that repo run with that account's token
 (`gh auth token --user`), the global `gh` state is never switched.
 
-Registry: ~/.config/wave/repos.json
+Registry: ~/.config/setwave/repos.json
     {"search_paths": ["~/projects"],
      "repos": {"owner/name": {"path": "/abs/checkout", "account": "ghuser",
                               "base": "main", "gate": [...], "protected": [...],
@@ -38,7 +38,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 TEMPLATES = (HERE.parent / "templates") if (HERE.parent / "templates").exists() else HERE / "templates"
-CONFIG_DIR = Path(os.environ.get("WAVE_CONFIG", Path.home() / ".config" / "wave"))
+CONFIG_DIR = Path(os.environ.get("SETWAVE_CONFIG", Path.home() / ".config" / "setwave"))
 REGISTRY = CONFIG_DIR / "repos.json"
 
 ATTRIBUTION = re.compile(r"co-authored-by:\s*claude|generated with \[?claude code|noreply@anthropic\.com", re.I)

@@ -32,7 +32,7 @@ alias wave='python3 "${CLAUDE_PLUGIN_ROOT}/scripts/wave.py"'
 ## Multi-repo, multi-account
 
 - An epic's sub-issues and blockers may live in other repositories; the tree follows `repository_url`. Refs are `owner/name#N`; a bare `N` means the repo of the current directory.
-- `~/.config/wave/repos.json` maps `owner/name` → local checkout, `gh` account, base, gate, protected paths, worktree prefix. Unknown repos are found by scanning `search_paths` (default `~/projects`) for a checkout with that origin. `wave repos add <path> --account <ghuser> ...`, `wave repos scan`, `wave repos list`.
+- `~/.config/setwave/repos.json` maps `owner/name` → local checkout, `gh` account, base, gate, protected paths, worktree prefix. Unknown repos are found by scanning `search_paths` (default `~/projects`) for a checkout with that origin. `wave repos add <path> --account <ghuser> ...`, `wave repos scan`, `wave repos list`.
 - Calls for a repo with an `account` run with that account's token (`gh auth token --user`); the global `gh` login is never switched. Agents get the account in their prompt.
 - A `.wave.json` at a repo root supplies the same keys for everyone who clones it.
 

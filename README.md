@@ -36,7 +36,7 @@ Conflicts are resolved by merging the base branch *into* the PR's branch and pus
 ## Any repo, any account, any stack
 
 - Epics can span repositories: sub-issues and blockers are followed by `repository_url`. Refs are `owner/name#N`.
-- `~/.config/wave/repos.json` maps repositories to local checkouts, `gh` accounts, base branches, gate commands and protected paths. Unknown repos are found by scanning `~/projects`. Per-repo calls use that repo's account token; your global `gh` login is never switched.
+- `~/.config/setwave/repos.json` maps repositories to local checkouts, `gh` accounts, base branches, gate commands and protected paths. Unknown repos are found by scanning `~/projects`. Per-repo calls use that repo's account token; your global `gh` login is never switched.
 - The gate is read from the CI workflow (`run:` lines), or from the manifest (`Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`, `Package.swift`). Override with `wave repos add . --gate ...` or a `.wave.json` at the repo root.
 
 ## What an issue needs

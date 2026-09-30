@@ -1,6 +1,9 @@
 {
   "name": "setwave",
-  "owner": { "name": "Carlos Daniel", "url": "https://github.com/CarlosDanielDev" },
+  "owner": {
+    "name": "Carlos Daniel",
+    "url": "https://github.com/CarlosDanielDev"
+  },
   "plugins": [
     {
       "name": "setwave",
@@ -8,5 +11,6 @@
       "description": "Drive a GitHub epic to merged PRs wave by wave, with one Claude Code agent per git worktree.",
       "version": "0.1.0"
     }
-  ]
+  ],
+  "description": "setwave: drive a GitHub epic to merged PRs wave by wave with Claude Code agents in git worktrees."
 }
