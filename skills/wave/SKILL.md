@@ -61,3 +61,4 @@ Every run appends to `~/.config/setwave/log.jsonl`; `wave stats` summarises runs
 - `| tail` hides exit codes. `verify` reads CI, not an agent's sentence.
 - Agents correct issue premises constantly (line numbers, types, file names). That is the system working; they say it in the PR and comment on sibling issues that cite the same symbols.
 - Merging the base into a branch resolves a PR conflict without any force push.
+- Parallel first-time builds can leave a crate half-extracted in `~/.cargo/registry/src` (an agent killed mid-`cargo build` did, once): every fresh build on the machine then fails inside that crate with `file not found for module`. Move that crate's directory aside (never `rm -rf`); cargo re-extracts it from the checksummed archive. Same class of failure exists for `node_modules` caches. Prefer `cargo fetch`/`npm ci` in the main checkout before dispatching, and batch 4.

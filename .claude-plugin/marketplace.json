@@ -9,7 +9,7 @@
       "name": "setwave",
       "source": "./",
       "description": "Drive a GitHub epic to merged PRs wave by wave, with one Claude Code agent per git worktree.",
-      "version": "0.2.0"
+      "version": "0.2.1"
     }
   ],
   "description": "setwave: drive a GitHub epic to merged PRs wave by wave with Claude Code agents in git worktrees."

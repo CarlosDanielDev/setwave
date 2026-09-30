@@ -54,6 +54,7 @@ Agents read the issue **and its comments**: when a PR changes a symbol another o
 ## Lessons baked in
 
 - `git merge-tree` predicts textual conflicts, not semantic ones; the base branch's CI after each merge is the truth.
+- A dead agent can leave a package cache half-extracted (`~/.cargo/registry/src`, `node_modules`); every fresh build then fails. Move the crate directory aside and rebuild.
 - Four agents at a time, not eleven: same result, a quarter of the tokens, no rate-limit deaths. A dead agent is resumed, not redispatched.
 - Everything is Python because the orchestration loop must not depend on the user's shell.
 - Idempotent where it can be: `next`, `verify`, `order`, `status`, `lint`, `stats` are read-only; `dispatch` keeps an existing worktree; `close-parents` and `cleanup` skip what is done; `plan` refuses to run twice; `merge` re-checks `MERGEABLE` and CI before every single merge and stops at the first that is not.
