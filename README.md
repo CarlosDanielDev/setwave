@@ -81,7 +81,7 @@ The last status comment on the epic is the paper trail. A single view across all
 | explain | `wave why <issue>` — the premises behind READY / NOT READY, with evidence | the script |
 | dispatch | `wave dispatch <issues>` — worktrees from `origin/<base>`, CodeGraph index, one prompt file per issue | Claude spawns one agent per file |
 | verify | `wave verify <PR> --epic <epic>` — no AI attribution, protected paths untouched, CI green, worktree clean and pushed, no contradictions (branch number ≠ closed issue, PR closing a parent or a still-blocked issue); names sibling issues that cite files the PR touched | the script |
-| order | `wave order --epic <epic> --plan p.json` — pairwise `git merge-tree`, a chain simulation naming the step that will conflict, `serial` paths flagged, the delta pinned to a file | the script |
+| order | `wave order --epic <epic> --plan p.json` — pairwise `git merge-tree`, a chain simulation naming the step that will conflict, `serial` paths flagged, the delta pinned to a file; `--run-gate` runs the gate on the tree after each step, in a throwaway worktree, and names the first PR that turns it red (`merge --plan` then refuses without `--force`) | the script |
 | merge | `wave merge --plan p.json --yes --wait-base-ci` — refuses if the base or a PR head moved since the OK, refuses a still-blocked issue, one at a time, CI green before each, stops at the first conflict | **you**, with an explicit OK on that exact plan |
 | close out | `wave close-parents`, `wave cleanup`, `wave status --post` | the script |
 | plan an epic | `wave plan <dir>` — issues from bodies + `index.tsv` + `deps.tsv`; links, wires, fills references; refuses to run twice | the audit session writes the bodies |
@@ -182,7 +182,7 @@ A guard is only as good as the test that fails without it: when you add one, rem
 
 ## Lessons baked in
 
-- `git merge-tree` predicts textual conflicts, not semantic ones; the base branch's CI after each merge is the truth.
+- `git merge-tree` predicts textual conflicts, not semantic ones; `order --run-gate` finds a semantic one before the merge, at the cost of one gate run per step, and the base branch's CI after each merge stays the final word.
 - A dead agent can leave a package cache half-extracted (`~/.cargo/registry/src`, `node_modules`); every fresh build then fails. `wave doctor` names the crate; `--fix-cache` moves it aside and cargo re-extracts it.
 - Four agents at a time, not eleven: same result, a quarter of the tokens, no rate-limit deaths. A dead agent is resumed, not redispatched.
 - Everything is Python because the orchestration loop must not depend on the user's shell.

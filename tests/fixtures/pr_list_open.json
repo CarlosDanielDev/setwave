@@ -70,5 +70,23 @@
     "body": "A clean body; the trailer is in the commit.",
     "mergeable": "MERGEABLE",
     "url": "https://github.com/o/r/pull/24"
+  },
+  {
+    "number": 25,
+    "title": "PR 25",
+    "headRefName": "t/sem-a",
+    "baseRefName": "main",
+    "body": "Pins 25 rows at 120x30.",
+    "mergeable": "MERGEABLE",
+    "url": "https://github.com/o/r/pull/25"
+  },
+  {
+    "number": 26,
+    "title": "PR 26",
+    "headRefName": "t/sem-b",
+    "baseRefName": "main",
+    "body": "A notice row above the body.",
+    "mergeable": "MERGEABLE",
+    "url": "https://github.com/o/r/pull/26"
   }
 ]
