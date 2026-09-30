@@ -181,13 +181,29 @@ class Repo:
         self.owner, self.name = slug.split("/")
         self.root = Path(entry["path"])
         local = self.root / ".wave.json"
-        self.cfg = {**(json.loads(local.read_text()) if local.exists() else {}), **{k: v for k, v in entry.items() if k != "path"}}
+        self.local_cfg: dict | None = json.loads(local.read_text()) if local.exists() else None
+        self.entry = {k: v for k, v in entry.items() if k != "path"}
+        self.cfg = {**(self.local_cfg or {}), **self.entry}
         self.account = self.cfg.get("account")
         self.env = self._env()
         self.base = self.cfg.get("base") or json.loads(self.gh(["repo", "view", slug, "--json", "defaultBranchRef"]))["defaultBranchRef"]["name"]
-        self.protected: list[str] = list(self.cfg.get("protected", []))
+        self._load_cfg()
         self.handoffs = self.root.parent / f"{self.root.name}-handoffs"
         self._prs: list[dict] | None = None
+
+    def _load_cfg(self) -> None:
+        """`.wave.json` as origin/<base> has it, the tree every worktree is cut from: the main checkout is
+        never worked in, so it falls behind. Its working-tree copy counts only when origin has none; the registry wins over both."""
+        ok, text = self.git_ok(["show", f"origin/{self.base}:.wave.json"])
+        try:
+            self.remote_cfg: dict | None = json.loads(text) if ok else None
+        except json.JSONDecodeError as e:
+            raise SystemExit(f"{self.slug}: origin/{self.base}:.wave.json is not valid JSON ({e}): fix it on {self.base}")
+        self.cfg = {**(self.remote_cfg if ok else self.local_cfg or {}), **self.entry}
+        where = [f"origin/{self.base}:.wave.json" if ok else "working tree .wave.json" if self.local_cfg is not None else "",
+                 f"registry ({', '.join(sorted(self.entry))})" if self.entry else ""]
+        self.cfg_source = " + ".join(w for w in where if w) or "none (defaults)"
+        self.protected: list[str] = list(self.cfg.get("protected", []))
 
     def _env(self) -> dict:
         env = dict(os.environ)
@@ -302,6 +318,7 @@ class Repo:
 
     def fetch(self) -> None:
         self.git(["fetch", "-q", "--prune", "origin"])
+        self._load_cfg()  # origin/<base> may carry a newer .wave.json now
 
     def origin_sha(self) -> str:
         return self.git(["rev-parse", "--short", f"origin/{self.base}"]).strip()
@@ -624,7 +641,7 @@ def cmd_facts(default: Repo | None, a):
     repos = [Repo.get(s) for s in a.slugs] if a.slugs else [default] if default else []
     for r in repos:
         print(json.dumps({"slug": r.slug, "root": str(r.root), "account": r.account or "(active)", "base": r.base,
-                          "gate": r.gate(), "gate_sources": dict(r.gate_sources()), "protected": r.protected, "codegraph": r.has_codegraph(),
+                          "config_source": r.cfg_source, "gate": r.gate(), "gate_sources": dict(r.gate_sources()), "protected": r.protected, "codegraph": r.has_codegraph(),
                           "worktree_example": str(r.worktree(1)), "handoffs": str(r.handoffs)}, indent=2))
 
 
@@ -1328,12 +1345,20 @@ def cmd_doctor(default: Repo | None, a) -> None:
         untracked = r.git(["status", "--porcelain", "--untracked-files=all"]).count("?? ")
         checks.append((f"main checkout `{r.root.name}` has no tracked changes (you never work there)", not dirty,
                        (f"{len(dirty.splitlines())} modified path(s)" if dirty else "clean") + (f", {untracked} untracked (fine)" if untracked else ""), True))
+        r.fetch()  # first: the gate, protected paths and CI checks below read origin/<base>'s .wave.json
+        if r.remote_cfg is None:
+            checks.append((f"main checkout's `.wave.json` matches origin/{r.base}'s", True,
+                           f"no copy on origin/{r.base}, the working tree's is used" if r.local_cfg is not None else f"no `.wave.json` on origin/{r.base} or in the working tree", False))
+        else:
+            differs = sorted(k for k in {*(r.local_cfg or {}), *r.remote_cfg} if (r.local_cfg or {}).get(k) != r.remote_cfg.get(k))
+            checks.append((f"main checkout's `.wave.json` matches origin/{r.base}'s", not differs,
+                           (f"differs in {', '.join(differs)} — the main checkout is behind; prompts use origin/{r.base}'s" if r.local_cfg is not None
+                            else f"the main checkout has none; prompts use origin/{r.base}'s") if differs else "same", False))
         gate = r.gate()
         checks.append(("gate is declared and real", bool(gate) and not gate[0].startswith("<"), " && ".join(gate), True))
         for action in r.ci_gate()[1]:
             checks.append((f"CI runs `{action}` and the gate does not", False, "if it is a gate step, declare its command in `.wave.json`; then add it to `ignore_actions`", False))
         checks.append(("protected paths declared", bool(r.protected), ", ".join(r.protected) or "none: verify cannot guard anything — `repos add . --protected <paths>`", False))
-        r.fetch()
         merged = {l.strip().replace("origin/", "") for l in r.git(["branch", "-r", "--merged", f"origin/{r.base}"]).splitlines()}
         alive, dead, stale = [], [], []
         for wt, branch, n in issue_worktrees(r):
@@ -1400,6 +1425,7 @@ GUARANTEES = [
     ("no merge of a PR that verify rejects", "cmd_merge -> verify_one", "attribution, protected, CI, contradictions re-checked at merge time", False),
     ("no merge before CI is green, one PR at a time", "cmd_merge", "waits for checks, stops on FAILED", False),
     ("base CI red after a merge stops the queue", "cmd_merge --wait-base-ci", "exit 4 with the semantic-conflict note", False),
+    (".wave.json is read from origin/<base> after the fetch, not from a main checkout left behind; doctor names a stale copy", "Repo._load_cfg <- Repo.fetch, cmd_doctor", "facts config_source: origin/main:.wave.json; ! main checkout's `.wave.json` matches origin/main's: differs in gate", True),
     ("doctor names every CI action the gate does not cover", "cmd_doctor -> Repo.ci_gate", "! CI runs `x/y@v1` and the gate does not", True),
     ("doctor tells an agent at work from a likely dead one, and names the recovery", "cmd_doctor -> liveness", "! no agent likely dead: <worktrees> — SendMessage or `wave dispatch --force N`", True),
     ("a likely dead worktree stays `worktree` in next, never `in progress`", "candidates -> liveness", "worktree exists (likely dead, nothing changed for N min)", True),
