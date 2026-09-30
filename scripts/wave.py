@@ -14,7 +14,7 @@ account that owns it; calls for that repo run with that account's token
 Registry: ~/.config/setwave/repos.json
     {"search_paths": ["~/projects"],
      "repos": {"owner/name": {"path": "/abs/checkout", "account": "ghuser",
-                              "base": "main", "gate": [...], "protected": [...],
+                              "base": "main", "gate": [...], "protected": [...], "serial": ["src/store/mod.rs"],
                               "worktree_prefix": "../name-"}}}
 A repo not in the registry is found by scanning search_paths for a checkout
 whose origin matches, then cached. A `.wave.json` at a repo root supplies the
@@ -275,9 +275,10 @@ class Repo:
                                    "--json", "number,body,headRefName"]))
 
     def pr_checks(self, n: int) -> dict[str, str]:
-        ok, out = self.gh_ok(["pr", "checks", str(n), "-R", self.slug, "--json", "name,state"])
+        """name -> bucket: pass | fail | pending | skipping | cancel (gh's own normalisation)."""
+        ok, out = self.gh_ok(["pr", "checks", str(n), "-R", self.slug, "--json", "name,bucket"])
         if ok and out.strip():
-            return {c["name"]: c["state"] for c in json.loads(out)}
+            return {c["name"]: c["bucket"] for c in json.loads(out)}
         _, out = self.gh_ok(["pr", "checks", str(n), "-R", self.slug])
         res = {}
         for line in out.splitlines():
@@ -521,7 +522,8 @@ def epic_prs(default: Repo | None, epic_ref: str) -> list[tuple[Repo, dict]]:
 
 
 def select_prs(default: Repo | None, refs: list[str], epic: str | None) -> list[tuple[Repo, dict]]:
-    if epic:
+    """Explicit PR refs win; --epic alone selects every open PR that closes one of the epic's leaves."""
+    if epic and not refs:
         return epic_prs(default, epic)
     if refs:
         out = []
@@ -538,7 +540,7 @@ def select_prs(default: Repo | None, refs: list[str], epic: str | None) -> list[
     return [(default, p) for p in default.open_prs()]
 
 
-def verify_one(repo: Repo, pr: dict) -> dict:
+def verify_one(repo: Repo, pr: dict, epic_nodes: dict | None = None) -> dict:
     head = pr["headRefName"]
     repo.git(["fetch", "-q", "origin", head])
     body = pr.get("body") or ""
@@ -548,9 +550,19 @@ def verify_one(repo: Repo, pr: dict) -> dict:
     if repo.protected:
         diff = repo.git(["diff", "--name-only", f"origin/{repo.base}...origin/{head}", "--"] + repo.protected)
         touched = [l for l in diff.splitlines() if l.strip()]
+    n_issue = next((int(num) for _, num in CLOSES.findall(body)), None)
     checks = repo.pr_checks(pr["number"])
     bad = {k: v for k, v in checks.items() if v.lower() not in ("pass", "success", "skipping", "skipped", "neutral")}
-    n_issue = next((int(num) for _, num in CLOSES.findall(body)), None)
+    # sibling issues that cite a file this PR touched: the next wave inherits this change
+    touched_files = repo.git(["diff", "--name-only", f"origin/{repo.base}...origin/{head}"]).split()
+    siblings = []
+    for nd in (epic_nodes or {}).values():
+        iss = nd["issue"]
+        if nd["children"] or iss["state"] != "open" or (n_issue and nd["number"] == n_issue and nd["repo"] == repo.slug):
+            continue
+        cited = [f for f in touched_files if f in (iss.get("body") or "")]
+        if cited:
+            siblings.append({"issue": nd["key"], "files": cited})
     wt = repo.worktree(n_issue) if n_issue else None
     wt_state = None
     if wt and wt.exists():
@@ -561,11 +573,17 @@ def verify_one(repo: Repo, pr: dict) -> dict:
           and not (wt_state and (wt_state["dirty"] or wt_state["unpushed"])))
     return {"repo": repo.slug, "pr": pr["number"], "issue": n_issue, "head": head, "attribution": attribution,
             "protected_touched": touched, "checks_not_green": bad, "mergeable": pr.get("mergeable"),
-            "worktree": wt_state, "ok": ok}
+            "worktree": wt_state, "notify_issues": siblings, "ok": ok}
 
 
 def cmd_verify(default: Repo | None, a):
-    results = [verify_one(r, p) for r, p in select_prs(default, a.prs, a.epic)]
+    nodes = None
+    if a.epic:
+        er, en = parse_ref(a.epic, default)
+        nodes = tree(er, en)
+    results = [verify_one(r, p, nodes) for r, p in select_prs(default, a.prs, a.epic)]
+    if not results:
+        print("nothing to verify: no open PR matched"); sys.exit(1)
     if a.json:
         print(json.dumps(results, indent=2))
     else:
@@ -577,6 +595,8 @@ def cmd_verify(default: Repo | None, a):
             if r["mergeable"] == "CONFLICTING": flags.append("CONFLICT")
             if r["worktree"] and (r["worktree"]["dirty"] or r["worktree"]["unpushed"]): flags.append("WORKTREE-NOT-CLEAN")
             print(f"{r['repo']}#{r['pr']:<5} issue #{r['issue'] or '?':<5} {'OK    ' if r['ok'] else 'NOT OK'} {' '.join(flags)}")
+            for sib in r["notify_issues"]:
+                print(f"        notify {sib['issue']}: cites {', '.join(sib['files'])} — comment there what this PR changed")
     sys.exit(0 if results and all(r["ok"] for r in results) else 1)
 
 
@@ -608,7 +628,27 @@ def cmd_order(default: Repo | None, a):
                     pairs[(x, y)] = c
         degree = {n: sum(1 for k in pairs if n in k) for n in nums}
         order = sorted(nums, key=lambda n: (degree[n], n))
-        result[slug] = {"order": order, "pairs": {f"{x}x{y}": v for (x, y), v in pairs.items()}, "against_base": against_base}
+        # serial paths (a migrations list, a generated index): a textual merge cannot see an index
+        # collision, so PRs touching one land one after the other, in their issues' blocked_by order
+        serial_paths = list(repo.cfg.get("serial", []))
+        serial_prs = []
+        if serial_paths:
+            for n in nums:
+                files = repo.git(["diff", "--name-only", f"{base}...{heads[n]}"]).split()
+                if any(f.startswith(sp) for f in files for sp in serial_paths):
+                    serial_prs.append(n)
+        # chain simulation: merge in the suggested order and report where the accumulated tree conflicts
+        chain = []
+        acc = repo.git(["rev-parse", base]).strip()
+        for n in order:
+            rc, out, err = run(["git", "merge-tree", "--write-tree", acc, heads[n]], cwd=repo.root, env=repo.env)
+            if rc == 0:
+                acc = repo.git(["commit-tree", out.strip(), "-p", acc, "-p", repo.git(["rev-parse", heads[n]]).strip(), "-m", f"sim {n}"]).strip()
+                chain.append((n, []))
+            else:
+                chain.append((n, sorted(set(re.findall(r"Merge conflict in (.+)", out + err))) or ["<conflict>"]))
+        result[slug] = {"order": order, "pairs": {f"{x}x{y}": v for (x, y), v in pairs.items()}, "against_base": against_base,
+                        "serial": serial_prs, "chain": chain}
         if not a.json:
             print(f"== {slug} (base {base}) ==")
             for n in nums:
@@ -618,7 +658,10 @@ def cmd_order(default: Repo | None, a):
                 print(f"  #{x} x #{y}: {', '.join(files)}")
             if not pairs:
                 print("  no pairwise conflicts")
+            if serial_prs:
+                print(f"  SERIAL (touch {', '.join(serial_paths)}): {' '.join(f'#{n}' for n in serial_prs)} — one after the other, in their issues' blocked_by order, never in one batch")
             print("  order: " + " -> ".join(f"{slug}#{n}" for n in order))
+            print("  chain: " + "  ".join(f"#{n}✓" if not c else f"#{n}✗[{','.join(c)}]" for n, c in chain) + "   (✗ = merge the base into that branch right before merging it)")
     if a.json:
         print(json.dumps(result, indent=2))
     else:
@@ -787,6 +830,70 @@ def cmd_lint(default: Repo | None, a):
     sys.exit(1 if problems else 0)
 
 
+# ---------------------------------------------------------------- plan
+
+def cmd_plan(default: Repo | None, a):
+    """Create an epic's issues from a directory: <dir>/index.tsv, <dir>/deps.tsv, <dir>/<key>.md.
+
+    index.tsv:  key<TAB>title<TAB>labels(comma or -)<TAB>parent-key-or-'-'   (parents before children)
+    deps.tsv:   blocked-key<TAB>blocker-key
+    Bodies may reference other issues as {{key}}; numbers are filled in once every issue exists.
+    Creates in order, links sub-issues, wires blocked_by, applies --milestone, writes numbers.json.
+    """
+    repo = Repo.get(a.slug) if a.slug else default
+    if repo is None:
+        raise SystemExit("run inside the repo or pass --slug owner/name")
+    d = Path(a.dir)
+    rows = [l.split("\t") for l in (d / "index.tsv").read_text().splitlines() if l.strip() and not l.startswith("#")]
+    deps = [l.split("\t") for l in (d / "deps.tsv").read_text().splitlines() if l.strip() and not l.startswith("#")] if (d / "deps.tsv").exists() else []
+    for r in rows:
+        if len(r) != 4:
+            raise SystemExit(f"index.tsv row needs 4 tab-separated fields: {r}")
+        if not (d / f"{r[0]}.md").exists():
+            raise SystemExit(f"missing body {d / (r[0] + '.md')}")
+    if a.dry_run:
+        for k, title, labels, parent in rows:
+            print(f"{k:<6} parent={parent:<6} [{labels}] {title}")
+        print(f"{len(rows)} issues, {len(deps)} dependencies — nothing created")
+        return
+    if (d / "numbers.json").exists() and not a.force:
+        raise SystemExit(f"{d / 'numbers.json'} exists: this plan was already applied (issues {json.loads((d / 'numbers.json').read_text())}). Pass --force to create a second copy on purpose.")
+    existing = {i["title"] for i in json.loads(repo.gh(["issue", "list", "-R", repo.slug, "--state", "all", "--limit", "500", "--json", "title"]))}
+    dup = [t for _, t, _, _ in rows if t in existing]
+    if dup and not a.force:
+        raise SystemExit(f"{len(dup)} title(s) already exist as issues in {repo.slug} (e.g. {dup[0]!r}). Pass --force to create anyway.")
+    numbers: dict[str, int] = {}
+    ids: dict[str, int] = {}
+    for k, title, labels, parent in rows:
+        body = (d / f"{k}.md").read_text()
+        for kk, num in numbers.items():
+            body = body.replace("{{" + kk + "}}", f"#{num}")
+        cmd = ["issue", "create", "-R", repo.slug, "--title", title, "--body", body]
+        for l in [x for x in labels.split(",") if x and x != "-"]:
+            cmd += ["--label", l]
+        if a.milestone:
+            cmd += ["--milestone", a.milestone]
+        url = repo.gh(cmd).strip()
+        n = int(url.rstrip("/").split("/")[-1])
+        numbers[k] = n
+        ids[k] = repo.issue(n)["id"]
+        print(f"{k} -> #{n}")
+        if parent and parent != "-":
+            repo.api(f"repos/{repo.slug}/issues/{numbers[parent]}/sub_issues", "POST", {"sub_issue_id": ids[k]})
+    for blocked, blocker in deps:
+        repo.api(f"repos/{repo.slug}/issues/{numbers[blocked]}/dependencies/blocked_by", "POST", {"issue_id": ids[blocker]})
+        print(f"#{numbers[blocked]} blocked by #{numbers[blocker]}")
+    for k, title, labels, parent in rows:  # bodies that referenced later issues get their numbers now
+        body = (d / f"{k}.md").read_text()
+        if re.search(r"\{\{\w+\}\}", body):
+            for kk, num in numbers.items():
+                body = body.replace("{{" + kk + "}}", f"#{num}")
+            repo.gh(["issue", "edit", str(numbers[k]), "-R", repo.slug, "--body", body])
+            print(f"#{numbers[k]}: references filled")
+    (d / "numbers.json").write_text(json.dumps(numbers, indent=2))
+    print(f"\n{len(rows)} issues created; key->number map in {d / 'numbers.json'}")
+
+
 # ---------------------------------------------------------------- main
 
 def main(argv=None):
@@ -807,16 +914,59 @@ def main(argv=None):
     x = s.add_parser("cleanup", help="remove worktrees that are clean, pushed and merged"); x.add_argument("slugs", nargs="*"); x.add_argument("--dry-run", action="store_true")
     x = s.add_parser("status", help="tree with states; --post comments it on the epic"); x.add_argument("epic"); x.add_argument("--post", action="store_true")
     x = s.add_parser("lint", help="check issues carry what /wave needs"); x.add_argument("issues", nargs="+")
+    x = s.add_parser("plan", help="create an epic's issues from <dir>/index.tsv + deps.tsv + <key>.md, wiring sub-issues and blocked_by"); x.add_argument("dir"); x.add_argument("--slug"); x.add_argument("--milestone"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--force", action="store_true")
+
+    x = s.add_parser("stats", help="what the log says: runs, durations, failures per command")
 
     a = p.parse_args(argv)
+    if a.cmd == "stats":
+        return cmd_stats()
     default: Repo | None
     try:
         default = Repo.from_cwd(a.repo)
     except SystemExit:
         default = None
-    {"repos": cmd_repos, "facts": cmd_facts, "next": cmd_next, "dispatch": cmd_dispatch, "prompt": cmd_prompt,
+    t0 = time.time(); exit_code = 0
+    try:
+        {"repos": cmd_repos, "facts": cmd_facts, "next": cmd_next, "dispatch": cmd_dispatch, "prompt": cmd_prompt,
      "verify": cmd_verify, "order": cmd_order, "merge": cmd_merge, "close-parents": cmd_close_parents,
-     "cleanup": cmd_cleanup, "status": cmd_status, "lint": cmd_lint}[a.cmd](default, a)
+         "cleanup": cmd_cleanup, "status": cmd_status, "lint": cmd_lint, "plan": cmd_plan}[a.cmd](default, a)
+    except SystemExit as e:
+        exit_code = e.code if isinstance(e.code, int) else 1
+        raise
+    finally:
+        log_run(a, default, time.time() - t0, exit_code)
+
+
+def log_run(a, default: Repo | None, seconds: float, exit_code: int) -> None:
+    """Append one line per run: the raw material for `stats`. Never fails the command."""
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        rec = {"at": now_iso(), "cmd": a.cmd, "args": [x for x in sys.argv[1:] if x != a.cmd], "repo": default.slug if default else None,
+               "seconds": round(seconds, 1), "exit": exit_code}
+        with (CONFIG_DIR / "log.jsonl").open("a") as f:
+            f.write(json.dumps(rec) + "\n")
+    except Exception:
+        pass
+
+
+def cmd_stats() -> None:
+    f = CONFIG_DIR / "log.jsonl"
+    if not f.exists():
+        print("no runs logged yet"); return
+    runs = [json.loads(l) for l in f.read_text().splitlines() if l.strip()]
+    by: dict[str, list] = {}
+    for r in runs:
+        by.setdefault(r["cmd"], []).append(r)
+    print(f"{len(runs)} runs since {runs[0]['at']} — {f}")
+    print(f"{'command':<14}{'runs':>5}{'failed':>8}{'median s':>10}{'max s':>8}")
+    for cmd, rs in sorted(by.items()):
+        secs = sorted(r["seconds"] for r in rs)
+        med = secs[len(secs) // 2]
+        print(f"{cmd:<14}{len(rs):>5}{sum(1 for r in rs if r['exit']):>8}{med:>10.1f}{secs[-1]:>8.1f}")
+    merges = [r for r in by.get("merge", []) if "--yes" in r["args"]]
+    if merges:
+        print(f"\nmerge runs with --yes: {len(merges)}, stopped by conflict/CI: {sum(1 for r in merges if r['exit'])}")
 
 
 if __name__ == "__main__":

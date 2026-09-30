@@ -30,8 +30,14 @@ Needs `gh` (logged in), `git` ≥ 2.38, Python 3. `codegraph` is used when prese
 | order | `wave order --epic <epic>` — pairwise `git merge-tree`, conflicts named | the script |
 | merge | `wave merge <PRs> --yes --wait-base-ci` — one at a time, CI green before each, stops at the first conflict | **you**, with an explicit OK |
 | close out | `wave close-parents`, `wave cleanup`, `wave status --post` | the script |
+| plan an epic | `wave plan <dir>` — creates the issues from `index.tsv` + `deps.tsv` + one body per key, links sub-issues, wires `blocked_by`; refuses to run twice | the audit session writes the bodies |
+| measure | `wave stats` — every run is logged to `~/.config/setwave/log.jsonl`: command, seconds, exit | the log |
 
 Conflicts are resolved by merging the base branch *into* the PR's branch and pushing normally. Never a force push. Never `--auto`.
+
+`wave order` does three things a human forgets: pairwise `git merge-tree` between every two PRs, a **chain simulation** that merges them in the suggested order and names the step where the accumulated tree conflicts, and a **serial** check — PRs touching paths declared as `serial` (a migrations list, a generated index) are flagged to land one after the other in their issues' `blocked_by` order, because a textual merge cannot see an index collision.
+
+`wave verify --epic <epic>` also lists the open sibling issues whose bodies cite a file the PR touched, so the agent comments there what changed and the next wave reads it as data.
 
 ## Any repo, any account, any stack
 
@@ -50,6 +56,8 @@ Agents read the issue **and its comments**: when a PR changes a symbol another o
 - `git merge-tree` predicts textual conflicts, not semantic ones; the base branch's CI after each merge is the truth.
 - Four agents at a time, not eleven: same result, a quarter of the tokens, no rate-limit deaths. A dead agent is resumed, not redispatched.
 - Everything is Python because the orchestration loop must not depend on the user's shell.
+- Idempotent where it can be: `next`, `verify`, `order`, `status`, `lint`, `stats` are read-only; `dispatch` keeps an existing worktree; `close-parents` and `cleanup` skip what is done; `plan` refuses to run twice; `merge` re-checks `MERGEABLE` and CI before every single merge and stops at the first that is not.
+- Measured, not promised: the log is the evidence. Numbers from the epic it was built on are in the commit history, and `wave stats` accumulates yours.
 
 ## Layout
 

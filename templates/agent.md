@@ -1,7 +1,7 @@
 # TAREFA — issue #{{N}}: {{TITLE}}
 
 Issue: {{URL}}
-Repo: `{{REPO}}`, base `{{BASE}}`.
+Repo: `{{REPO}}`, base `{{BASE}}`, {{ACCOUNT}}.
 
 ## 0. Modo de trabalho — antes de ler código
 
