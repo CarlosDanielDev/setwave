@@ -58,6 +58,11 @@ GATE_ACTIONS = {
 # setup and plumbing, not gates (fnmatch patterns); a repo adds its own with `ignore_actions` in .wave.json
 IGNORE_ACTIONS = ["actions/checkout", "actions/setup-*", "actions/cache", "actions/cache/*", "actions/upload-artifact",
                   "actions/download-artifact", "dtolnay/rust-toolchain", "swatinem/rust-cache"]
+# agent liveness, inferred from the newest trace its work left in the worktree (an agent that dies stops writing):
+# changed less than WORKING_MIN minutes ago = working, up to DEAD_MIN = quiet, more and no PR = likely dead
+WORKING_MIN = 10
+DEAD_MIN = 30
+STAMP = ".setwave.json"  # written by dispatch into each worktree, excluded from git: issue, repo, dispatched_at, prompt
 
 
 # ---------------------------------------------------------------- plumbing
@@ -424,6 +429,7 @@ def candidates(nodes: dict[str, dict]) -> list[dict]:
         out.append({"key": nd["key"], "repo": repo.slug, "number": n, "title": iss["title"], "branch": branch_for(iss),
                     "blocked_by": blockers, "pr": pr["number"] if pr else None,
                     "worktree": str(wt) if wt.exists() else None, "state": state,
+                    "liveness": liveness(repo, n, wt) if state == "worktree" else None,
                     "ready": state == "ready"})
     # every open leaf is in exactly one state: `state` is a single value, so the states cannot overlap;
     # what a later edit could break is READY, so READY must mean "nothing else holds", and nothing less
@@ -440,12 +446,13 @@ def premises_for(repo: Repo, n: int) -> list[tuple[str, bool, str]]:
     open_bl = [b for b in bl if b["state"] == "open"]
     pr = pr_for_issue(repo, n)
     wt = repo.worktree(n)
+    lv = liveness(repo, n, wt) if wt.exists() else None
     return [
         ("it is a leaf (no sub-issues)", not subs, f"{len(subs)} sub-issues" if subs else "none"),
         ("it is open", iss["state"] == "open", iss["state"]),
         ("every blocker is closed", not open_bl, ", ".join(f"{slug_of_api(b['repository_url'])}#{b['number']} {b['state']}" for b in bl) or "no blockers"),
         ("no open PR closes it", pr is None, f"PR #{pr['number']} ({pr['headRefName']})" if pr else "none"),
-        ("no worktree exists for it", not wt.exists(), str(wt)),
+        ("no worktree exists for it", not wt.exists(), f"{wt} ({lv['verdict']}, nothing changed for {lv['idle_min']} min)" if lv else str(wt)),
     ]
 
 
@@ -456,7 +463,66 @@ def why(c: dict) -> str:
         return "blocked by " + ", ".join(c["blocked_by"])
     if c["pr"]:
         return f"in progress (PR #{c['pr']})"
-    return "worktree exists"
+    lv = c.get("liveness")
+    return f"worktree exists ({lv['verdict']}, nothing changed for {lv['idle_min']} min)" if lv else "worktree exists"
+
+
+# ---------------------------------------------------------------- liveness
+
+def verdict(idle_min: float, has_pr: bool) -> str:
+    if has_pr:
+        return "done"
+    return "working" if idle_min < WORKING_MIN else "quiet" if idle_min <= DEAD_MIN else "likely dead"
+
+
+def _epoch(iso: str | None) -> float | None:
+    try:
+        return datetime.strptime(iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp() if iso else None
+    except (TypeError, ValueError):
+        return None
+
+
+def last_activity(repo: Repo, wt: Path, dispatched: float | None) -> float:
+    """Epoch of the newest trace of work in a worktree: the dispatch, a commit on its branch, a file changed or
+    created (ignored files aside, so build output does not count). The directory's own mtime when there is none."""
+    times = [dispatched] if dispatched else []
+    rc, out, _ = run(["git", "ls-files", "-z", "-m", "-o", "--exclude-standard"], cwd=wt, env=repo.env)
+    for f in [f for f in out.split("\0") if f] if rc == 0 else []:
+        try:
+            times.append((wt / f).stat().st_mtime)
+        except OSError:
+            pass  # deleted: `-m` lists it, it has no mtime
+    rc, out, _ = run(["git", "log", "-1", "--format=%ct", f"origin/{repo.base}..HEAD"], cwd=wt, env=repo.env)
+    if rc == 0 and out.strip():
+        times.append(float(out.strip()))
+    return max(times) if times else wt.stat().st_mtime
+
+
+def liveness(repo: Repo, n: int, wt: Path | None = None) -> dict:
+    """What an issue's worktree says about its agent. Nothing but files and git is read: no process is looked at."""
+    wt = wt or repo.worktree(n)
+    try:
+        stamp = json.loads((wt / STAMP).read_text())
+    except (OSError, ValueError):
+        stamp = {}
+    now = time.time()
+    dispatched = _epoch(stamp.get("dispatched_at"))
+    idle = (now - last_activity(repo, wt, dispatched)) / 60
+    pr = pr_for_issue(repo, n)
+    return {"issue": n, "worktree": str(wt), "age_min": round((now - dispatched) / 60) if dispatched else None,
+            "idle_min": round(idle), "pr": pr["number"] if pr else None, "verdict": verdict(idle, bool(pr))}
+
+
+def issue_worktrees(repo: Repo) -> list[tuple[Path, str, int]]:
+    """(path, branch, issue) of every worktree named after an issue (`<prefix>N`), the main checkout aside."""
+    out = []
+    for block in repo.git(["worktree", "list", "--porcelain"]).split("\n\n"):
+        m = re.search(r"^worktree (.+)$", block, re.M)
+        b = re.search(r"^branch refs/heads/(.+)$", block, re.M)
+        mm = m and re.match(rf"{re.escape(repo.worktree(0).name[:-1])}(\d+)$", Path(m.group(1)).name)
+        if mm and b and Path(m.group(1)) != repo.root:
+            out.append((Path(m.group(1)), b.group(1), int(mm.group(1))))
+    return out
 
 
 # ---------------------------------------------------------------- prompt
@@ -561,7 +627,8 @@ def cmd_dispatch(default: Repo | None, a):
         sha = repo.origin_sha()
         if not a.dry_run:
             if wt.exists():
-                print(f"{key(repo, n)}: worktree exists at {wt}, keeping it")
+                lv = liveness(repo, n, wt)  # --force over a live agent would put a second one in the same tree: say what this one looks like
+                print(f"{key(repo, n)}: worktree exists at {wt}, keeping it ({lv['verdict']}, changed {lv['idle_min']} min ago)")
             else:
                 ok, out = repo.git_ok(["worktree", "add", "-q", "-b", branch, str(wt), f"origin/{repo.base}"])
                 if not ok:
@@ -571,6 +638,14 @@ def cmd_dispatch(default: Repo | None, a):
                     sh_ok(["codegraph", "init", "."], cwd=wt)
         path = repo.handoffs / f"{n}.md"
         path.write_text(render_prompt(repo, iss, branch, sha, len(targets)))
+        if not a.dry_run:  # the stamp `agents` and `doctor` read; a re-dispatch (--force) is a new agent, so a new stamp
+            (wt / STAMP).write_text(json.dumps({"issue": n, "repo": repo.slug, "dispatched_at": now_iso(), "prompt": str(path)}, indent=2) + "\n")
+            ok, excl = repo.git_ok(["rev-parse", "--git-path", "info/exclude"], cwd=wt)  # shared by every worktree
+            excl_path = wt / excl.strip()  # an absolute path stays itself
+            text = excl_path.read_text() if ok and excl_path.exists() else ""
+            if ok and f"/{STAMP}" not in text.splitlines():
+                excl_path.parent.mkdir(parents=True, exist_ok=True)
+                excl_path.write_text(text + ("\n" if text and not text.endswith("\n") else "") + f"/{STAMP}\n")
         print(f"{key(repo, n)}: {branch} -> {wt}\n    prompt: {path}   (base origin/{repo.base} = {sha})")
     print("\nDispatch one Agent (general-purpose) per prompt file, all in ONE message; prompt = file content verbatim.")
 
@@ -977,6 +1052,20 @@ def cmd_why(default: Repo | None, a):
         print("  ∴ " + ("READY — every premise holds" if ready else "NOT READY — the first ✗ is the reason") + "\n")
 
 
+def cmd_agents(default: Repo | None, a):
+    """Every issue worktree of the repo with what its files say about its agent."""
+    if default is None:
+        raise SystemExit("run inside a repo checkout, or pass --repo")
+    rows = [liveness(default, n, wt) for wt, _, n in issue_worktrees(default)]
+    print(f"{len(rows)} worktree(s) of {default.slug} — working < {WORKING_MIN} min since the newest change, quiet up to {DEAD_MIN}, then likely dead unless a PR is open")
+    for lv in sorted(rows, key=lambda x: x["issue"]):
+        print(f"  {key(default, lv['issue']):<24} {Path(lv['worktree']).name:<20} "
+              f"dispatched {'?' if lv['age_min'] is None else lv['age_min']} min ago   changed {lv['idle_min']} min ago   "
+              f"{'PR #' + str(lv['pr']) if lv['pr'] else 'no PR':<8} {lv['verdict']}")
+    if not rows and (default.root / ".git").is_file():
+        print("  (this is a linked worktree: run `wave agents` from the main checkout to see its siblings)")
+
+
 def cmd_doctor(default: Repo | None, a) -> None:
     """Preflight. Every ✗ is a mistake that dispatch would otherwise let happen."""
     checks: list[tuple[str, bool, str, bool]] = []  # (text, ok, evidence, hard)
@@ -1001,21 +1090,21 @@ def cmd_doctor(default: Repo | None, a) -> None:
         checks.append(("protected paths declared", bool(r.protected), ", ".join(r.protected) or "none: verify cannot guard anything — `repos add . --protected <paths>`", False))
         r.fetch()
         merged = {l.strip().replace("origin/", "") for l in r.git(["branch", "-r", "--merged", f"origin/{r.base}"]).splitlines()}
-        orphans, stale = [], []
-        for block in r.git(["worktree", "list", "--porcelain"]).split("\n\n"):
-            m = re.search(r"^worktree (.+)$", block, re.M)
-            b = re.search(r"^branch refs/heads/(.+)$", block, re.M)
-            if not m or not b:
-                continue
-            wt = Path(m.group(1))
-            mm = re.match(rf"{re.escape(r.worktree(0).name[:-1])}(\d+)$", wt.name)
-            if not mm:
-                continue
-            if b.group(1) in merged or not r.git_ok(["rev-parse", "--verify", f"origin/{b.group(1)}"])[0] and not r.git(["log", "--oneline", f"origin/{r.base}..HEAD"], cwd=wt).strip():
-                stale.append(wt.name)          # merged, or never pushed and no commits: leftovers, `wave cleanup`
-            elif not pr_for_issue(r, int(mm.group(1))):
-                orphans.append(wt.name)        # unmerged work with no PR: an agent running, or one that died
-        checks.append(("no unmerged worktree without an open PR (an agent still running, or one that died)", not orphans, ", ".join(orphans) or "none", False))
+        alive, dead, stale = [], [], []
+        for wt, branch, n in issue_worktrees(r):
+            untouched = (not r.git_ok(["rev-parse", "--verify", f"origin/{branch}"])[0] and not r.git(["log", "--oneline", f"origin/{r.base}..HEAD"], cwd=wt).strip()
+                         and not (wt / STAMP).exists() and not r.git(["status", "--porcelain"], cwd=wt).strip())
+            if branch in merged or untouched:
+                stale.append(wt.name)          # merged, or never dispatched, pushed, committed or edited: leftovers, `wave cleanup`
+            elif not pr_for_issue(r, n):       # unmerged work with no PR: an agent at work, or one that died
+                lv = liveness(r, n, wt)
+                (dead if lv["verdict"] == "likely dead" else alive).append((wt.name, n, lv))
+        checks.append(("agents at work (unmerged worktree, no PR yet)", True,
+                       ", ".join(f"{name} {lv['verdict']} ({lv['idle_min']} min)" for name, _, lv in alive) or "none", False))
+        checks.append((f"no agent likely dead (no PR, nothing changed for more than {DEAD_MIN} min)", not dead,
+                       (", ".join(f"{name} ({lv['idle_min']} min)" for name, _, lv in dead)
+                        + " — resume the agent with `SendMessage` to its id, or "
+                        + ", ".join(f"`wave dispatch --force {n}`" for _, n, _ in dead) + " to start over on top of what is there") if dead else "none", False))
         checks.append(("no leftover worktrees (merged or empty)", not stale, (", ".join(stale) + " — `wave cleanup`") if stale else "none", False))
         okdu, du = sh_ok(["du", "-sk", str(r.root / "target")]) if (r.root / "target").exists() else (False, "")
         build_kb = int(du.split()[0]) if okdu and du.split() else 0
@@ -1043,6 +1132,8 @@ GUARANTEES = [
     ("no merge before CI is green, one PR at a time", "cmd_merge", "waits for checks, stops on FAILED", False),
     ("base CI red after a merge stops the queue", "cmd_merge --wait-base-ci", "exit 4 with the semantic-conflict note", False),
     ("doctor names every CI action the gate does not cover", "cmd_doctor -> Repo.ci_gate", "! CI runs `x/y@v1` and the gate does not", True),
+    ("doctor tells an agent at work from a likely dead one, and names the recovery", "cmd_doctor -> liveness", "! no agent likely dead: <worktrees> — SendMessage or `wave dispatch --force N`", True),
+    ("a likely dead worktree stays `worktree` in next, never `in progress`", "candidates -> liveness", "worktree exists (likely dead, nothing changed for N min)", True),
     ("no dispatch when doctor finds a hard failure", "cmd_dispatch -> cmd_doctor", "dispatch refused", False),
     ("no dispatch of an issue that is not READY", "cmd_dispatch -> premises_for", "refusal lists the failed premises", False),
     ("an existing worktree is kept, never recreated", "cmd_dispatch", "prints 'worktree exists'", False),
@@ -1166,7 +1257,8 @@ def main(argv=None):
     x = s.add_parser("next", help="leaf issues ready to dispatch"); x.add_argument("epic"); x.add_argument("--batch", type=int, default=4); x.add_argument("--json", action="store_true")
     x = s.add_parser("dispatch", help="create worktrees + prompt files (runs doctor and refuses issues that are not READY)"); x.add_argument("issues", nargs="+"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--force", action="store_true")
     x = s.add_parser("why", help="the premises behind READY / NOT READY for an issue, with evidence"); x.add_argument("refs", nargs="+")
-    x = s.add_parser("doctor", help="preflight: gh, git, clean checkout, gate, protected paths, orphan worktrees, disk"); x.add_argument("--batch", type=int, default=4)
+    x = s.add_parser("doctor", help="preflight: gh, git, clean checkout, gate, protected paths, dead agents, leftover worktrees, disk"); x.add_argument("--batch", type=int, default=4)
+    x = s.add_parser("agents", help="every issue worktree: age since dispatch, minutes since the newest change, PR, verdict (working | quiet | likely dead | done)")
     x = s.add_parser("prompt", help="print the agent prompt for one issue"); x.add_argument("issue"); x.add_argument("--parallel", type=int, default=4)
     x = s.add_parser("verify", help="check PRs: attribution, protected paths, CI, mergeability, worktree"); x.add_argument("prs", nargs="*"); x.add_argument("--epic"); x.add_argument("--json", action="store_true")
     x = s.add_parser("order", help="pairwise merge-tree -> merge order, per repo"); x.add_argument("prs", nargs="*"); x.add_argument("--epic"); x.add_argument("--json", action="store_true"); x.add_argument("--plan", help="write the approved delta (base sha + PR heads + order) to this file")
@@ -1193,6 +1285,7 @@ def main(argv=None):
         {"repos": cmd_repos, "facts": cmd_facts, "next": cmd_next, "dispatch": cmd_dispatch, "prompt": cmd_prompt,
      "verify": cmd_verify, "order": cmd_order, "merge": cmd_merge, "close-parents": cmd_close_parents,
              "cleanup": cmd_cleanup, "status": cmd_status, "lint": cmd_lint, "plan": cmd_plan, "why": cmd_why, "doctor": cmd_doctor,
+             "agents": cmd_agents,
          "guarantees": cmd_guarantees}[a.cmd](default, a)
     except SystemExit as e:
         exit_code = e.code if isinstance(e.code, int) else 1
