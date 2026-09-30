@@ -980,12 +980,19 @@ def cmd_doctor(default: Repo | None, a) -> None:
 
 # ---------------------------------------------------------------- plan
 
+def fill_refs(body: str, numbers: dict[str, int]) -> str:
+    """{{key}} -> #N (a mention); {{key.n}} -> N (bare, for branch names and `Closes #`)."""
+    for kk, num in numbers.items():
+        body = body.replace("{{" + kk + ".n}}", str(num)).replace("{{" + kk + "}}", f"#{num}")
+    return body
+
+
 def cmd_plan(default: Repo | None, a):
     """Create an epic's issues from a directory: <dir>/index.tsv, <dir>/deps.tsv, <dir>/<key>.md.
 
     index.tsv:  key<TAB>title<TAB>labels(comma or -)<TAB>parent-key-or-'-'   (parents before children)
     deps.tsv:   blocked-key<TAB>blocker-key
-    Bodies may reference other issues as {{key}}; numbers are filled in once every issue exists.
+    Bodies may reference issues as {{key}} (-> #N) or {{key.n}} (-> N, for branch names); filled once every issue exists.
     Creates in order, links sub-issues, wires blocked_by, applies --milestone, writes numbers.json.
     """
     repo = Repo.get(a.slug) if a.slug else default
@@ -1014,8 +1021,7 @@ def cmd_plan(default: Repo | None, a):
     ids: dict[str, int] = {}
     for k, title, labels, parent in rows:
         body = (d / f"{k}.md").read_text()
-        for kk, num in numbers.items():
-            body = body.replace("{{" + kk + "}}", f"#{num}")
+        body = fill_refs(body, numbers)
         cmd = ["issue", "create", "-R", repo.slug, "--title", title, "--body", body]
         for l in [x for x in labels.split(",") if x and x != "-"]:
             cmd += ["--label", l]
@@ -1033,9 +1039,8 @@ def cmd_plan(default: Repo | None, a):
         print(f"#{numbers[blocked]} blocked by #{numbers[blocker]}")
     for k, title, labels, parent in rows:  # bodies that referenced later issues get their numbers now
         body = (d / f"{k}.md").read_text()
-        if re.search(r"\{\{\w+\}\}", body):
-            for kk, num in numbers.items():
-                body = body.replace("{{" + kk + "}}", f"#{num}")
+        if re.search(r"\{\{[\w.]+\}\}", body):
+            body = fill_refs(body, numbers)
             repo.gh(["issue", "edit", str(numbers[k]), "-R", repo.slug, "--body", body])
             print(f"#{numbers[k]}: references filled")
     (d / "numbers.json").write_text(json.dumps(numbers, indent=2))
