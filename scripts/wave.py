@@ -29,8 +29,10 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tarfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -63,6 +65,10 @@ IGNORE_ACTIONS = ["actions/checkout", "actions/setup-*", "actions/cache", "actio
 WORKING_MIN = 10
 DEAD_MIN = 30
 STAMP = ".setwave.json"  # written by dispatch into each worktree, excluded from git: issue, repo, dispatched_at, prompt
+# more parallel agents than this once hit the API rate limit and left a half-extracted crate in the shared cargo cache
+MAX_BATCH = 6
+# a registry package in Cargo.lock: name, version, then a registry or sparse-index source (git and path packages are not cached there)
+LOCK_PACKAGE = re.compile(r'\[\[package\]\]\s*\nname = "([^"]+)"\s*\nversion = "([^"]+)"\s*\nsource = "(?:registry|sparse)\+')
 
 
 # ---------------------------------------------------------------- plumbing
@@ -525,6 +531,34 @@ def issue_worktrees(repo: Repo) -> list[tuple[Path, str, int]]:
     return out
 
 
+def cargo_home() -> Path:
+    return Path(os.environ.get("CARGO_HOME") or Path.home() / ".cargo")
+
+
+def broken_crates(root: Path, home: Path) -> tuple[int, list[tuple[Path, list[str], int]]]:
+    """(crates checked, [(directory, files missing, files in the archive)]) for the registry crates `Cargo.lock` names.
+
+    `.cargo-ok` is cargo's "extraction complete" marker, and it once sat on a directory that lacked two files: so a
+    marked directory is checked against its `.crate` archive, file by file. An unmarked one is skipped (cargo removes
+    and re-extracts it by itself), and so is one whose archive is gone (nothing to compare with)."""
+    wanted = {f"{m.group(1)}-{m.group(2)}" for m in LOCK_PACKAGE.finditer((root / "Cargo.lock").read_text())}
+    checked, broken = 0, []
+    for d in sorted((home / "registry" / "src").glob("*/*")):
+        archive = home / "registry" / "cache" / d.parent.name / f"{d.name}.crate"
+        if d.name not in wanted or not (d / ".cargo-ok").exists() or not archive.exists():
+            continue
+        try:
+            with tarfile.open(archive) as tar:
+                files = [m.name.split("/", 1)[1] for m in tar if m.isfile() and m.name.startswith(d.name + "/")]
+        except (tarfile.TarError, OSError, EOFError):
+            continue  # an unreadable archive: cargo verifies its checksum before it trusts it, so do not guess here
+        checked += 1
+        missing = [f for f in files if not (d / f).exists()]
+        if missing:
+            broken.append((d, missing, len(files)))
+    return checked, broken
+
+
 # ---------------------------------------------------------------- prompt
 
 def render_prompt(repo: Repo, iss: dict, branch: str, sha: str, parallel: int) -> str:
@@ -620,6 +654,17 @@ def cmd_dispatch(default: Repo | None, a):
     for repo in {r for r, _ in targets}:
         repo.fetch()
         repo.handoffs.mkdir(exist_ok=True)
+        if a.warm:  # archives downloaded once, here, so the worktrees' parallel builds only extract
+            if not (repo.root / "Cargo.toml").exists():
+                print(f"{repo.slug}: --warm: no Cargo.toml, nothing to fetch")
+                continue
+            if a.dry_run:
+                print(f"{repo.slug}: --warm: would run `cargo fetch` in {repo.root}")
+                continue
+            ok, out = sh_ok(["cargo", "fetch"], cwd=repo.root) if shutil.which("cargo") else (False, "cargo is not on PATH")
+            if not ok:
+                raise SystemExit(f"dispatch refused: `cargo fetch` failed in {repo.root}, no worktree created:\n{out}")
+            print(f"{repo.slug}: cargo fetch in {repo.root}: done")
     for repo, n in targets:
         iss = repo.issue(n)
         branch = branch_for(iss)
@@ -1075,6 +1120,10 @@ def cmd_doctor(default: Repo | None, a) -> None:
     v = re.search(r"(\d+)\.(\d+)", out)
     checks.append(("git >= 2.38 (merge-tree --write-tree)", bool(v) and (int(v.group(1)), int(v.group(2))) >= (2, 38), out.strip(), True))
     checks.append(("codegraph on PATH (optional)", sh_ok(["which", "codegraph"])[0], "agents index their worktree with it", False))
+    if a.batch > MAX_BATCH:
+        checks.append((f"batch of {a.batch} is at most {MAX_BATCH}", False,
+                       "eleven parallel agents once hit the rate limit (3 of 11 killed) and one killed mid-build left a crate "
+                       "half-extracted in the shared cargo cache — batch 4, and `wave dispatch --warm` to download once", False))
     if default is None:
         checks.append(("inside a registered repo", False, "run from a checkout, or pass --repo", True))
     else:
@@ -1106,6 +1155,27 @@ def cmd_doctor(default: Repo | None, a) -> None:
                         + " — resume the agent with `SendMessage` to its id, or "
                         + ", ".join(f"`wave dispatch --force {n}`" for _, n, _ in dead) + " to start over on top of what is there") if dead else "none", False))
         checks.append(("no leftover worktrees (merged or empty)", not stale, (", ".join(stale) + " — `wave cleanup`") if stale else "none", False))
+        if (r.root / "Cargo.lock").exists():
+            home = cargo_home()
+            checked, broken = broken_crates(r.root, home)
+            moved = []
+            quarantine = CONFIG_DIR / "quarantine"
+            for d, _, _ in (broken if getattr(a, "fix_cache", False) else []):  # moved aside, never deleted: cargo re-extracts it
+                dest = quarantine / f"{d.name}-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}"
+                try:
+                    quarantine.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(d), str(dest))
+                    moved.append(f"moved {d.name} to {dest}")
+                except OSError as e:  # the crate stays listed as broken, with why it could not be moved
+                    moved.append(f"could not move {d.name} to {dest}: {e}")
+            broken = [b for b in broken if b[0].exists()]
+            if broken:
+                ev = ("; ".join([m for m in moved if m.startswith("could not")]
+                                + [f"{d.name} is missing {len(m)} of {n} files ({', '.join(m[:3])}{', …' if len(m) > 3 else ''})" for d, m, n in broken])
+                      + f" — every fresh build fails inside it; `wave doctor --fix-cache` moves it to {quarantine} and cargo re-extracts it from the checksummed .crate")
+            else:
+                ev = "; ".join(moved + [f"{checked} extracted crate(s) match their archives in {home / 'registry'}"])
+            checks.append(("cargo cache holds every crate Cargo.lock names whole", not broken, ev, True))
         okdu, du = sh_ok(["du", "-sk", str(r.root / "target")]) if (r.root / "target").exists() else (False, "")
         build_kb = int(du.split()[0]) if okdu and du.split() else 0
         st = os.statvfs(r.root)
@@ -1134,6 +1204,10 @@ GUARANTEES = [
     ("doctor names every CI action the gate does not cover", "cmd_doctor -> Repo.ci_gate", "! CI runs `x/y@v1` and the gate does not", True),
     ("doctor tells an agent at work from a likely dead one, and names the recovery", "cmd_doctor -> liveness", "! no agent likely dead: <worktrees> — SendMessage or `wave dispatch --force N`", True),
     ("a likely dead worktree stays `worktree` in next, never `in progress`", "candidates -> liveness", "worktree exists (likely dead, nothing changed for N min)", True),
+    ("doctor fails on a crate cargo marked extracted but left half-written", "cmd_doctor -> broken_crates", "✗ cargo cache ...: <crate> is missing N of M files", True),
+    ("doctor --fix-cache moves a broken crate to quarantine, never deletes", "cmd_doctor --fix-cache", "moved <crate> to ~/.config/setwave/quarantine/<crate>-<time>", True),
+    ("doctor warns on a batch larger than MAX_BATCH", "cmd_doctor", "! batch of N is at most 6: the rate-limit and cache history", True),
+    ("dispatch --warm fetches once in the main checkout before any worktree; a failed fetch refuses", "cmd_dispatch --warm", "cargo fetch in <root>: done", True),
     ("no dispatch when doctor finds a hard failure", "cmd_dispatch -> cmd_doctor", "dispatch refused", False),
     ("no dispatch of an issue that is not READY", "cmd_dispatch -> premises_for", "refusal lists the failed premises", False),
     ("an existing worktree is kept, never recreated", "cmd_dispatch", "prints 'worktree exists'", False),
@@ -1255,9 +1329,9 @@ def main(argv=None):
     x.add_argument("action", choices=["list", "add", "scan"]); x.add_argument("path", nargs="?"); x.add_argument("--slug"); x.add_argument("--account"); x.add_argument("--base"); x.add_argument("--worktree-prefix", help="where worktrees go, e.g. ~/kyte-worktrees/demeter-  (default ../<repo>-)"); x.add_argument("--gate", nargs="*"); x.add_argument("--protected", nargs="*")
     x = s.add_parser("facts", help="what was discovered about repos"); x.add_argument("slugs", nargs="*")
     x = s.add_parser("next", help="leaf issues ready to dispatch"); x.add_argument("epic"); x.add_argument("--batch", type=int, default=4); x.add_argument("--json", action="store_true")
-    x = s.add_parser("dispatch", help="create worktrees + prompt files (runs doctor and refuses issues that are not READY)"); x.add_argument("issues", nargs="+"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--force", action="store_true")
+    x = s.add_parser("dispatch", help="create worktrees + prompt files (runs doctor and refuses issues that are not READY)"); x.add_argument("issues", nargs="+"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--force", action="store_true"); x.add_argument("--warm", action="store_true", help="Rust: `cargo fetch` in the main checkout first, so parallel builds only extract")
     x = s.add_parser("why", help="the premises behind READY / NOT READY for an issue, with evidence"); x.add_argument("refs", nargs="+")
-    x = s.add_parser("doctor", help="preflight: gh, git, clean checkout, gate, protected paths, dead agents, leftover worktrees, disk"); x.add_argument("--batch", type=int, default=4)
+    x = s.add_parser("doctor", help="preflight: gh, git, clean checkout, gate, protected paths, dead agents, leftover worktrees, cargo cache, disk, batch size"); x.add_argument("--batch", type=int, default=4); x.add_argument("--fix-cache", action="store_true", help="move each half-extracted crate to ~/.config/setwave/quarantine/ (never deletes)")
     x = s.add_parser("agents", help="every issue worktree: age since dispatch, minutes since the newest change, PR, verdict (working | quiet | likely dead | done)")
     x = s.add_parser("prompt", help="print the agent prompt for one issue"); x.add_argument("issue"); x.add_argument("--parallel", type=int, default=4)
     x = s.add_parser("verify", help="check PRs: attribution, protected paths, CI, mergeability, worktree"); x.add_argument("prs", nargs="*"); x.add_argument("--epic"); x.add_argument("--json", action="store_true")

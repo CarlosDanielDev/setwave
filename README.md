@@ -74,7 +74,7 @@ The last status comment on the epic is the paper trail. A single view across all
 
 | Step | Command (Claude runs these from inside the repo) | Who decides |
 | --- | --- | --- |
-| preflight | `wave doctor` — gh, git ≥ 2.38, clean checkout, real gate, protected paths, dead-agent and leftover worktrees, disk for the batch; `dispatch` refuses on ✗ | the script |
+| preflight | `wave doctor` — gh, git ≥ 2.38, clean checkout, real gate, protected paths, dead-agent and leftover worktrees, half-extracted crates in the cargo cache (`--fix-cache` moves them aside), disk and size of the batch; `dispatch` refuses on ✗, `dispatch --warm` runs `cargo fetch` once first | the script |
 | watch agents | `wave agents` — every issue worktree: minutes since dispatch, minutes since the newest change, open PR, and a verdict (`working`, `quiet`, `likely dead`, `done`); `doctor` names the likely dead with their recovery | files and git, never processes |
 | discover | `wave facts` — remote, base branch, gate from CI or manifest, protected paths | the repo |
 | find the wave | `wave next <epic> --batch 4` — every open leaf in exactly one state: blocked, in progress, worktree, ready | GitHub |
@@ -183,7 +183,7 @@ A guard is only as good as the test that fails without it: when you add one, rem
 ## Lessons baked in
 
 - `git merge-tree` predicts textual conflicts, not semantic ones; the base branch's CI after each merge is the truth.
-- A dead agent can leave a package cache half-extracted (`~/.cargo/registry/src`, `node_modules`); every fresh build then fails. Move the crate directory aside and rebuild.
+- A dead agent can leave a package cache half-extracted (`~/.cargo/registry/src`, `node_modules`); every fresh build then fails. `wave doctor` names the crate; `--fix-cache` moves it aside and cargo re-extracts it.
 - Four agents at a time, not eleven: same result, a quarter of the tokens, no rate-limit deaths. A dead agent is resumed, not redispatched.
 - Everything is Python because the orchestration loop must not depend on the user's shell.
 - Idempotent where it can be: `next`, `verify`, `order`, `status`, `why`, `lint`, `stats` are read-only; `dispatch` keeps an existing worktree; `close-parents` and `cleanup` skip what is done; `plan` refuses to run twice; `merge` re-checks `MERGEABLE` and CI before every single merge and stops at the first that is not.
