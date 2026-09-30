@@ -379,11 +379,32 @@ def candidates(nodes: dict[str, dict]) -> list[dict]:
         blockers = [f"{slug_of_api(b['repository_url'])}#{b['number']}" for b in bl if b["state"] == "open"]
         pr = pr_for_issue(repo, n)
         wt = repo.worktree(n)
+        state = "blocked" if blockers else "in-progress" if pr else "worktree" if wt.exists() else "ready"
         out.append({"key": nd["key"], "repo": repo.slug, "number": n, "title": iss["title"], "branch": branch_for(iss),
                     "blocked_by": blockers, "pr": pr["number"] if pr else None,
-                    "worktree": str(wt) if wt.exists() else None,
-                    "ready": not blockers and not pr and not wt.exists()})
+                    "worktree": str(wt) if wt.exists() else None, "state": state,
+                    "ready": state == "ready"})
+    # every open leaf is in exactly one state: the categories are exhaustive and exclusive by construction,
+    # and this assertion is what keeps a later edit from making them overlap
+    assert all(sum([bool(c["blocked_by"]), bool(c["pr"]), bool(c["worktree"]), c["ready"]]) >= 1 for c in out)
     return out
+
+
+def premises_for(repo: Repo, n: int) -> list[tuple[str, bool, str]]:
+    """The syllogism behind READY: each premise with its evidence. Conclusion = all hold."""
+    iss = repo.issue(n)
+    subs = repo.sub_issues(n)
+    bl = repo.blocked_by(n)
+    open_bl = [b for b in bl if b["state"] == "open"]
+    pr = pr_for_issue(repo, n)
+    wt = repo.worktree(n)
+    return [
+        ("it is a leaf (no sub-issues)", not subs, f"{len(subs)} sub-issues" if subs else "none"),
+        ("it is open", iss["state"] == "open", iss["state"]),
+        ("every blocker is closed", not open_bl, ", ".join(f"{slug_of_api(b['repository_url'])}#{b['number']} {b['state']}" for b in bl) or "no blockers"),
+        ("no open PR closes it", pr is None, f"PR #{pr['number']} ({pr['headRefName']})" if pr else "none"),
+        ("no worktree exists for it", not wt.exists(), str(wt)),
+    ]
 
 
 def why(c: dict) -> str:
@@ -478,6 +499,16 @@ def cmd_next(default: Repo | None, a):
 
 def cmd_dispatch(default: Repo | None, a):
     targets = [parse_ref(r, default) for r in a.issues]
+    if not a.dry_run and not a.force:
+        class _D: batch = len(targets)
+        try:
+            cmd_doctor(default, _D())
+        except SystemExit:
+            raise SystemExit("dispatch refused: doctor found a hard failure (pass --force only if you have read it and disagree)")
+        for repo, n in targets:
+            bad = [t for t, ok, _ in premises_for(repo, n) if not ok]
+            if bad:
+                raise SystemExit(f"dispatch refused: {key(repo, n)} is not ready — {'; '.join(bad)}. `wave why {key(repo, n)}`")
     for repo in {r for r, _ in targets}:
         repo.fetch()
         repo.handoffs.mkdir(exist_ok=True)
@@ -563,17 +594,27 @@ def verify_one(repo: Repo, pr: dict, epic_nodes: dict | None = None) -> dict:
         cited = [f for f in touched_files if f in (iss.get("body") or "")]
         if cited:
             siblings.append({"issue": nd["key"], "files": cited})
+    contradictions = []
+    m_branch = re.search(r"/(\d+)-", head)
+    if n_issue and m_branch and int(m_branch.group(1)) != n_issue:
+        contradictions.append(f"branch says #{m_branch.group(1)}, body closes #{n_issue}")
+    if n_issue:
+        if repo.sub_issues(n_issue):
+            contradictions.append(f"#{n_issue} is a parent, not a leaf: a PR must close a leaf")
+        open_bl = [b for b in repo.blocked_by(n_issue) if b["state"] == "open"]
+        if open_bl:
+            contradictions.append(f"#{n_issue} still blocked by " + ", ".join(f"#{b['number']}" for b in open_bl) + ": merging it would break the dependency order")
     wt = repo.worktree(n_issue) if n_issue else None
     wt_state = None
     if wt and wt.exists():
         dirty = bool(repo.git(["status", "--porcelain"], cwd=wt).strip())
         ok, unpushed = repo.git_ok(["log", "--oneline", "@{u}.."], cwd=wt)
         wt_state = {"dirty": dirty, "unpushed": bool(unpushed.strip()) if ok else None}
-    ok = (not attribution and not touched and not bad and pr.get("mergeable") != "CONFLICTING"
+    ok = (not attribution and not touched and not bad and pr.get("mergeable") != "CONFLICTING" and not contradictions
           and not (wt_state and (wt_state["dirty"] or wt_state["unpushed"])))
     return {"repo": repo.slug, "pr": pr["number"], "issue": n_issue, "head": head, "attribution": attribution,
             "protected_touched": touched, "checks_not_green": bad, "mergeable": pr.get("mergeable"),
-            "worktree": wt_state, "notify_issues": siblings, "ok": ok}
+            "worktree": wt_state, "notify_issues": siblings, "contradictions": contradictions, "ok": ok}
 
 
 def cmd_verify(default: Repo | None, a):
@@ -594,6 +635,7 @@ def cmd_verify(default: Repo | None, a):
             if r["checks_not_green"]: flags.append("CI:" + ",".join(f"{k}={v}" for k, v in r["checks_not_green"].items()))
             if r["mergeable"] == "CONFLICTING": flags.append("CONFLICT")
             if r["worktree"] and (r["worktree"]["dirty"] or r["worktree"]["unpushed"]): flags.append("WORKTREE-NOT-CLEAN")
+            for c in r["contradictions"]: flags.append("CONTRADICTION[" + c + "]")
             print(f"{r['repo']}#{r['pr']:<5} issue #{r['issue'] or '?':<5} {'OK    ' if r['ok'] else 'NOT OK'} {' '.join(flags)}")
             for sib in r["notify_issues"]:
                 print(f"        notify {sib['issue']}: cites {', '.join(sib['files'])} — comment there what this PR changed")
@@ -648,7 +690,9 @@ def cmd_order(default: Repo | None, a):
             else:
                 chain.append((n, sorted(set(re.findall(r"Merge conflict in (.+)", out + err))) or ["<conflict>"]))
         result[slug] = {"order": order, "pairs": {f"{x}x{y}": v for (x, y), v in pairs.items()}, "against_base": against_base,
-                        "serial": serial_prs, "chain": chain}
+                        "serial": serial_prs, "chain": chain,
+                        "base_sha": repo.git(["rev-parse", base]).strip(),
+                        "heads": {n: repo.git(["rev-parse", heads[n]]).strip() for n in nums}}
         if not a.json:
             print(f"== {slug} (base {base}) ==")
             for n in nums:
@@ -662,9 +706,12 @@ def cmd_order(default: Repo | None, a):
                 print(f"  SERIAL (touch {', '.join(serial_paths)}): {' '.join(f'#{n}' for n in serial_prs)} — one after the other, in their issues' blocked_by order, never in one batch")
             print("  order: " + " -> ".join(f"{slug}#{n}" for n in order))
             print("  chain: " + "  ".join(f"#{n}✓" if not c else f"#{n}✗[{','.join(c)}]" for n, c in chain) + "   (✗ = merge the base into that branch right before merging it)")
+    if a.plan:
+        Path(a.plan).write_text(json.dumps({"made_at": now_iso(), "repos": result}, indent=2) + "\n")
+        print(f"\nplan written to {a.plan} — show it, get the OK, then `merge --plan {a.plan} --yes`")
     if a.json:
         print(json.dumps(result, indent=2))
-    else:
+    elif not a.plan:
         print("\n(textual only — the base branch's CI after each merge is the truth for semantic conflicts)")
 
 
@@ -680,6 +727,32 @@ def wait_for(fn, timeout: int, every: int = 10):
 
 def cmd_merge(default: Repo | None, a):
     targets = [parse_ref(r, default) for r in a.prs]
+    if a.plan:
+        plan = json.loads(Path(a.plan).read_text())
+        planned = []
+        for slug, pl in plan["repos"].items():
+            repo = Repo.get(slug)
+            repo.fetch()
+            now_base = repo.git(["rev-parse", f"origin/{repo.base}"]).strip()
+            if now_base != pl["base_sha"]:
+                raise SystemExit(f"{slug}: origin/{repo.base} moved since the plan ({pl['base_sha'][:7]} -> {now_base[:7]}). The OK was for that delta: re-run `order --plan` and ask again.")
+            for n in pl["order"]:
+                pr = next((x for x in repo.open_prs() if x["number"] == n), None)
+                if not pr:
+                    raise SystemExit(f"{slug}#{n}: no longer an open PR; re-run `order --plan`.")
+                head_now = repo.git(["rev-parse", f"origin/{pr['headRefName']}"]).strip()
+                if head_now != pl["heads"][str(n)]:
+                    raise SystemExit(f"{slug}#{n}: its branch moved since the plan ({pl['heads'][str(n)][:7]} -> {head_now[:7]}). Re-run `order --plan` and ask again.")
+                planned.append((repo, n))
+        targets = planned or targets
+    if not a.force:
+        for repo, n in targets:
+            pr = next((x for x in repo.open_prs() if x["number"] == n), None)
+            n_issue = next((int(num) for _, num in CLOSES.findall((pr or {}).get("body") or "")), None)
+            if n_issue:
+                open_bl = [b for b in repo.blocked_by(n_issue) if b["state"] == "open"]
+                if open_bl:
+                    raise SystemExit(f"{key(repo, n)} closes #{n_issue}, which is still blocked by " + ", ".join(f"#{b['number']}" for b in open_bl) + ". Merge the blockers first (or --force, and say why in the PR).")
     if not a.yes:
         print("dry run — pass --yes only with the owner's explicit OK in the conversation. Order: " + " ".join(key(r, n) for r, n in targets))
         return
@@ -822,12 +895,87 @@ def cmd_lint(default: Repo | None, a):
         if not re.search(r"^Parent:\s*\S*#\d+", body, re.M):
             missing.append("`Parent: #N` first line")
         if "Depends on" in body and not repo.blocked_by(n):
-            missing.append("body says 'Depends on' but no blocked_by is wired in GitHub")
+            missing.append("CONTRADICTION: body says 'Depends on' but no blocked_by is wired in GitHub")
+        mb = BRANCH_IN_BODY.search(body)
+        if mb and f"/{n}-" not in mb.group(1):
+            missing.append(f"CONTRADICTION: handoff branch `{mb.group(1)}` does not carry #{n}")
+        closes = [int(num) for _, num in CLOSES.findall(body)]
+        if closes and n not in closes:
+            missing.append(f"CONTRADICTION: body closes {closes} but this is #{n}")
+        if repo.sub_issues(n) and "## Handoff" in body and n != getattr(a, "epic", 0):
+            missing.append("a parent with a Handoff block: parents are never dispatched; move the handoff to the leaves")
         if not re.search(r"\b[\w./-]+\.(rs|ts|tsx|js|py|go|swift|kt|rb|php|cs|java):\d+", body):
             missing.append("no `file:line` evidence")
         problems += bool(missing)
         print(f"{key(repo, n)}: " + ("ok" if not missing else "; ".join(missing)))
     sys.exit(1 if problems else 0)
+
+
+# ---------------------------------------------------------------- why / doctor
+
+def cmd_why(default: Repo | None, a):
+    for ref in a.refs:
+        repo, n = parse_ref(ref, default)
+        iss = repo.issue(n)
+        prem = premises_for(repo, n)
+        print(f"{key(repo, n)} — {iss['title']}")
+        for text, ok, ev in prem:
+            print(f"  {'✓' if ok else '✗'} {text}: {ev}")
+        ready = all(ok for _, ok, _ in prem)
+        print("  ∴ " + ("READY — every premise holds" if ready else "NOT READY — the first ✗ is the reason") + "\n")
+
+
+def cmd_doctor(default: Repo | None, a) -> None:
+    """Preflight. Every ✗ is a mistake that dispatch would otherwise let happen."""
+    checks: list[tuple[str, bool, str, bool]] = []  # (text, ok, evidence, hard)
+    ok, out = sh_ok(["gh", "auth", "status"])
+    checks.append(("gh is logged in", ok, (out.strip().splitlines() or [""])[0].strip(), True))
+    ok, out = sh_ok(["git", "--version"])
+    v = re.search(r"(\d+)\.(\d+)", out)
+    checks.append(("git >= 2.38 (merge-tree --write-tree)", bool(v) and (int(v.group(1)), int(v.group(2))) >= (2, 38), out.strip(), True))
+    checks.append(("codegraph on PATH (optional)", sh_ok(["which", "codegraph"])[0], "agents index their worktree with it", False))
+    if default is None:
+        checks.append(("inside a registered repo", False, "run from a checkout, or pass --repo", True))
+    else:
+        r = default
+        dirty = r.git(["status", "--porcelain", "--untracked-files=no"]).strip()
+        untracked = r.git(["status", "--porcelain", "--untracked-files=all"]).count("?? ")
+        checks.append((f"main checkout `{r.root.name}` has no tracked changes (you never work there)", not dirty,
+                       (f"{len(dirty.splitlines())} modified path(s)" if dirty else "clean") + (f", {untracked} untracked (fine)" if untracked else ""), True))
+        gate = r.gate()
+        checks.append(("gate is declared and real", bool(gate) and not gate[0].startswith("<"), " && ".join(gate), True))
+        checks.append(("protected paths declared", bool(r.protected), ", ".join(r.protected) or "none: verify cannot guard anything — `repos add . --protected <paths>`", False))
+        r.fetch()
+        merged = {l.strip().replace("origin/", "") for l in r.git(["branch", "-r", "--merged", f"origin/{r.base}"]).splitlines()}
+        orphans, stale = [], []
+        for block in r.git(["worktree", "list", "--porcelain"]).split("\n\n"):
+            m = re.search(r"^worktree (.+)$", block, re.M)
+            b = re.search(r"^branch refs/heads/(.+)$", block, re.M)
+            if not m or not b:
+                continue
+            wt = Path(m.group(1))
+            mm = re.match(rf"{re.escape(r.worktree(0).name[:-1])}(\d+)$", wt.name)
+            if not mm:
+                continue
+            if b.group(1) in merged or not r.git_ok(["rev-parse", "--verify", f"origin/{b.group(1)}"])[0] and not r.git(["log", "--oneline", f"origin/{r.base}..HEAD"], cwd=wt).strip():
+                stale.append(wt.name)          # merged, or never pushed and no commits: leftovers, `wave cleanup`
+            elif not pr_for_issue(r, int(mm.group(1))):
+                orphans.append(wt.name)        # unmerged work with no PR: an agent running, or one that died
+        checks.append(("no unmerged worktree without an open PR (an agent still running, or one that died)", not orphans, ", ".join(orphans) or "none", False))
+        checks.append(("no leftover worktrees (merged or empty)", not stale, (", ".join(stale) + " — `wave cleanup`") if stale else "none", False))
+        okdu, du = sh_ok(["du", "-sk", str(r.root / "target")]) if (r.root / "target").exists() else (False, "")
+        build_kb = int(du.split()[0]) if okdu and du.split() else 0
+        st = os.statvfs(r.root)
+        free_kb = st.f_bavail * st.f_frsize // 1024
+        need_kb = build_kb * a.batch
+        checks.append((f"disk for {a.batch} parallel builds", free_kb > need_kb * 1.2 or build_kb == 0,
+                       f"free {free_kb // 1024 // 1024} GB, one build ≈ {build_kb // 1024} MB, need ≈ {need_kb // 1024} MB", True))
+    for text, ok, ev, hard in checks:
+        print(f"  {'✓' if ok else ('✗' if hard else '!')} {text}: {ev}")
+    hard_fail = [c for c in checks if not c[1] and c[3]]
+    print("  ∴ " + ("fit to dispatch" if not hard_fail else f"NOT fit — {len(hard_fail)} hard failure(s) above; fix them, do not dispatch"))
+    if hard_fail:
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------- plan
@@ -905,11 +1053,13 @@ def main(argv=None):
     x.add_argument("action", choices=["list", "add", "scan"]); x.add_argument("path", nargs="?"); x.add_argument("--slug"); x.add_argument("--account"); x.add_argument("--base"); x.add_argument("--gate", nargs="*"); x.add_argument("--protected", nargs="*")
     x = s.add_parser("facts", help="what was discovered about repos"); x.add_argument("slugs", nargs="*")
     x = s.add_parser("next", help="leaf issues ready to dispatch"); x.add_argument("epic"); x.add_argument("--batch", type=int, default=4); x.add_argument("--json", action="store_true")
-    x = s.add_parser("dispatch", help="create worktrees + prompt files"); x.add_argument("issues", nargs="+"); x.add_argument("--dry-run", action="store_true")
+    x = s.add_parser("dispatch", help="create worktrees + prompt files (runs doctor and refuses issues that are not READY)"); x.add_argument("issues", nargs="+"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--force", action="store_true")
+    x = s.add_parser("why", help="the premises behind READY / NOT READY for an issue, with evidence"); x.add_argument("refs", nargs="+")
+    x = s.add_parser("doctor", help="preflight: gh, git, clean checkout, gate, protected paths, orphan worktrees, disk"); x.add_argument("--batch", type=int, default=4)
     x = s.add_parser("prompt", help="print the agent prompt for one issue"); x.add_argument("issue"); x.add_argument("--parallel", type=int, default=4)
     x = s.add_parser("verify", help="check PRs: attribution, protected paths, CI, mergeability, worktree"); x.add_argument("prs", nargs="*"); x.add_argument("--epic"); x.add_argument("--json", action="store_true")
-    x = s.add_parser("order", help="pairwise merge-tree -> merge order, per repo"); x.add_argument("prs", nargs="*"); x.add_argument("--epic"); x.add_argument("--json", action="store_true")
-    x = s.add_parser("merge", help="merge PRs in order, one at a time, CI green before each"); x.add_argument("prs", nargs="+"); x.add_argument("--yes", action="store_true"); x.add_argument("--squash", action="store_true"); x.add_argument("--ci-timeout", type=int, default=1200); x.add_argument("--wait-base-ci", action="store_true")
+    x = s.add_parser("order", help="pairwise merge-tree -> merge order, per repo"); x.add_argument("prs", nargs="*"); x.add_argument("--epic"); x.add_argument("--json", action="store_true"); x.add_argument("--plan", help="write the approved delta (base sha + PR heads + order) to this file")
+    x = s.add_parser("merge", help="merge PRs in order, one at a time, CI green before each"); x.add_argument("prs", nargs="*"); x.add_argument("--yes", action="store_true"); x.add_argument("--plan", help="plan file from `order --plan`: refuses if the base or any PR head moved since"); x.add_argument("--force", action="store_true"); x.add_argument("--squash", action="store_true"); x.add_argument("--ci-timeout", type=int, default=1200); x.add_argument("--wait-base-ci", action="store_true")
     x = s.add_parser("close-parents", help="close parents whose sub-issues are all closed"); x.add_argument("epic"); x.add_argument("--include-epic", action="store_true"); x.add_argument("--dry-run", action="store_true")
     x = s.add_parser("cleanup", help="remove worktrees that are clean, pushed and merged"); x.add_argument("slugs", nargs="*"); x.add_argument("--dry-run", action="store_true")
     x = s.add_parser("status", help="tree with states; --post comments it on the epic"); x.add_argument("epic"); x.add_argument("--post", action="store_true")
@@ -930,7 +1080,7 @@ def main(argv=None):
     try:
         {"repos": cmd_repos, "facts": cmd_facts, "next": cmd_next, "dispatch": cmd_dispatch, "prompt": cmd_prompt,
      "verify": cmd_verify, "order": cmd_order, "merge": cmd_merge, "close-parents": cmd_close_parents,
-         "cleanup": cmd_cleanup, "status": cmd_status, "lint": cmd_lint, "plan": cmd_plan}[a.cmd](default, a)
+             "cleanup": cmd_cleanup, "status": cmd_status, "lint": cmd_lint, "plan": cmd_plan, "why": cmd_why, "doctor": cmd_doctor}[a.cmd](default, a)
     except SystemExit as e:
         exit_code = e.code if isinstance(e.code, int) else 1
         raise

@@ -23,12 +23,14 @@ Needs `gh` (logged in), `git` ≥ 2.38, Python 3. `codegraph` is used when prese
 
 | Step | Command (run by Claude, from inside the repo) | Who decides |
 | --- | --- | --- |
+| preflight | `wave doctor` — gh, git ≥ 2.38, clean checkout, real gate, protected paths, orphan worktrees, disk; `dispatch` refuses on ✗ | the script |
 | discover the repo | `wave facts` — remote, base branch, gate from CI, protected paths | the repo |
+| explain | `wave why <issue>` — the premises behind READY / NOT READY, with evidence | the script |
 | find the next wave | `wave next <epic> --batch 4` — open leaves with no open blocker, no PR, no worktree | GitHub |
 | dispatch | `wave dispatch <issues>` — worktrees from `origin/<base>`, one prompt file per issue | Claude spawns one agent per file |
 | verify | `wave verify <PR>` — no AI attribution, protected paths untouched, CI green, worktree clean and pushed | the script |
 | order | `wave order --epic <epic>` — pairwise `git merge-tree`, conflicts named | the script |
-| merge | `wave merge <PRs> --yes --wait-base-ci` — one at a time, CI green before each, stops at the first conflict | **you**, with an explicit OK |
+| merge | `wave order --plan p.json` then `wave merge --plan p.json --yes --wait-base-ci` — refuses if the base or a PR head moved since the OK, refuses a still-blocked issue, one at a time, CI green before each, stops at the first conflict | **you**, with an explicit OK on that exact plan |
 | close out | `wave close-parents`, `wave cleanup`, `wave status --post` | the script |
 | plan an epic | `wave plan <dir>` — creates the issues from `index.tsv` + `deps.tsv` + one body per key, links sub-issues, wires `blocked_by`; refuses to run twice | the audit session writes the bodies |
 | measure | `wave stats` — every run is logged to `~/.config/setwave/log.jsonl`: command, seconds, exit | the log |
@@ -50,6 +52,10 @@ Conflicts are resolved by merging the base branch *into* the PR's branch and pus
 See [`templates/issue-contract.md`](templates/issue-contract.md). Short version: an epic with **sub-issues** (not just mentions), dependencies as **`blocked_by`** (not just words), and a body with `file:line` evidence, a `## Done when` with owners, an `## ADR stub`, an `## Out of scope`, and a `## Handoff` block carrying the branch name and a CodeGraph query. `wave lint <issues>` tells you what is missing.
 
 Agents read the issue **and its comments**: when a PR changes a symbol another open issue cites, the agent leaves a one-line comment there. That is how "what the next wave inherits" becomes data instead of someone's memory.
+
+## Mistake-proofing
+
+The tool prefers making a wrong action impossible over warning about it: no `--yes`, no merge; plan SHAs moved, no merge; issue still blocked, no merge; `doctor` ✗, no dispatch; a directory already applied, no second `plan`. What cannot be made impossible is made loud: `verify` names AI attribution, protected paths touched, red CI, unclean worktrees, and contradictions (branch number ≠ closed issue, PR closing a parent). `why` prints the premises behind every READY so a "why not?" is answered with evidence.
 
 ## Lessons baked in
 
