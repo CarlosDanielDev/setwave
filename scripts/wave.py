@@ -790,6 +790,13 @@ def verify_one(repo: Repo, pr: dict, epic_nodes: dict | None = None) -> dict:
         open_bl = [b for b in repo.blocked_by(n_issue) if b["state"] == "open"]
         if open_bl:
             contradictions.append(f"#{n_issue} still blocked by " + ", ".join(f"#{b['number']}" for b in open_bl) + ": merging it would break the dependency order")
+    # GitHub closes every ref a closing keyword names in the body *or in any commit message* once the PR merges
+    log = repo.git(["log", "--format=%h%x1f%B%x1e", f"origin/{repo.base}..origin/{head}"])
+    texts = [("body", body)] + [("commit " + h, msg) for h, _, msg in (c.strip().partition("\x1f") for c in log.split("\x1e")) if h]
+    refs = [(where, m.group(0), m.group(1) or repo.slug, int(m.group(2))) for where, t in texts for m in CLOSES.finditer(t)]
+    own = n_issue or (int(m_branch.group(1)) if m_branch else None) or next((n for _, _, s, n in refs if s == repo.slug), None)
+    closes_other = [{"where": where, "text": text} for where, text, s, n in refs if (s, n) != (repo.slug, own)]
+    closes_only_in_commit = own if not n_issue and any((s, n) == (repo.slug, own) for _, _, s, n in refs) else None
     wt = repo.worktree(n_issue) if n_issue else None
     wt_state = None
     if wt and wt.exists():
@@ -797,10 +804,11 @@ def verify_one(repo: Repo, pr: dict, epic_nodes: dict | None = None) -> dict:
         ok, unpushed = repo.git_ok(["log", "--oneline", "@{u}.."], cwd=wt)
         wt_state = {"dirty": dirty, "unpushed": bool(unpushed.strip()) if ok else None}
     ok = (not attribution and not touched and not bad and pr.get("mergeable") != "CONFLICTING" and not contradictions
-          and not (wt_state and (wt_state["dirty"] or wt_state["unpushed"])))
+          and not (wt_state and (wt_state["dirty"] or wt_state["unpushed"])) and not closes_other and not closes_only_in_commit)
     return {"repo": repo.slug, "pr": pr["number"], "issue": n_issue, "head": head, "attribution": attribution,
             "protected_touched": touched, "checks_not_green": bad, "mergeable": pr.get("mergeable"),
-            "worktree": wt_state, "notify_issues": siblings, "contradictions": contradictions, "ok": ok}
+            "worktree": wt_state, "notify_issues": siblings, "contradictions": contradictions,
+            "closes_other": closes_other, "closes_only_in_commit": closes_only_in_commit, "ok": ok}
 
 
 def cmd_verify(default: Repo | None, a):
@@ -822,7 +830,12 @@ def cmd_verify(default: Repo | None, a):
             if r["mergeable"] == "CONFLICTING": flags.append("CONFLICT")
             if r["worktree"] and (r["worktree"]["dirty"] or r["worktree"]["unpushed"]): flags.append("WORKTREE-NOT-CLEAN")
             for c in r["contradictions"]: flags.append("CONTRADICTION[" + c + "]")
+            for c in r["closes_other"]: flags.append(f"CLOSES-OTHER[{c['where']}: {c['text']}]")
+            if r["closes_only_in_commit"]: flags.append(f"NO-CLOSES-IN-BODY[#{r['closes_only_in_commit']} is closed only by a commit: GitHub links it at merge, not before]")
             print(f"{r['repo']}#{r['pr']:<5} issue #{r['issue'] or '?':<5} {'OK    ' if r['ok'] else 'NOT OK'} {' '.join(flags)}")
+            if r["closes_other"]:
+                print("        merging would close those issues too. Reword the body; a pushed commit cannot be reworded without a"
+                      " force push, which wave never does: open a new branch with a clean message, or reopen the issue after merge")
             for sib in r["notify_issues"]:
                 print(f"        notify {sib['issue']}: cites {', '.join(sib['files'])} — comment there what this PR changed")
     sys.exit(0 if results and all(r["ok"] for r in results) else 1)
@@ -1036,8 +1049,8 @@ def cmd_merge(default: Repo | None, a):
             print(f"{key(repo, n)}: not an open PR any more. Stopping."); sys.exit(2)
         v = verify_one(repo, pr)
         if not v["ok"] and not a.force:
-            print(f"{key(repo, n)}: verify says NOT OK — attribution={v['attribution']} protected={v['protected_touched']} ci={v['checks_not_green']} contradictions={v['contradictions']} worktree={v['worktree']}. Not merging."
-                  + (f" It conflicts with {repo.base}: `wave resolve {key(repo, n)}`, then rerun merge from here." if v["mergeable"] == "CONFLICTING" else ""))
+            print(f"{key(repo, n)}: verify says NOT OK — attribution={v['attribution']} protected={v['protected_touched']} ci={v['checks_not_green']} contradictions={v['contradictions']} closes_other={v['closes_other']} closes_only_in_commit={v['closes_only_in_commit']} worktree={v['worktree']}. Not merging."
+                  + (f" It conflicts with {repo.base}: run `wave resolve` on PR {key(repo, n)}, then rerun merge from here." if v["mergeable"] == "CONFLICTING" else ""))
             sys.exit(2)
 
         def mergeable():
@@ -1048,7 +1061,7 @@ def cmd_merge(default: Repo | None, a):
 
         m = wait_for(mergeable, 180, 5)
         if m != "MERGEABLE":
-            print(f"{key(repo, n)}: {m}." + (f" `wave resolve {key(repo, n)}` merges {repo.base} into its branch in its worktree, gates and pushes (never --force); then rerun merge from here." if m == "CONFLICTING" else ""))
+            print(f"{key(repo, n)}: {m}." + (f" `wave resolve` on PR {key(repo, n)} merges {repo.base} into its branch in its worktree, gates and pushes (never --force); then rerun merge from here." if m == "CONFLICTING" else ""))
             sys.exit(2)
 
         def ci():
@@ -1444,6 +1457,8 @@ GUARANTEES = [
     ("verify flags AI attribution in body or commits", "verify_one", "AI-ATTRIBUTION", True),
     ("verify flags protected paths touched", "verify_one", "PROTECTED:<paths>", True),
     ("verify flags a PR closing a parent or a still-blocked issue", "verify_one", "CONTRADICTION[...]", True),
+    ("verify refuses a PR whose body or any commit message closes an issue other than its own", "verify_one (+ cmd_merge)", "CLOSES-OTHER[<body or commit>: <the keyword and its ref>]", True),
+    ("verify refuses a PR whose own issue is closed only by a commit message", "verify_one (+ cmd_merge)", "NO-CLOSES-IN-BODY[#N ...]", True),
     ("verify names sibling issues that cite files the PR touched", "verify_one --epic", "notify lines", False),
     ("order predicts pairwise and chained textual conflicts", "cmd_order", "pairs + chain ✗", True),
     ("order flags serial paths", "cmd_order", "SERIAL line", True),

@@ -104,6 +104,57 @@ class Verify(unittest.TestCase):
         self.assertEqual(r["contradictions"], ["#1 is a parent, not a leaf: a PR must close a leaf"])
 
 
+class ClosingKeywords(unittest.TestCase):
+    """GitHub closes every issue a closing keyword names, in the PR body or in any commit message."""
+
+    def verify(self, n):
+        p = run_wave("verify", str(n), "--json")
+        return p.returncode, json.loads(p.stdout)[0]
+
+    def test_a_commit_that_closes_another_issue_is_refused(self):
+        rc, r = self.verify(27)
+        self.assertEqual((rc, r["ok"], r["issue"]), (1, False, 50), r)
+        self.assertEqual([(c["where"][:7], c["text"]) for c in r["closes_other"]], [("commit ", "resolve o/r#60")])
+        p = run_wave("verify", "27")
+        self.assertIn("CLOSES-OTHER[commit ", p.stdout)
+        self.assertIn(": resolve o/r#60]", p.stdout)
+        self.assertIn("force push", p.stdout, "the refusal names the way out, since a pushed message cannot be reworded")
+
+    def test_another_issue_in_the_body_is_refused(self):
+        rc, r = self.verify(30)
+        self.assertEqual((rc, r["ok"], r["issue"]), (1, False, 52), r)
+        self.assertEqual(r["closes_other"], [{"where": "body", "text": "fixes: o/r#61"}])
+
+    def test_own_issue_only_in_a_commit_is_refused(self):
+        rc, r = self.verify(28)
+        self.assertEqual((rc, r["ok"], r["closes_only_in_commit"]), (1, False, 51), r)
+        self.assertIn("NO-CLOSES-IN-BODY[#51", run_wave("verify", "28").stdout)
+
+    def test_own_issue_in_the_body_and_a_commit_is_ok(self):
+        rc, r = self.verify(29)
+        self.assertEqual((rc, r["ok"], r["closes_other"], r["closes_only_in_commit"]), (0, True, [], None), r)
+
+    def test_merge_refuses_what_verify_refuses(self):
+        for n in (27, 28):
+            with self.subTest(pr=n):
+                before = len(gh_calls())
+                p = run_wave("merge", str(n), "--yes")
+                self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+                self.assertIn("Not merging", p.stdout)
+                self.assertFalse([c for c in gh_calls()[before:] if c[:2] == ["pr", "merge"]])
+
+    def test_no_hint_or_prompt_example_closes_anything(self):
+        prompt = (wave.TEMPLATES / "agent.md").read_text()
+        self.assertEqual(wave.CLOSES.findall(prompt), [], "the raw template names no closing ref")
+        iss = {"number": 2, "title": "t", "html_url": "https://github.com/o/r/issues/2"}
+        rendered = wave.render_prompt(repo(), iss, "feat/2-t", "0" * 40, 2)
+        self.assertEqual([int(n) for _, n in wave.CLOSES.findall(rendered)], [2], "the rendered prompt closes only its issue")
+        src = wave.Path(wave.__file__).read_text()
+        merge_src = src[src.index("def cmd_merge"):src.index("def cmd_resolve")]
+        self.assertEqual(wave.CLOSES.findall(merge_src.replace("{key(repo, n)}", "o/r#9")), [],
+                         "a hint printed by merge, once its ref is filled in, closes nothing")
+
+
 class MergeTree(unittest.TestCase):
     def test_conflicting_and_clean_pairs(self):
         r = repo()
