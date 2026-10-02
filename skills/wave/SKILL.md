@@ -57,7 +57,7 @@ Every conclusion the tool prints is the last line of a syllogism whose premises 
 - No AI attribution in commits or PRs. None of: `git gc --prune`, `reflog expire`, `stash`, `reset --hard`, `clean -f`, `push --force*`, `branch -D`, `rm -rf`. No `gh pr merge --auto`. Merge only with an explicit OK in this conversation.
 - Never touch the main checkout or a worktree that is not yours. Evidence before assertion. Every guard mutation-checked.
 - Relay nothing you have not verified with `wave verify`.
-- Every PR body carries a `## Done when` ledger — the issue's list with `[x]`, `[ ]` + why, or `~~item~~ — dropped: reason`. Today you check it by eye; from v0.4.0 `verify` refuses a PR without it and `merge` applies it to the issue (#12 in this plugin's repo).
+- Every PR body carries a `## Done when` ledger — the issue's list with `[x]`, `[ ] item — not done: why`, or `~~item~~ — dropped: reason`. `verify` refuses a PR without it or with items that differ from the issue (`LEDGER-MISSING` / `LEDGER-MISMATCH`): send the agent back to fix its PR body, nobody else edits it. `merge` applies it to the issue; `wave tick <issue> --done <item> --strike <item> --why <reason>` is the same step by hand when `merge` says it could not.
 
 ## What an issue must look like
 

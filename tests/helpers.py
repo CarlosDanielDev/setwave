@@ -88,6 +88,7 @@ def sandbox() -> Path:
     commit_on("feat/50-other", "o.txt", "o\n", "Add o.txt\n\nCloses #50\n\nThe old hint read: `wave resolve o/r#60`.")
     commit_on("feat/51-commit-only", "p.txt", "p\n", "Add p.txt\n\nCloses #51")
     commit_on("feat/52-both", "q.txt", "q\n", "Add q.txt\n\nCloses: #52")
+    commit_on("feat/53-partial", "p53.txt", "p53\n", "Add p53.txt\n\nCloses #53")  # a ledger that leaves one item open
     (TMP / "r-5").mkdir()  # the worktree path of #5: its existence is the fact `candidates` reads
     (TMP / "config").mkdir()
     (TMP / "config" / "repos.json").write_text(json.dumps({"search_paths": [str(TMP)], "repos": {"o/r": {"path": str(CLONE)}}}))

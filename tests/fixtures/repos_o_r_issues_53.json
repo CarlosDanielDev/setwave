@@ -1,0 +1,10 @@
+{
+  "id": 1053,
+  "number": 53,
+  "title": "Partly done, closed by its merge",
+  "state": "closed",
+  "body": "Parent: #1\n\nWhy.\n\n## Done when\n\n- [ ] p53.txt exists — owner: implementer\n- [ ] docs updated — owner: implementer\n- [ ] benchmarks — owner: implementer\n\n## Out of scope\n\n- [ ] not an item\n",
+  "labels": [],
+  "html_url": "https://github.com/o/r/issues/53",
+  "repository_url": "https://api.github.com/repos/o/r"
+}

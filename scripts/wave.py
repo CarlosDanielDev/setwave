@@ -441,6 +441,110 @@ def codegraph_query(iss: dict) -> str:
     return m.group(1) if m else " ".join(re.findall(r"[A-Za-z_]{4,}", iss["title"])[:6])
 
 
+# ---------------------------------------------------------------- Done-when ledger
+
+DONE_WHEN = re.compile(r"^## Done when[ \t]*$")
+NEAR_DONE_WHEN = re.compile(r"^#{1,6} .*done when", re.I)
+HEADING = re.compile(r"^#{1,6} ")
+ITEM = re.compile(r"^([-*] \[)([ xX])(\] )(.*?)([ \t]*\r?\n?)$")
+WHY = re.compile(r"\s+—\s+(?:dropped|not done):.*$")
+
+
+def norm(text: str) -> str:
+    return " ".join(text.split())
+
+
+def done_when(body: str) -> list[dict] | None:
+    """The items of the first `## Done when` section (exactly that heading, at the start of a line), up to the next
+    heading: each with its line index, raw text, state (done | dropped | open) and key (the item's own words,
+    whitespace normalised, without the strike or a `— dropped:` / `— not done:` reason). None when there is no such heading."""
+    lines = body.splitlines(keepends=True)
+    start = next((i for i, l in enumerate(lines) if DONE_WHEN.match(l.rstrip("\r\n"))), None)
+    if start is None:
+        return None
+    items = []
+    for i in range(start + 1, len(lines)):
+        if HEADING.match(lines[i]):
+            break
+        m = ITEM.match(lines[i])
+        if not m:
+            continue  # prose, a blank line, or an indented line under an item (a why): not an item
+        text = m.group(4)
+        struck = re.match(r"~~(.+?)~~", text)
+        state = "done" if m.group(2) in "xX" else "dropped" if struck else "open"
+        items.append({"line": i, "text": text, "state": state, "key": norm(struck.group(1) if struck else WHY.sub("", text))})
+    return items
+
+
+def ledger_check(pr_body: str, issue_body: str) -> tuple[str, str] | None:
+    """None when the PR's ledger lists the issue's Done-when items, in order; else (flag, what is wrong)."""
+    want = done_when(issue_body)
+    if want is None:
+        return ("ISSUE-NO-DONE-WHEN", "the issue has no `## Done when` heading at the start of a line, so there is nothing to declare against: fix the issue body")
+    have = done_when(pr_body)
+    if have is None:
+        near = next((l.strip() for l in pr_body.splitlines() if NEAR_DONE_WHEN.match(l)), None)
+        return ("LEDGER-MISSING", (f"the heading must be exactly `## Done when`, found `{near}`" if near else "no `## Done when` section")
+                + ": copy the issue's list, each item `- [x]`, `- [ ] item — not done: why`, or `- [ ] ~~item~~ — dropped: why`")
+    w, h = [i["key"] for i in want], [i["key"] for i in have]
+    if w == h:
+        return None
+    missing, extra = [k for k in w if k not in h], [k for k in h if k not in w]
+    return ("LEDGER-MISMATCH", "; ".join([f"missing: {k}" for k in missing] + [f"extra: {k}" for k in extra]) or "same items, another order")
+
+
+def tick_body(body: str, done: list[str], strike: list[tuple[str, str]]) -> str:
+    """`body` with the named open items ticked (`- [x]`) or struck (`- [ ] ~~item~~ — dropped: why`); an item is named
+    by its 1-based index or its text (whitespace normalised). Only those lines change, and only if still open: every
+    other byte stays. Raises ValueError for a body without `## Done when`, an unknown item, or a strike without a reason."""
+    items = done_when(body)
+    if items is None:
+        raise ValueError("the issue has no `## Done when` heading at the start of a line")
+
+    def find(ref: str) -> dict:
+        if ref.strip().isdigit():
+            if not 1 <= int(ref) <= len(items):
+                raise ValueError(f"no item {ref}: the list has {len(items)}")
+            return items[int(ref) - 1]
+        hit = next((i for i in items if i["key"] == norm(ref)), None)
+        if hit is None:
+            raise ValueError(f"no item {ref!r} in `## Done when`")
+        return hit
+
+    both = {find(r)["line"] for r in done} & {find(r)["line"] for r, _ in strike}
+    if both:
+        raise ValueError("an item cannot be both done and struck: " + ", ".join(repr(i["key"]) for i in items if i["line"] in both))
+    lines = body.splitlines(keepends=True)
+    for ref in done:
+        it = find(ref)
+        if it["state"] == "open":
+            m = ITEM.match(lines[it["line"]])
+            lines[it["line"]] = m.group(1) + "x" + lines[it["line"]][m.end(2):]
+    for ref, why in strike:
+        if not why.strip():
+            raise ValueError(f"striking {ref!r} needs a reason (--why)")
+        it = find(ref)
+        if it["state"] == "open":
+            m = ITEM.match(lines[it["line"]])
+            lines[it["line"]] = f"{m.group(1)} {m.group(3)}~~{m.group(4)}~~ — dropped: {norm(why)}{m.group(5)}"
+    return "".join(lines)
+
+
+def ledger_ticks(pr_body: str) -> tuple[list[str], list[tuple[str, str]]]:
+    """What a PR's ledger declares: the keys it ticked, and the keys it struck with their reasons."""
+    items = done_when(pr_body) or []
+    struck = []
+    for i in items:
+        if i["state"] == "dropped":
+            m = re.search(r"—\s+dropped:\s*(.*)$", i["text"])
+            struck.append((i["key"], m.group(1) if m and m.group(1).strip() else "dropped in the PR's ledger"))
+    return [i["key"] for i in items if i["state"] == "done"], struck
+
+
+def tally(items: list[dict]) -> dict[str, int]:
+    return {s: sum(1 for i in items if i["state"] == s) for s in ("done", "dropped", "open")}
+
+
 def candidates(nodes: dict[str, dict]) -> list[dict]:
     out = []
     open_leaves = [nd for nd in sorted(leaves(nodes), key=lambda d: (d["repo"], d["number"])) if nd["issue"]["state"] == "open"]
@@ -455,16 +559,19 @@ def candidates(nodes: dict[str, dict]) -> list[dict]:
         blockers = [f"{slug_of_api(b['repository_url'])}#{b['number']}" for b in bl if b["state"] == "open"]
         pr = pr_for_issue(repo, n)
         wt = repo.worktree(n)
-        state = "blocked" if blockers else "in-progress" if pr else "worktree" if wt.exists() else "ready"
+        items = done_when(iss.get("body") or "")
+        done = bool(items) and all(i["state"] != "open" for i in items)  # open, yet nothing left to do: not dispatched
+        state = ("blocked" if blockers else "in-progress" if pr else "done-unclosed" if done
+                 else "worktree" if wt.exists() else "ready")
         out.append({"key": nd["key"], "repo": repo.slug, "number": n, "title": iss["title"], "branch": branch_for(iss),
                     "blocked_by": blockers, "pr": pr["number"] if pr else None,
-                    "worktree": str(wt) if wt.exists() else None, "state": state,
+                    "worktree": str(wt) if wt.exists() else None, "done": done, "state": state,
                     "liveness": liveness(repo, n, wt) if state == "worktree" else None,
                     "ready": state == "ready"})
     # every open leaf is in exactly one state: `state` is a single value, so the states cannot overlap;
     # what a later edit could break is READY, so READY must mean "nothing else holds", and nothing less
-    assert all(c["ready"] == (not c["blocked_by"] and not c["pr"] and not c["worktree"]) for c in out), \
-        [c["key"] for c in out if c["ready"] != (not c["blocked_by"] and not c["pr"] and not c["worktree"])]
+    assert all(c["ready"] == (not c["blocked_by"] and not c["pr"] and not c["worktree"] and not c["done"]) for c in out), \
+        [c["key"] for c in out if c["ready"] != (not c["blocked_by"] and not c["pr"] and not c["worktree"] and not c["done"])]
     return out
 
 
@@ -477,12 +584,16 @@ def premises_for(repo: Repo, n: int) -> list[tuple[str, bool, str]]:
     pr = pr_for_issue(repo, n)
     wt = repo.worktree(n)
     lv = liveness(repo, n, wt) if wt.exists() else None
+    items = done_when(iss.get("body") or "")
+    left = [i for i in items or [] if i["state"] == "open"]
     return [
         ("it is a leaf (no sub-issues)", not subs, f"{len(subs)} sub-issues" if subs else "none"),
         ("it is open", iss["state"] == "open", iss["state"]),
         ("every blocker is closed", not open_bl, ", ".join(f"{slug_of_api(b['repository_url'])}#{b['number']} {b['state']}" for b in bl) or "no blockers"),
         ("no open PR closes it", pr is None, f"PR #{pr['number']} ({pr['headRefName']})" if pr else "none"),
         ("no worktree exists for it", not wt.exists(), f"{wt} ({lv['verdict']}, nothing changed for {lv['idle_min']} min)" if lv else str(wt)),
+        ("an item of its Done when is still open", not items or bool(left),
+         f"{len(left)} of {len(items)} open" if items else "no `## Done when` list"),
     ]
 
 
@@ -493,6 +604,8 @@ def why(c: dict) -> str:
         return "blocked by " + ", ".join(c["blocked_by"])
     if c["pr"]:
         return f"in progress (PR #{c['pr']})"
+    if c.get("done"):
+        return "done-unclosed: every Done-when item is ticked or struck — close it or add an item"
     lv = c.get("liveness")
     return f"worktree exists ({lv['verdict']}, nothing changed for {lv['idle_min']} min)" if lv else "worktree exists"
 
@@ -585,10 +698,26 @@ def broken_crates(root: Path, home: Path) -> tuple[int, list[tuple[Path, list[st
 
 # ---------------------------------------------------------------- prompt
 
+def remaining(body: str) -> str:
+    """The prompt's Remaining section: the issue's open items only, and the rule for the others."""
+    items = done_when(body)
+    if items is None:
+        return ("A issue não tem uma linha `## Done when` no início de linha: `verify` recusará o PR com `ISSUE-NO-DONE-WHEN`. "
+                "Não edite o corpo da issue; trabalhe pelo texto dela e diga isso no relatório — o dono conserta o corpo.")
+    left = [i for i in items if i["state"] == "open"]
+    if not left:
+        return "Nada falta: todo item está marcado ou riscado (`done-unclosed`). Não implemente nada; relate e pare."
+    t = tally(items)
+    return ("checked is done — do not redo, do not re-verify unless the gate fails; struck is out — do not reopen.\n"
+            f"({t['done']} done, {t['dropped']} dropped, {len(left)} left of {len(items)}; o ledger do PR lista os {len(items)}, na ordem da issue.)\n\n"
+            + "".join(f"- [ ] {i['text']}\n" for i in left))
+
+
 def render_prompt(repo: Repo, iss: dict, branch: str, sha: str, parallel: int) -> str:
     tpl = (TEMPLATES / "agent.md").read_text()
     n = iss["number"]
     fields = {
+        "WAVE": str(Path(__file__).resolve()), "REMAINING": remaining(iss.get("body") or "").rstrip("\n"),
         "N": str(n), "TITLE": iss["title"], "URL": iss["html_url"], "REPO": repo.slug,
         "ROOT": str(repo.root), "WORKTREE": str(repo.worktree(n)), "BRANCH": branch,
         "BASE": repo.base, "SHA": sha, "DATE": datetime.now().strftime("%Y-%m-%d"),
@@ -797,6 +926,16 @@ def verify_one(repo: Repo, pr: dict, epic_nodes: dict | None = None) -> dict:
     own = n_issue or (int(m_branch.group(1)) if m_branch else None) or next((n for _, _, s, n in refs if s == repo.slug), None)
     closes_other = [{"where": where, "text": text} for where, text, s, n in refs if (s, n) != (repo.slug, own)]
     closes_only_in_commit = own if not n_issue and any((s, n) == (repo.slug, own) for _, _, s, n in refs) else None
+    # the Done-when ledger: what the PR declares done, against the issue it closes (or its branch names)
+    ledger = None
+    if own:
+        try:
+            issue_body = repo.issue(own).get("body") or ""
+        except SystemExit as e:
+            ledger = {"flag": "LEDGER-MISMATCH", "detail": f"cannot read #{own} to compare with: {str(e).strip().splitlines()[-1]}"}
+        else:
+            hit = ledger_check(body, issue_body)
+            ledger = {"flag": hit[0], "detail": hit[1]} if hit else None
     wt = repo.worktree(n_issue) if n_issue else None
     wt_state = None
     if wt and wt.exists():
@@ -804,11 +943,13 @@ def verify_one(repo: Repo, pr: dict, epic_nodes: dict | None = None) -> dict:
         ok, unpushed = repo.git_ok(["log", "--oneline", "@{u}.."], cwd=wt)
         wt_state = {"dirty": dirty, "unpushed": bool(unpushed.strip()) if ok else None}
     ok = (not attribution and not touched and not bad and pr.get("mergeable") != "CONFLICTING" and not contradictions
-          and not (wt_state and (wt_state["dirty"] or wt_state["unpushed"])) and not closes_other and not closes_only_in_commit)
+          and not (wt_state and (wt_state["dirty"] or wt_state["unpushed"])) and not closes_other and not closes_only_in_commit
+          and not ledger)
     return {"repo": repo.slug, "pr": pr["number"], "issue": n_issue, "head": head, "attribution": attribution,
             "protected_touched": touched, "checks_not_green": bad, "mergeable": pr.get("mergeable"),
             "worktree": wt_state, "notify_issues": siblings, "contradictions": contradictions,
-            "closes_other": closes_other, "closes_only_in_commit": closes_only_in_commit, "ok": ok}
+            "closes_other": closes_other, "closes_only_in_commit": closes_only_in_commit, "ledger": ledger,
+            "ledger_issue": own, "ok": ok}
 
 
 def cmd_verify(default: Repo | None, a):
@@ -832,6 +973,7 @@ def cmd_verify(default: Repo | None, a):
             for c in r["contradictions"]: flags.append("CONTRADICTION[" + c + "]")
             for c in r["closes_other"]: flags.append(f"CLOSES-OTHER[{c['where']}: {c['text']}]")
             if r["closes_only_in_commit"]: flags.append(f"NO-CLOSES-IN-BODY[#{r['closes_only_in_commit']} is closed only by a commit: GitHub links it at merge, not before]")
+            if r["ledger"]: flags.append(f"{r['ledger']['flag']}[{r['ledger']['detail']}]")
             print(f"{r['repo']}#{r['pr']:<5} issue #{r['issue'] or '?':<5} {'OK    ' if r['ok'] else 'NOT OK'} {' '.join(flags)}")
             if r["closes_other"]:
                 print("        merging would close those issues too. Reword the body; a pushed commit cannot be reworded without a"
@@ -1006,6 +1148,62 @@ def wait_for(fn, timeout: int, every: int = 10):
     return None
 
 
+def tick_issue(repo: Repo, n: int, done: list[str], strike: list[tuple[str, str]], dry_run: bool = False) -> tuple[bool, dict[str, int]]:
+    """Tick and strike items of an issue's Done when on GitHub: (whether the body changed, counts after). Writes only on
+    a change, and never with dry_run; prints every line it changes either way."""
+    body = repo.issue(n).get("body") or ""
+    new = tick_body(body, done, strike)
+    for old_line, new_line in zip(body.splitlines(), new.splitlines()):
+        if old_line != new_line:
+            print(f"  {key(repo, n)}: {old_line}\n  {' ' * len(key(repo, n))}  -> {new_line}")
+    if new != body and not dry_run:
+        repo.gh(["issue", "edit", str(n), "-R", repo.slug, "--body", new])
+    return new != body, tally(done_when(new))
+
+
+def apply_ledger(repo: Repo, pr: dict, v: dict) -> bool:
+    """After a merge: the PR's ledger onto its issue, one comment saying so. The PR's `Closes #N` closed the issue;
+    while an item is still open it is reopened, so `next` offers the remainder. False when the ledger could not be applied."""
+    own = v.get("ledger_issue")
+    if not own:
+        return True
+    done, strike = ledger_ticks(pr.get("body") or "")
+    try:
+        _, t = tick_issue(repo, own, done, strike)
+    except (ValueError, SystemExit) as e:
+        print(f"{key(repo, own)}: LEDGER NOT APPLIED ({str(e).strip()}). The merge stands; apply it by hand with "
+              f"`wave tick {key(repo, own)} --done <item> --strike <item> --why <reason>`")
+        return False
+    note = f"ledger applied from PR #{pr['number']}: {t['done']} done, {t['dropped']} dropped" + (f", {t['open']} remain" if t["open"] else "")
+    if t["open"] and v.get("issue") == own:
+        print(f"{key(repo, own)}: {t['open']} item(s) still open; waiting up to 60 s for GitHub to close it, to reopen it")
+    closed = t["open"] and v.get("issue") == own and wait_for(lambda: True if repo.issue(own)["state"] == "closed" else None, 60, 3)
+    if closed:
+        repo.gh(["issue", "reopen", str(own), "-R", repo.slug, "--comment", note + " — reopened: those items are still to do"])
+    else:
+        repo.gh(["issue", "comment", str(own), "-R", repo.slug, "--body", note])
+    print(f"{key(repo, own)}: {note}" + (" (reopened)" if closed else ""))
+    return True
+
+
+def cmd_tick(default: Repo | None, a):
+    repo, n = parse_ref(a.issue, default)
+    strikes, whys = a.strike or [], a.why or []
+    if not (a.done or strikes):
+        print("tick refused: name at least one item with --done or --strike", file=sys.stderr)
+        sys.exit(2)
+    if len(strikes) != len(whys):
+        print(f"tick refused: {len(strikes)} --strike and {len(whys)} --why; each struck item needs its own reason", file=sys.stderr)
+        sys.exit(2)
+    try:
+        changed, t = tick_issue(repo, n, a.done or [], list(zip(strikes, whys)), a.dry_run)
+    except ValueError as e:
+        print(f"tick refused: {key(repo, n)}: {e}", file=sys.stderr)
+        sys.exit(2)
+    print(f"{key(repo, n)}: " + ("" if changed else "nothing to change; ") + ("dry run, nothing written; " if a.dry_run and changed else "")
+          + f"{t['done']} done, {t['dropped']} dropped, {t['open']} remain")
+
+
 def cmd_merge(default: Repo | None, a):
     targets = [parse_ref(r, default) for r in a.prs]
     if a.plan:
@@ -1041,6 +1239,7 @@ def cmd_merge(default: Repo | None, a):
     if not a.yes:
         print("dry run — pass --yes only with the owner's explicit OK in the conversation. Order: " + " ".join(key(r, n) for r, n in targets))
         return
+    unapplied: list[str] = []
     for repo, n in targets:
         print(f"== {key(repo, n)} ==")
         # verify again, here, where it cannot be skipped: the OK was given on a verified table
@@ -1049,7 +1248,7 @@ def cmd_merge(default: Repo | None, a):
             print(f"{key(repo, n)}: not an open PR any more. Stopping."); sys.exit(2)
         v = verify_one(repo, pr)
         if not v["ok"] and not a.force:
-            print(f"{key(repo, n)}: verify says NOT OK — attribution={v['attribution']} protected={v['protected_touched']} ci={v['checks_not_green']} contradictions={v['contradictions']} closes_other={v['closes_other']} closes_only_in_commit={v['closes_only_in_commit']} worktree={v['worktree']}. Not merging."
+            print(f"{key(repo, n)}: verify says NOT OK — attribution={v['attribution']} protected={v['protected_touched']} ci={v['checks_not_green']} contradictions={v['contradictions']} closes_other={v['closes_other']} closes_only_in_commit={v['closes_only_in_commit']} ledger={v['ledger']} worktree={v['worktree']}. Not merging."
                   + (f" It conflicts with {repo.base}: run `wave resolve` on PR {key(repo, n)}, then rerun merge from here." if v["mergeable"] == "CONFLICTING" else ""))
             sys.exit(2)
 
@@ -1077,6 +1276,8 @@ def cmd_merge(default: Repo | None, a):
             print(f"{key(repo, n)}: CI {c}. Stopping.")
             sys.exit(3)
         print(repo.gh(["pr", "merge", str(n), "-R", repo.slug, "--squash" if a.squash else "--merge"]).strip() or "merged")
+        if not apply_ledger(repo, pr, v):
+            unapplied.append(key(repo, n))
         repo.fetch()
         repo._prs = None
         print(f"{repo.slug} {repo.base} now {repo.origin_sha()}")
@@ -1091,6 +1292,9 @@ def cmd_merge(default: Repo | None, a):
             if r not in ("success", None):
                 print("base branch CI is red after this merge: a semantic conflict. Fix forward before merging more.")
                 sys.exit(4)
+    if unapplied:
+        print(f"merged, but the ledger of {', '.join(unapplied)} is not on its issue: `wave tick` it (see above)")
+        sys.exit(5)
 
 
 CONFLICT_START = re.compile(r"^<{7}(?: |$)")
@@ -1260,6 +1464,15 @@ def cmd_status(default: Repo | None, a):
         lines.append(f"- `{s}` base `{r.base}` = `{r.origin_sha()}`" + (f", account `{r.account}`" if r.account else ""))
     lines.append("")
 
+    def boxes(k: str) -> tuple[int, int]:
+        """(ticked or struck, items): a leaf's own Done when; a parent's, the sum of its leaves'."""
+        nd = nodes[k]
+        if nd["children"]:
+            sums = [boxes(ch) for ch in nd["children"]]
+            return sum(d for d, _ in sums), sum(t for _, t in sums)
+        items = done_when(nd["issue"].get("body") or "") or []
+        return sum(1 for i in items if i["state"] != "open"), len(items)
+
     def line(k: str, depth: int):
         nd = nodes[k]
         iss = nd["issue"]
@@ -1268,6 +1481,8 @@ def cmd_status(default: Repo | None, a):
         if k in cands:
             c = cands[k]
             extra = " — " + why(c)
+        d, t = boxes(k)
+        extra += f" · {d}/{t}" if t else ""
         lines.append(f"{'  ' * depth}- [{'x' if iss['state'] == 'closed' else ' '}] {label} {iss['title']}{extra}")
         for ch in nd["children"]:
             line(ch, depth + 1)
@@ -1453,12 +1668,16 @@ GUARANTEES = [
     ("an existing worktree is kept, never recreated", "cmd_dispatch", "prints 'worktree exists'", False),
     ("cleanup removes only worktrees that are clean, pushed and merged", "cmd_cleanup", "KEEP lines with the reason", False),
     ("plan refuses to run twice on the same directory or titles", "cmd_plan", "numbers.json / duplicate titles refusal", False),
-    ("every open leaf is in exactly one state", "candidates (assert)", "blocked | in-progress | worktree | ready", True),
+    ("every open leaf is in exactly one state", "candidates (assert)", "blocked | in-progress | done-unclosed | worktree | ready", True),
+    ("an open issue whose every Done-when item is ticked or struck is never dispatched", "candidates + premises_for", "done-unclosed: ... close it or add an item", True),
     ("verify flags AI attribution in body or commits", "verify_one", "AI-ATTRIBUTION", True),
     ("verify flags protected paths touched", "verify_one", "PROTECTED:<paths>", True),
     ("verify flags a PR closing a parent or a still-blocked issue", "verify_one", "CONTRADICTION[...]", True),
     ("verify refuses a PR whose body or any commit message closes an issue other than its own", "verify_one (+ cmd_merge)", "CLOSES-OTHER[<body or commit>: <the keyword and its ref>]", True),
     ("verify refuses a PR whose own issue is closed only by a commit message", "verify_one (+ cmd_merge)", "NO-CLOSES-IN-BODY[#N ...]", True),
+    ("verify refuses a PR without a `## Done when` ledger, or whose items differ from its issue's", "verify_one -> ledger_check (+ cmd_merge)", "LEDGER-MISSING[...] / LEDGER-MISMATCH[...] / ISSUE-NO-DONE-WHEN[...]", True),
+    ("merge applies the PR's ledger to its issue after the merge, in one comment, and reopens it while an item is open", "cmd_merge -> apply_ledger -> tick_issue", "ledger applied from PR #N: X done, Y dropped, Z remain", True),
+    ("tick changes only the open lines it names, every other byte kept; a body without `## Done when` is refused", "tick_body (cmd_tick, apply_ledger)", "exit 2: tick refused: ...", True),
     ("verify names sibling issues that cite files the PR touched", "verify_one --epic", "notify lines", False),
     ("order predicts pairwise and chained textual conflicts", "cmd_order", "pairs + chain ✗", True),
     ("order flags serial paths", "cmd_order", "SERIAL line", True),
@@ -1596,6 +1815,7 @@ def main(argv=None):
     x = s.add_parser("cleanup", help="remove worktrees that are clean, pushed and merged"); x.add_argument("slugs", nargs="*"); x.add_argument("--dry-run", action="store_true")
     x = s.add_parser("status", help="tree with states; --post comments it on the epic"); x.add_argument("epic"); x.add_argument("--post", action="store_true")
     x = s.add_parser("lint", help="check issues carry what /wave needs"); x.add_argument("issues", nargs="+")
+    x = s.add_parser("tick", help="tick (--done) or strike (--strike + --why) items of an issue's `## Done when`, by index or text; what merge does with a PR's ledger"); x.add_argument("issue"); x.add_argument("--done", action="append", metavar="ITEM"); x.add_argument("--strike", action="append", metavar="ITEM"); x.add_argument("--why", action="append", metavar="REASON", help="one per --strike, in the same order"); x.add_argument("--dry-run", action="store_true", help="print the lines that would change, write nothing")
     x = s.add_parser("plan", help="create an epic's issues from <dir>/index.tsv + deps.tsv + <key>.md, wiring sub-issues and blocked_by"); x.add_argument("dir"); x.add_argument("--slug"); x.add_argument("--milestone"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--force", action="store_true")
 
     x = s.add_parser("stats", help="what the log says: runs, durations, failures per command")
@@ -1614,7 +1834,7 @@ def main(argv=None):
         {"repos": cmd_repos, "facts": cmd_facts, "next": cmd_next, "dispatch": cmd_dispatch, "prompt": cmd_prompt,
      "verify": cmd_verify, "order": cmd_order, "merge": cmd_merge, "resolve": cmd_resolve, "close-parents": cmd_close_parents,
              "cleanup": cmd_cleanup, "status": cmd_status, "lint": cmd_lint, "plan": cmd_plan, "why": cmd_why, "doctor": cmd_doctor,
-             "agents": cmd_agents,
+             "agents": cmd_agents, "tick": cmd_tick,
          "guarantees": cmd_guarantees}[a.cmd](default, a)
     except SystemExit as e:
         exit_code = e.code if isinstance(e.code, int) else 1

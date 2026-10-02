@@ -4,7 +4,7 @@
     "title": "PR 20",
     "headRefName": "feat/4-x",
     "baseRefName": "main",
-    "body": "Adds g.txt.\n\nCloses #4",
+    "body": "Adds g.txt.\n\nCloses #4\n\n## Done when\n\n- [x] g.txt exists\n- [x] the gate passes\n",
     "mergeable": "MERGEABLE",
     "url": "https://github.com/o/r/pull/20"
   },
@@ -112,7 +112,7 @@
     "title": "PR 29",
     "headRefName": "feat/52-both",
     "baseRefName": "main",
-    "body": "Adds q.txt.\n\nCloses #52",
+    "body": "Adds q.txt.\n\nCloses #52\n\n## Done when\n\n- [x] q.txt exists\n",
     "mergeable": "MERGEABLE",
     "url": "https://github.com/o/r/pull/29"
   },
@@ -124,5 +124,41 @@
     "body": "Adds q.txt.\n\nCloses #52\n\nAlso fixes: o/r#61, which nobody meant to close.",
     "mergeable": "MERGEABLE",
     "url": "https://github.com/o/r/pull/30"
+  },
+  {
+    "number": 31,
+    "title": "PR 31",
+    "headRefName": "feat/4-x",
+    "baseRefName": "main",
+    "body": "Adds g.txt, and says nothing of what is done.\n\nCloses #4",
+    "mergeable": "MERGEABLE",
+    "url": "https://github.com/o/r/pull/31"
+  },
+  {
+    "number": 32,
+    "title": "PR 32",
+    "headRefName": "feat/4-x",
+    "baseRefName": "main",
+    "body": "Adds g.txt.\n\nCloses #4\n\n## Done when\n\n- [x] g.txt exists\n- [x] the gate passes too\n",
+    "mergeable": "MERGEABLE",
+    "url": "https://github.com/o/r/pull/32"
+  },
+  {
+    "number": 33,
+    "title": "PR 33",
+    "headRefName": "feat/4-x",
+    "baseRefName": "main",
+    "body": "Adds g.txt.\n\nCloses #4\n\n## Ledger — Done when\n\n- [x] g.txt exists\n- [x] the gate passes\n",
+    "mergeable": "MERGEABLE",
+    "url": "https://github.com/o/r/pull/33"
+  },
+  {
+    "number": 34,
+    "title": "PR 34",
+    "headRefName": "feat/53-partial",
+    "baseRefName": "main",
+    "body": "Adds p53.txt.\n\nCloses #53\n\n## Done when\n\n- [x] p53.txt exists — owner: implementer\n- [ ] ~~docs updated — owner: implementer~~ — dropped: there are no docs yet\n- [ ] benchmarks — owner: implementer — not done: needs a quiet machine\n\n## Gate\n\nall green\n",
+    "mergeable": "MERGEABLE",
+    "url": "https://github.com/o/r/pull/34"
   }
 ]
