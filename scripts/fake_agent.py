@@ -55,6 +55,15 @@ def commit(wt: Path, title: str, n: int) -> None:
     sh(["git", "commit", "-q", "-m", f"{title}\n\nCloses #{n}"], wt)
 
 
+def pr_body(n: int, issue_body: str) -> str:
+    """`Closes #N` and the ledger: the issue's `## Done when` items, every one ticked (the fake agent does all it is asked)."""
+    m = re.search(r"^## Done when[ \t]*\n(.*?)(?=^#{1,6} |\Z)", issue_body, re.S | re.M)
+    items = re.findall(r"^[-*] \[[ xX]\] (.*)$", m.group(1), re.M) if m else []
+    ledger = "\n\n## Done when\n\n" + "".join(f"- [x] {i.strip()}\n" for i in items) if items else ""
+    return (f"Closes #{n}\n\nMade by `scripts/fake_agent.py` for an end-to-end run of setwave: the change is the issue's "
+            f"`fake-agent` block.{ledger}")
+
+
 def check_branch(branch: str, n: int) -> None:
     """Push only the issue's own branch (`<kind>/<N>-...`, as dispatch names it): never the base, never another's."""
     if not re.search(rf"/{n}-", branch):
@@ -85,7 +94,7 @@ def work(slug: str, n: int, wt: Path) -> str:
     apply(wt, change_of(iss["body"]))
     commit(wt, iss["title"], n)
     sh(["git", "push", "-q", "-u", "origin", f"HEAD:refs/heads/{branch}"], wt)
-    body = f"Closes #{n}\n\nMade by `scripts/fake_agent.py` for an end-to-end run of setwave: the change is the issue's `fake-agent` block."
+    body = pr_body(n, iss["body"])
     return sh(["gh", "pr", "create", "-R", slug, "--base", "main", "--head", branch, "--title", iss["title"], "--body", body], wt).strip()
 
 

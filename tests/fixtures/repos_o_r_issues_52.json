@@ -1,0 +1,10 @@
+{
+  "id": 1052,
+  "number": 52,
+  "title": "Closed in both places",
+  "state": "open",
+  "body": "## Done when\n\n- [ ] q.txt exists\n",
+  "labels": [],
+  "html_url": "https://github.com/o/r/issues/52",
+  "repository_url": "https://api.github.com/repos/o/r"
+}

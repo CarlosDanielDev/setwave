@@ -1,8 +1,9 @@
 """The commands against a recorded epic (tests/fixtures) and a real, temporary git repo.
 
-The epic o/r#1 has six leaves, one per state:
+The epic o/r#1 has seven leaves, one per state:
   #2 ready        #3 blocked by #2 (and PR 21 closes it)   #4 in progress (PR 20)
   #5 worktree     #6 closed                                #7 ready: its only blocker, #6, is closed
+  #8 done-unclosed: open, every Done-when item ticked or struck
 """
 import json
 import unittest
@@ -22,16 +23,16 @@ class States(unittest.TestCase):
     def test_every_open_leaf_is_in_exactly_one_state(self):
         cands = {c["number"]: c for c in wave.candidates(wave.tree(repo(), 1))}
         self.assertEqual({n: c["state"] for n, c in cands.items()},
-                         {2: "ready", 3: "blocked", 4: "in-progress", 5: "worktree", 7: "ready"})
+                         {2: "ready", 3: "blocked", 4: "in-progress", 5: "worktree", 7: "ready", 8: "done-unclosed"})
         for n, c in cands.items():
             with self.subTest(n=n):
                 self.assertEqual(c["ready"], c["state"] == "ready")
-                self.assertEqual(c["ready"], not (c["blocked_by"] or c["pr"] or c["worktree"]))
+                self.assertEqual(c["ready"], not (c["blocked_by"] or c["pr"] or c["worktree"] or c["done"]))
         self.assertEqual(cands[3]["blocked_by"], ["o/r#2"])
         self.assertEqual(cands[3]["pr"], 21, "a blocked leaf with a PR is still blocked: blocked wins")
 
     def test_premises_name_the_one_that_fails(self):
-        failing = {n: [t for t, ok, _ in wave.premises_for(repo(), n) if not ok] for n in (2, 3, 4, 5, 6, 7)}
+        failing = {n: [t for t, ok, _ in wave.premises_for(repo(), n) if not ok] for n in (2, 3, 4, 5, 6, 7, 8)}
         self.assertEqual(failing, {
             2: [],
             3: ["every blocker is closed", "no open PR closes it"],
@@ -39,6 +40,7 @@ class States(unittest.TestCase):
             5: ["no worktree exists for it"],
             6: ["it is open"],
             7: [],
+            8: ["an item of its Done when is still open"],
         })
 
     def test_a_parent_is_not_a_leaf(self):

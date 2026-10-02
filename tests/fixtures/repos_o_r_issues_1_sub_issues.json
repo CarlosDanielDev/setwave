@@ -24,7 +24,7 @@
     "number": 4,
     "title": "Leaf with an open PR",
     "state": "open",
-    "body": "",
+    "body": "Parent: #1\n\n## Done when\n\n- [ ] g.txt exists\n- [ ] the gate passes\n",
     "labels": [],
     "html_url": "https://github.com/o/r/issues/4",
     "repository_url": "https://api.github.com/repos/o/r"
@@ -57,6 +57,16 @@
     "body": "",
     "labels": [],
     "html_url": "https://github.com/o/r/issues/7",
+    "repository_url": "https://api.github.com/repos/o/r"
+  },
+  {
+    "id": 1008,
+    "number": 8,
+    "title": "Leaf whose every item is ticked or struck",
+    "state": "open",
+    "body": "Parent: #1\n\n## Done when\n\n- [x] one\n- [ ] ~~two~~ — dropped: not needed\n",
+    "labels": [],
+    "html_url": "https://github.com/o/r/issues/8",
     "repository_url": "https://api.github.com/repos/o/r"
   }
 ]

@@ -30,7 +30,11 @@ Atrás > 0 → `git rebase origin/{{BASE}}` só com árvore limpa; conflito → 
 gh issue view {{N}} -R {{REPO}} --json title,body -q .body
 gh issue view {{N}} -R {{REPO}} --json comments -q '.comments[].body'
 ```
-Leia a issue inteira **e os comentários**: PRs anteriores deixam ali o que mudou desde que ela foi escrita (símbolos renomeados, APIs novas). Leia também o parent dela, se houver. Números de linha na issue são carimbos do dia em que foi escrita: confirme cada um. "Done when" com dono por item — você é o implementer; onde diz reviewer, confira e declare no PR. "ADR stub": decida, três frases no PR. "Out of scope": não reabra. "Handoff": a worktree já existe, ignore o `git worktree add`.
+Leia a issue inteira **e os comentários**: PRs anteriores deixam ali o que mudou desde que ela foi escrita (símbolos renomeados, APIs novas). Leia também o parent dela, se houver. Números de linha na issue são carimbos do dia em que foi escrita: confirme cada um. "Done when" com dono por item — você é o implementer; onde diz reviewer, confira e declare no PR. Só o que segue em **Remaining** é trabalho seu. "ADR stub": decida, três frases no PR. "Out of scope": não reabra. "Handoff": a worktree já existe, ignore o `git worktree add`.
+
+### Remaining
+
+{{REMAINING}}
 
 Se uma premissa da issue estiver errada (linha que andou, tipo que mudou, arquivo que não existe), corrija e diga no PR — é trabalho seu, não desvio. Se a issue estiver **inviável** como escrita, pare, comente na issue o porquê, e relate; não invente escopo.
 
@@ -49,7 +53,17 @@ cd {{WORKTREE}}
 
 ## 5. Entrega
 
-`git add <só seus arquivos>`; commit em inglês, imperativo, no estilo do log (`git log --oneline -15`), com `Closes #{{N}}` no corpo; `git push -u origin {{BRANCH}}`; `gh pr create --base {{BASE}} --title "<uma frase em inglês dizendo o que muda>" --body-file <arquivo>`. Corpo: o que mudou e por quê; ADR em três frases; premissas erradas da issue; saída do gate; mutation-check antes/depois; e o **ledger** — a lista `## Done when` da issue copiada com cada item marcado: `- [x]` feito, `- [ ]` não feito + uma linha do porquê, `- [ ] ~~item~~ — dropped: motivo`. É o ledger que diz ao próximo agente o que ainda falta. Sem atribuição de IA.
+`git add <só seus arquivos>`; commit em inglês, imperativo, no estilo do log (`git log --oneline -15`), com `Closes #{{N}}` no corpo; `git push -u origin {{BRANCH}}`; `gh pr create --base {{BASE}} --title "<uma frase em inglês dizendo o que muda>" --body-file <arquivo>`. Corpo: o que mudou e por quê; ADR em três frases; premissas erradas da issue; saída do gate; mutation-check antes/depois; e o **ledger** — uma seção com o heading exato `## Done when` (no início da linha, nenhuma variante) e a lista da issue copiada verbatim, todos os itens, na ordem, cada um marcado:
+
+```markdown
+## Done when
+
+- [x] <item feito, texto da issue>
+- [ ] <item não feito, texto da issue> — not done: <uma linha do porquê>
+- [ ] ~~<item fora, texto da issue>~~ — dropped: <motivo>
+```
+
+`verify` recusa o PR sem ele (`LEDGER-MISSING`) ou com itens que não batem com a issue (`LEDGER-MISMATCH`); `merge` aplica o ledger na issue, e o próximo agente recebe só o que falta. Depois de abrir o PR: `python3 {{WAVE}} verify {{REPO}}#<PR>` — corrija o corpo (`gh pr edit <PR> --body-file <arquivo>`) até nenhum `LEDGER-*` sobrar. Sem atribuição de IA.
 
 ## 6. Relatório final (sua última mensagem)
 

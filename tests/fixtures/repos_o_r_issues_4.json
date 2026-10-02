@@ -3,7 +3,7 @@
   "number": 4,
   "title": "Leaf with an open PR",
   "state": "open",
-  "body": "",
+  "body": "Parent: #1\n\n## Done when\n\n- [ ] g.txt exists\n- [ ] the gate passes\n",
   "labels": [],
   "html_url": "https://github.com/o/r/issues/4",
   "repository_url": "https://api.github.com/repos/o/r"
