@@ -3,10 +3,12 @@
 The run itself needs a real account and a real sandbox repository, so it is not here (and not in CI): what is
 here is that it refuses any repository that is not a sandbox, that `tests/e2e-plan/` is a plan `wave plan`
 accepts once per run, that the fake agent makes the change its issue asks for and closes the issue in its
-commit, that leaves a and b conflict while c does not, and that the fake agent settles that conflict.
+commit, that leaves a and b conflict while c does not, that the fake agent settles that conflict, and that
+leaf d exists to be lied about: the fake agent ticks its ledger with nothing merged, and the sweep reverts it.
 """
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -73,7 +75,7 @@ class Plan(unittest.TestCase):
         e2e.prepare_plan(PLAN, d1, "20260930000001")
         e2e.prepare_plan(PLAN, d2, "20260930000002")
         titles = lambda d: [l.split("\t")[1] for l in (d / "index.tsv").read_text().splitlines()]
-        self.assertEqual(len(titles(d1)), 4)
+        self.assertEqual(len(titles(d1)), 5)
         self.assertFalse(set(titles(d1)) & set(titles(d2)))
         for f in d1.iterdir():
             self.assertNotIn("{{run}}", f.read_text(), f.name)
@@ -84,7 +86,14 @@ class Plan(unittest.TestCase):
         e2e.prepare_plan(PLAN, d, "20260930000003")
         p = run_wave("plan", str(d), "--dry-run")
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        self.assertIn("4 issues, 0 dependencies", p.stdout)
+        self.assertIn("5 issues, 0 dependencies", p.stdout)
+
+    def test_the_lie_leaf_has_a_done_when_to_lie_about(self):
+        d = Path(tempfile.mkdtemp(dir=TMP))
+        e2e.prepare_plan(PLAN, d, "20260930000005")
+        text = (d / "d.md").read_text()
+        self.assertIn("## Done when", text)
+        self.assertGreaterEqual(len(re.findall(r"(?m)^- \[ \]", text)), 1)
 
 
 class FakeAgent(unittest.TestCase):
@@ -150,6 +159,26 @@ class FakeAgent(unittest.TestCase):
         self.assertEqual(out("diff", "--name-only", "--diff-filter=U", cwd=wt), "")
         compiled = subprocess.run([sys.executable, "-m", "py_compile", "app.py"], cwd=wt, capture_output=True, text=True)
         self.assertEqual(compiled.returncode, 0, compiled.stderr)
+
+
+class Lie(unittest.TestCase):
+    def test_claim_done_ticks_only_the_done_when_section(self):
+        body = "Parent: #1\n\nthe work.\n\n## Done when\n\n- [ ] one\n- [x] two\n\n## Handoff\n\n- [ ] three stays open\n"
+        ticked = fake_agent.claim_done(body)
+        self.assertIn("- [x] one", ticked)
+        self.assertIn("- [x] two", ticked)
+        self.assertIn("- [ ] three stays open", ticked)
+
+    def test_a_body_without_a_done_when_cannot_be_lied_about(self):
+        with self.assertRaises(SystemExit):
+            fake_agent.claim_done("Parent: #1\n\nno ledger here\n")
+
+    def test_nothing_here_is_ever_written_to_the_plugins_own_repository(self):
+        for slug in ("CarlosDanielDev/setwave", "carlosdanieldev/setwave"):
+            with self.assertRaises(SystemExit) as e:
+                fake_agent.check_target(slug)
+            self.assertIn("own repository", str(e.exception))
+        fake_agent.check_target("o/r-sandbox")
 
 
 class Steps(unittest.TestCase):

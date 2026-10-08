@@ -193,7 +193,7 @@ The plugin runs on itself: the epic was created by `wave plan`, and `/setwave:wa
 
 ## Proving it
 
-`scripts/e2e.py` runs the whole loop against a real repository, every step through `wave` itself: `plan` an epic of three leaves from `tests/e2e-plan/`, `dispatch` them, `scripts/fake_agent.py` plays each agent (the change its issue's `fake-agent` block asks for, a commit with `Closes #N`, a push, a PR), `verify --epic`, `order` (two leaves both append to `app.py`, so the chain names the one that will conflict), `order --plan` and `merge --plan --yes --wait-base-ci` for the others, `wave resolve` on the conflicting one (it stops on the conflict, by design), the fake agent keeps both sides, `resolve --continue` gates and pushes, `merge` for it, then `close-parents --include-epic`, `cleanup` and `status --post`. Each step is timed, and a step that exits other than expected stops the run and names what is left open.
+`scripts/e2e.py` runs the whole loop against a real repository, every step through `wave` itself: `plan` an epic of four leaves from `tests/e2e-plan/`, `dispatch` three of them, `scripts/fake_agent.py` plays each agent (the change its issue's `fake-agent` block asks for, a commit with `Closes #N`, a push, a PR), `verify --epic`, `order` (two leaves both append to `app.py`, so the chain names the one that will conflict), `order --plan` and `merge --plan --yes --wait-base-ci` for the others, `wave resolve` on the conflicting one (it stops on the conflict, by design), the fake agent keeps both sides, `resolve --continue` gates and pushes, `merge` for it, then the leaves are closed and the fake agent lies about a fourth (its ledger ticked with nothing merged): `wave sweep` finds the lie, `sweep --fix` unticks it with a comment, the sweep runs clean, and the run ends with that leaf open — the epic stays open with it, honestly — then `close-parents --include-epic`, `cleanup` and `status --post`. Each step is timed, and a step that exits other than expected stops the run and names what is left open.
 
 Against your own sandbox, once:
 
@@ -266,7 +266,7 @@ hooks/guards.py                 the PreToolUse guard hooks: attribution, forbidd
 templates/agent.md              the per-issue prompt handed to each agent
 templates/issue-contract.md     what an issue must carry
 tests/                          the suite: a fake gh, recorded fixtures, a temporary git repo
-tests/e2e-plan/                 the epic e2e.py plans each run: three leaves, two arranged to conflict
+tests/e2e-plan/                 the epic e2e.py plans each run: four leaves, two arranged to conflict, one to be caught lying
 .github/workflows/ci.yml        the suite and the guarantees on Ubuntu and macOS
 ```
 

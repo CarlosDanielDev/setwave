@@ -5,6 +5,8 @@
                                           `Closes #N`, push, open the PR; prints the PR's URL last
     fake_agent.py resolve                 in a worktree `wave resolve` left mid-merge: keep both sides of every
                                           conflict, `git add` them; `wave resolve --continue` does the rest
+    fake_agent.py lie <owner/name> <N>    tick every Done-when item on the issue's body with nothing merged
+                                          behind the claim — the false done `wave sweep` reverts
 
 The change is a fenced block in the issue body, so the issue says what is done, like a real one:
 
@@ -25,6 +27,12 @@ from pathlib import Path
 
 BLOCK = re.compile(r"^```fake-agent\n(append (\S+)\n)(.*?)^```", re.S | re.M)
 MARKER = re.compile(r"^(<{7}|\|{7}|={7}|>{7})(?: |$)")
+OWN = "CarlosDanielDev/setwave"  # the plugin's own repository: nothing here is ever written to it
+
+
+def check_target(slug: str) -> None:
+    if slug.lower() == OWN.lower():
+        raise SystemExit(f"fake agent refused: {slug} is the plugin's own repository; nothing is ever written to it")
 
 
 def sh(cmd: list[str], cwd: Path) -> str:
@@ -88,6 +96,7 @@ def resolve(wt: Path) -> list[str]:
 
 
 def work(slug: str, n: int, wt: Path) -> str:
+    check_target(slug)
     branch = sh(["git", "rev-parse", "--abbrev-ref", "HEAD"], wt).strip()
     check_branch(branch, n)
     iss = json.loads(sh(["gh", "issue", "view", str(n), "-R", slug, "--json", "title,body"], wt))
@@ -98,10 +107,28 @@ def work(slug: str, n: int, wt: Path) -> str:
     return sh(["gh", "pr", "create", "-R", slug, "--base", "main", "--head", branch, "--title", iss["title"], "--body", body], wt).strip()
 
 
+def claim_done(body: str) -> str:
+    """The lie: every Done-when item ticked, everything outside the section untouched."""
+    m = re.search(r"^## Done when[ \t]*\n(.*?)(?=^#{1,6} |\Z)", body, re.S | re.M)
+    if not m:
+        raise SystemExit("fake agent: the issue has no `## Done when`, so there is nothing to lie about")
+    ticked = re.sub(r"(?m)^[-*] \[ \]", "- [x]", m.group(1))
+    return body[:m.start(1)] + ticked + body[m.end(1):]
+
+
+def lie(slug: str, n: int) -> str:
+    check_target(slug)
+    iss = json.loads(sh(["gh", "issue", "view", str(n), "-R", slug, "--json", "body"], Path.cwd()))
+    return sh(["gh", "issue", "edit", str(n), "-R", slug, "--body", claim_done(iss["body"] or "")], Path.cwd())
+
+
 def main(argv: list[str]) -> None:
     wt = Path.cwd()
     if argv[:1] == ["work"] and len(argv) == 3:
         print(work(argv[1], int(argv[2]), wt))
+    elif argv[:1] == ["lie"] and len(argv) == 3:
+        lie(argv[1], int(argv[2]))
+        print("ticked every Done-when item on", argv[2])
     elif argv == ["resolve"]:
         print("kept both sides in: " + (", ".join(resolve(wt)) or "nothing (no conflict)"))
     else:

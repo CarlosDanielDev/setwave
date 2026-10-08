@@ -18,3 +18,5 @@ jobs:
         run: python3 -m unittest discover -s tests -v
       - name: guarantees
         run: python3 scripts/wave.py guarantees
+      - name: skill-lint
+        run: python3 scripts/validate_skills.py

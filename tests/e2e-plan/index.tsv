@@ -1,4 +1,5 @@
-e	e2e {{run}}: three leaves, one arranged to conflict	-	-
+e	e2e {{run}}: four leaves, one arranged to conflict, one to be caught lying	-	-
 a	e2e {{run}} a: append greet_{{run}}_a to app.py	-	e
 b	e2e {{run}} b: append greet_{{run}}_b to app.py	-	e
 c	e2e {{run}} c: add runs/{{run}}.txt	-	e
+d	e2e {{run}} d: the leaf the sweep catches lying	-	e

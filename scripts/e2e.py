@@ -3,14 +3,16 @@
 
     python3 scripts/e2e.py <checkout of owner/name-sandbox> [--any-repo] [--ci-timeout S]
 
-plan an epic of three leaves from tests/e2e-plan/ -> dispatch them -> scripts/fake_agent.py plays each agent
-(change, commit `Closes #N`, push, PR) -> verify --epic -> judge (refused without verdicts, then the run plays
+plan an epic of four leaves from tests/e2e-plan/ -> dispatch three of them -> scripts/fake_agent.py plays each
+agent (change, commit `Closes #N`, push, PR) -> verify --epic -> judge (refused without verdicts, then the run plays
 the judge itself: a pass verdict per PR at its head) -> order: the chain names the leaf that conflicts ->
 order --plan + merge --plan --yes --wait-base-ci for the others -> wave resolve on the conflicting one (stops on
 the conflict by design), the fake agent keeps both sides, resolve --continue gates and pushes -> the leaf is
-re-judged (resolve moved its head) -> order --plan + merge for it -> close-parents --include-epic -> cleanup ->
-status --post. Every step is timed and logged; a step that exits other than expected stops the run and says
-what is left open.
+re-judged (resolve moved its head) -> order --plan + merge for it -> the leaves are closed -> the fake agent lies
+on the fourth leaf (its ledger ticked with nothing merged) -> wave sweep finds it (exit 1), sweep --fix unticks it
+with a comment (exit 1: the finding existed), the sweep runs clean (exit 0) -> close-parents --include-epic (the
+epic stays open: the reverted leaf holds it, honestly) -> cleanup -> status --post. Every step is timed and logged;
+a step that exits other than expected stops the run and says what is left open.
 
 Running this is the owner's OK for the merges it makes, in the sandbox and nowhere else: it refuses the plugin's
 own repository always, and any repository whose name does not end in `-sandbox` unless --any-repo. It never
@@ -178,6 +180,13 @@ def main(argv=None) -> None:
         step(log, "merge", wv("merge", "--plan", str(run_dir / "plan-2.json"), "--yes", "--wait-base-ci", "--ci-timeout", str(a.ci_timeout)), root)
         wait(log, "leaves closed", lambda: all((gh_json(["issue", "view", str(n), "-R", slug, "--json", "state"]) or {}).get("state") == "CLOSED"
                                                for n in leaves) or None, 300, 5)
+        # the sweep layer: leaf d is never dispatched; the fake agent ticks its ledger with nothing merged,
+        # and the sweep is what catches the lie, reverts it, and hands the work back to `next`
+        lie_n = nums["d"]
+        step(log, f"agent lies on #{lie_n}", fa("lie", slug, str(lie_n)), root)
+        step(log, "sweep (finds the lie)", wv("sweep", str(epic)), root, expect=1)
+        step(log, "sweep --fix", wv("sweep", str(epic), "--fix"), root, expect=1)
+        step(log, "sweep (clean after the fix)", wv("sweep", str(epic)), root)
         step(log, "close-parents", wv("close-parents", str(epic), "--include-epic"), root)
         step(log, "cleanup", wv("cleanup"), root)
         step(log, "status --post", wv("status", str(epic), "--post"), root)
