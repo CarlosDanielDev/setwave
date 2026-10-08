@@ -5,10 +5,12 @@ The epic o/r#1 has seven leaves, one per state:
   #5 worktree     #6 closed                                #7 ready: its only blocker, #6, is closed
   #8 done-unclosed: open, every Done-when item ticked or struck
 """
+import contextlib
+import io
 import json
 import unittest
 
-from helpers import TMP, TESTS, gh_calls, run_wave, sandbox, wave
+from helpers import TMP, TESTS, WAVE, gh_calls, run_wave, sandbox, wave
 
 
 def setUpModule():
@@ -156,6 +158,41 @@ class ClosingKeywords(unittest.TestCase):
         merge_src = src[src.index("def cmd_merge"):src.index("def cmd_resolve")]
         self.assertEqual(wave.CLOSES.findall(merge_src.replace("{key(repo, n)}", "o/r#9")), [],
                          "a hint printed by merge, once its ref is filled in, closes nothing")
+
+
+class EscalationPolicy(unittest.TestCase):
+    def test_the_prompt_carries_the_pre_done_audit(self):
+        src = (wave.TEMPLATES / "agent.md").read_text()
+        self.assertIn("## 6. Antes de chamar de pronto", src, "the audit is its own section, before the report")
+        self.assertIn("## 7. Relatório final", src, "the report follows it")
+        iss = {"number": 2, "title": "t", "html_url": "https://github.com/o/r/issues/2",
+               "body": "## Done when\n\n- [ ] two\n"}
+        out = wave.render_prompt(repo(), iss, "feat/2-t", "0" * 40, 2)
+        self.assertIn("## 6. Antes de chamar de pronto", out)
+        p = run_wave("prompt", "2")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("## 6. Antes de chamar de pronto", p.stdout, "`wave prompt` delivers the section to every agent")
+
+    def test_the_wave_skill_mandates_respawn_on_the_second_identical_failure(self):
+        skill = (WAVE.parent.parent / "skills" / "wave" / "SKILL.md").read_text()
+        self.assertIn("--respawn", skill, "step 4 names the flag that marks a respawn in the stamp")
+        self.assertIn("twice", skill, "the rule fires on the same failure twice, not on a hunch")
+
+    def test_stats_reports_resumes_against_respawns(self):
+        log = wave.CONFIG_DIR / "log.jsonl"
+        runs = [json.loads(l) for l in log.read_text().splitlines()] if log.exists() else []
+        exp_r = sum(r.get("resumes", 0) for r in runs) + 3
+        exp_p = sum(r.get("respawns", 0) for r in runs) + 2
+        wave.append_log({"at": wave.now_iso(), "cmd": "dispatch", "args": ["7", "--force"],
+                         "repo": "o/r", "seconds": 1.0, "exit": 0, "resumes": 3, "respawns": 0})
+        wave.append_log({"at": wave.now_iso(), "cmd": "dispatch", "args": ["99", "--force", "--respawn"],
+                         "repo": "o/r", "seconds": 1.0, "exit": 0, "resumes": 0, "respawns": 2})
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            wave.cmd_stats()
+        out = buf.getvalue()
+        self.assertIn(f"{exp_r} plain resumes", out)
+        self.assertIn(f"{exp_p} respawns", out)
 
 
 class MergeTree(unittest.TestCase):

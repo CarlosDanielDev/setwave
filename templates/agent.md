@@ -65,6 +65,14 @@ cd {{WORKTREE}}
 
 `verify` recusa o PR sem ele (`LEDGER-MISSING`) ou com itens que não batem com a issue (`LEDGER-MISMATCH`); `merge` aplica o ledger na issue, e o próximo agente recebe só o que falta. Depois de abrir o PR: `python3 {{WAVE}} verify {{REPO}}#<PR>` — corrija o corpo (`gh pr edit <PR> --body-file <arquivo>`) até nenhum `LEDGER-*` sobrar. Sem atribuição de IA.
 
-## 6. Relatório final (sua última mensagem)
+## 6. Antes de chamar de pronto — auditoria do próprio diff
+
+Antes do relatório final, re-audite o seu próprio diff contra a issue; o gate só prova que os testes passam, não que o escopo está certo:
+
+- **Diff vs `Done when`:** percorra cada item do `Done when` e aponte o trecho do diff que o cumpre (`git diff origin/{{BASE}}...HEAD`). Um item sem diff correspondente não está feito: implemente o que falta, ou declare `- [ ] <item> — not done: <porquê>` no ledger.
+- **Premissas corrigidas:** liste no PR cada premissa da issue que estava errada (linha que andou, tipo que mudou, arquivo que não existe) e o que você fez em vez disso.
+- **O que você NÃO mexeu:** nomeie os arquivos vizinhos que ficaram de fora, as refatorações tentadas e abortadas, e qualquer escopo além dos itens — o diff deve conter só o que os itens pedem.
+
+## 7. Relatório final (sua última mensagem)
 
 Número e URL do PR; arquivos mudados; resultado do gate (exit codes); ADR escolhido; premissas corrigidas; issues abertas que você avisou; o que decidiu não mexer e por quê. Bloqueado → diga exatamente onde, não invente que terminou.
