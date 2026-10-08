@@ -26,9 +26,11 @@ current directory. Stdlib only. Needs `gh` (logged in), `git` >= 2.38, optional 
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1589,6 +1591,18 @@ def cmd_doctor(default: Repo | None, a) -> None:
         for action in r.ci_gate()[1]:
             checks.append((f"CI runs `{action}` and the gate does not", False, "if it is a gate step, declare its command in `.wave.json`; then add it to `ignore_actions`", False))
         checks.append(("protected paths declared", bool(r.protected), ", ".join(r.protected) or "none: verify cannot guard anything — `repos add . --protected <paths>`", False))
+        hdata, hwhy = load_settings(r.root / ".claude" / "settings.json")
+        hhave = installed_guards(hdata) if hdata is not None else set()
+        hbroken = sorted(n for n in hhave if ping_guard(guard_command(n)))
+        hmissing = sorted(n for n, _, _ in GUARD_HOOKS if n not in hhave)
+        hsum = f"{len(hhave)}/{len(GUARD_HOOKS)} active"
+        if hwhy:
+            hsum += f", settings.json {hwhy}"
+        if hmissing:
+            hsum += f", missing: {', '.join(hmissing)} — `wave hooks install`"
+        if hbroken:
+            hsum += f", broken: {', '.join(hbroken)}"
+        checks.append(("guard hooks installed", not (hwhy or hmissing or hbroken), hsum, False))
         merged = {l.strip().replace("origin/", "") for l in r.git(["branch", "-r", "--merged", f"origin/{r.base}"]).splitlines()}
         alive, dead, stale = [], [], []
         for wt, branch, n in issue_worktrees(r):
@@ -1645,6 +1659,102 @@ def cmd_doctor(default: Repo | None, a) -> None:
         sys.exit(1)
 
 
+# ---------------------------------------------------------------- guard hooks
+
+HOOKS_SCRIPT = HERE.parent / "hooks" / "guards.py"
+GUARD_HOOKS = [
+    # (name, PreToolUse matcher, what it denies) — the prose of templates/agent.md, made environmental
+    ("attribution", "Bash", "an AI attribution line in a commit or PR-body command"),
+    ("forbidden-git", "Bash", "a destructive git command (gc --prune, reflog expire, stash, reset --hard, clean -f, push --force, branch -D, rm -rf)"),
+    ("secret-read", "Bash", "printing the contents of a secret file (the registry's repos.json, .env, credentials, auth.json)"),
+    ("dispatch-contract", "Task", "an Agent dispatch whose prompt lacks the contract sections (where, task, gate, delivery, Done when)"),
+]
+
+
+def guard_command(name: str) -> str:
+    return f"python3 {HOOKS_SCRIPT} {name}"
+
+
+def load_settings(path: Path) -> tuple[dict | None, str | None]:
+    """(settings, why not): {} when the file does not exist yet, None when it cannot be used as a base."""
+    try:
+        raw = path.read_text()
+    except FileNotFoundError:
+        return {}, None
+    except OSError as e:
+        return None, f"cannot be read ({e})"
+    try:
+        data = json.loads(raw)
+    except ValueError as e:
+        return None, f"does not parse ({e})"
+    return (data, None) if isinstance(data, dict) else (None, "is not a JSON object")
+
+
+def installed_guards(data: dict) -> set[str]:
+    """Names of the plugin's guards already present in the settings, whatever else lives in there."""
+    blocks = data.get("hooks") or {}
+    if not isinstance(blocks, dict):
+        return set()
+    commands = set()
+    for b in blocks.get("PreToolUse") or []:
+        if isinstance(b, dict):
+            commands.update(h.get("command") for h in b.get("hooks") or [] if isinstance(h, dict))
+    return {name for name, _, _ in GUARD_HOOKS if guard_command(name) in commands}
+
+
+def ping_guard(command: str) -> str | None:
+    """None when the hook answers for itself, else why it is broken (a guard that cannot run fails open, so ask it)."""
+    ok, out = sh_ok([*shlex.split(command), "--ping"])
+    return None if ok else out.strip()[:200] or "exited nonzero with no output"
+
+
+def cmd_hooks(default: Repo | None, a) -> None:
+    """Register the guards in the project's .claude/settings.json: idempotent, backed up, --dry-run to look first."""
+    if default is None:
+        raise SystemExit("run inside a repo checkout, or pass --repo")
+    path = default.root / ".claude" / "settings.json"
+    data, why = load_settings(path)
+    if a.action == "status":
+        print(f"guard hooks of {default.slug} — {path}" + (f" ({why})" if why else ""))
+        have = installed_guards(data) if data is not None else set()
+        for name, matcher, what in GUARD_HOOKS:
+            if name not in have:
+                print(f"  {name:<18} missing  ({what}) — `wave hooks install`")
+                continue
+            broken = ping_guard(guard_command(name))
+            print(f"  {name:<18} {'active' if not broken else f'broken   ping failed: {broken} — check the plugin checkout'}")
+        return
+    if data is None:
+        raise SystemExit(f"hooks refused: {path} {why} — fix it by hand; install never overwrites a file it cannot read")
+    if not isinstance(data.get("hooks", {}), dict) or not isinstance(data.get("hooks", {}).get("PreToolUse", []), list):
+        raise SystemExit(f"hooks refused: {path} has a `hooks` value install cannot extend safely — fix it by hand")
+    have = installed_guards(data)
+    todo = [(name, matcher) for name, matcher, _ in GUARD_HOOKS if name not in have]
+    if not todo:
+        print(f"already installed: {len(GUARD_HOOKS)}/{len(GUARD_HOOKS)} guard hooks present in {path}")
+        return
+    for name, matcher in todo:
+        data.setdefault("hooks", {}).setdefault("PreToolUse", []).append(
+            {"matcher": matcher, "hooks": [{"type": "command", "command": guard_command(name)}]})
+    new_text = json.dumps(data, indent=2) + "\n"
+    if a.dry_run:
+        print("".join(difflib.unified_diff(path.read_text().splitlines(True) if path.exists() else [],
+                                           new_text.splitlines(True), fromfile=str(path), tofile=f"{path} (hooks install)")))
+        print(f"{len(todo)} hook(s) would be added: {', '.join(name for name, _ in todo)} — nothing written (--dry-run)")
+        return
+    backup = None
+    if path.exists():
+        backup = path.with_name(f"{path.name}.bak-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}")
+        while backup.exists():
+            backup = path.with_name(f"{backup.name}-1")
+        shutil.copy2(path, backup)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(new_text)
+    for name, matcher in todo:
+        print(f"installed {name} (PreToolUse[{matcher}])")
+    print(f"wrote {path}" + (f", backup: {backup}" if backup else ""))
+
+
 # ---------------------------------------------------------------- guarantees
 
 GUARANTEES = [
@@ -1696,6 +1806,11 @@ GUARANTEES = [
     ("the script never force-pushes, resets, stashes, or deletes", "by absence", "grep the source for 'force', 'reset --hard', 'stash', 'rm -rf': zero hits", True),
     ("the e2e run writes only to a sandbox: never the plugin's own repo, a name without -sandbox only with --any-repo", "scripts/e2e.py check_target", "e2e refused: ...", True),
     ("the e2e fake agent pushes only its issue's own branch, never the base", "scripts/fake_agent.py check_branch", "<branch> is not the branch of #N", True),
+    # the guard hooks (hooks/guards.py): the prose rules of templates/agent.md, enforced by the environment. All fail open.
+    ("no AI attribution in a commit or PR-body command (fail open: a broken guard exits 0)", "hooks/guards.py attribution <- settings PreToolUse[Bash]", "exit 2: attribution-guard: this command carries AI attribution (...) — drop the trailer", True),
+    ("no forbidden git command through Bash — gc --prune, reflog expire, stash, reset --hard, clean -f, push --force, branch -D, rm -rf — each refusal naming the safe alternative (fail open: a broken guard exits 0)", "hooks/guards.py forbidden-git <- settings PreToolUse[Bash]", "exit 2: forbidden-git-guard: `git stash` is refused: commit the work to a branch instead", True),
+    ("no secret file's contents are printed — the registry's repos.json, .env, credentials, auth.json; ls, stat and grep -c stay open (fail open: a broken guard exits 0)", "hooks/guards.py secret-read <- settings PreToolUse[Bash]", "exit 2: secret-read-guard: use `ls -la`, `stat` or `grep -c` instead", True),
+    ("no Agent dispatch whose prompt lacks the contract sections — where, task, gate, delivery, Done when; a fork is exempt (fail open: a broken guard exits 0)", "hooks/guards.py dispatch-contract <- settings PreToolUse[Task]", "exit 2: dispatch-contract-guard: it lacks the dispatch contract: the gate to run, ...", True),
 ]
 
 
@@ -1818,6 +1933,8 @@ def main(argv=None):
     x = s.add_parser("tick", help="tick (--done) or strike (--strike + --why) items of an issue's `## Done when`, by index or text; what merge does with a PR's ledger"); x.add_argument("issue"); x.add_argument("--done", action="append", metavar="ITEM"); x.add_argument("--strike", action="append", metavar="ITEM"); x.add_argument("--why", action="append", metavar="REASON", help="one per --strike, in the same order"); x.add_argument("--dry-run", action="store_true", help="print the lines that would change, write nothing")
     x = s.add_parser("plan", help="create an epic's issues from <dir>/index.tsv + deps.tsv + <key>.md, wiring sub-issues and blocked_by"); x.add_argument("dir"); x.add_argument("--slug"); x.add_argument("--milestone"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--force", action="store_true")
 
+    x = s.add_parser("hooks", help="guard hooks: install [--dry-run] writes them into the project's .claude/settings.json (idempotent, backed up); status: active | missing | broken")
+    x.add_argument("action", choices=["install", "status"]); x.add_argument("--dry-run", action="store_true")
     x = s.add_parser("stats", help="what the log says: runs, durations, failures per command")
     x = s.add_parser("guarantees", help="every promise the plugin makes, where it is enforced, whether a test pins it"); x.add_argument("--json", action="store_true")
 
@@ -1834,7 +1951,7 @@ def main(argv=None):
         {"repos": cmd_repos, "facts": cmd_facts, "next": cmd_next, "dispatch": cmd_dispatch, "prompt": cmd_prompt,
      "verify": cmd_verify, "order": cmd_order, "merge": cmd_merge, "resolve": cmd_resolve, "close-parents": cmd_close_parents,
              "cleanup": cmd_cleanup, "status": cmd_status, "lint": cmd_lint, "plan": cmd_plan, "why": cmd_why, "doctor": cmd_doctor,
-             "agents": cmd_agents, "tick": cmd_tick,
+             "agents": cmd_agents, "tick": cmd_tick, "hooks": cmd_hooks,
          "guarantees": cmd_guarantees}[a.cmd](default, a)
     except SystemExit as e:
         exit_code = e.code if isinstance(e.code, int) else 1

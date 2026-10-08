@@ -134,6 +134,25 @@ Every PR body carries a **Done-when ledger**: a `## Done when` section (that exa
 
 The tool prefers making a wrong action impossible over warning about it: no `--yes`, no merge; plan SHAs moved, no merge; issue still blocked, no merge; `doctor` ✗, no dispatch; issue not READY, no dispatch; a directory already applied, no second `plan`. What cannot be made impossible is made loud: `verify` names AI attribution, protected paths touched, red CI, unclean worktrees, and contradictions. `why` prints the premises behind every READY so a "why not?" is answered with evidence, not memory. Every state is one of a fixed, exclusive set, and the code asserts it.
 
+## Guard hooks
+
+The prompt tells an agent what never to do; a hook is what still holds when the prompt is ignored. `hooks/guards.py` carries four `PreToolUse` guards that refuse the tool call with a message naming the safe alternative — and every one of them fails open: a guard that crashes, or cannot read its event, exits 0, because a broken guard must never wedge the loop it guards. `wave verify` stays the deep check on the finished PR; the guards stand between the command and the tool.
+
+```bash
+wave hooks install            # write the four guards into <repo>/.claude/settings.json — backs the file up, idempotent
+wave hooks install --dry-run  # print the diff, write nothing
+wave hooks status             # active | missing | broken, per guard; also one line in `wave doctor`
+```
+
+| guard | denies |
+| --- | --- |
+| `attribution` (Bash) | a commit or PR-body command carrying `Co-Authored-By: Claude`, "Generated with Claude Code" or `noreply@anthropic.com` — including inside a `--body-file`/`-F` file |
+| `forbidden-git` (Bash) | `git gc --prune`, `git reflog expire`, `git stash`, `git reset --hard`, `git clean -f`, `git push --force`, `git branch -D`, `rm -rf`; each refusal names the way back |
+| `secret-read` (Bash) | printing the contents of a secret: the registry's `repos.json` (it carries account tokens), `.env`, `credentials`, `auth.json`; `ls -la`, `stat` and `grep -c` stay open |
+| `dispatch-contract` (Task) | an agent dispatch whose prompt lacks the contract sections (where, task, gate, delivery, `Done when`); a `fork` is exempt — it inherits the conversation |
+
+The guards are only as good as the tests that fail without them: `tests/test_hooks.py` feeds each one the stdin JSON Claude Code pipes to a hook and pins the exit codes, crash included. A denylist, not a sandbox: a guard reads the command text, so an interpreter (`python3 -c`, `node -e`) or a recursive grep already inside a secret directory is not seen — secrets stay out of the project; the guard is the backstop, not the fix.
+
 ## What has been measured
 
 From the epic this was built on ([CarlosDanielDev/dev-cleaner#77](https://github.com/CarlosDanielDev/dev-cleaner/issues/77), 2026-09-29/30), one wave:
@@ -237,6 +256,7 @@ skills/wave/SKILL.md            the orchestrator procedure Claude follows
 scripts/wave.py                 the deterministic steps (stdlib only)
 scripts/e2e.py                  one end-to-end run against a sandbox repository
 scripts/fake_agent.py           the agent the e2e run plays: change, commit, push, PR; keeps both sides of a conflict
+hooks/guards.py                 the PreToolUse guard hooks: attribution, forbidden git, secret reads, dispatch contract (fail open)
 templates/agent.md              the per-issue prompt handed to each agent
 templates/issue-contract.md     what an issue must carry
 tests/                          the suite: a fake gh, recorded fixtures, a temporary git repo
