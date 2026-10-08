@@ -65,7 +65,10 @@ IGNORE_ACTIONS = ["actions/checkout", "actions/setup-*", "actions/cache", "actio
 # changed less than WORKING_MIN minutes ago = working, up to DEAD_MIN = quiet, more and no PR = likely dead
 WORKING_MIN = 10
 DEAD_MIN = 30
-STAMP = ".setwave.json"  # written by dispatch into each worktree, excluded from git: issue, repo, dispatched_at, prompt
+STAMP = ".setwave.json"  # written by dispatch into each worktree, excluded from git: issue, repo, dispatched_at, prompt, resumes
+# dispatches over a worktree without a new commit on its branch: at this many, the agent is agent-exhausted —
+# dispatch refuses a further one and `wave sweep --fix` escalates to the owner; nothing is ever closed by itself
+RETRY_CEILING = 3
 # more parallel agents than this once hit the API rate limit and left a half-extracted crate in the shared cargo cache
 MAX_BATCH = 6
 # a registry package in Cargo.lock: name, version, then a registry or sparse-index source (git and path packages are not cached there)
@@ -541,6 +544,33 @@ def ledger_ticks(pr_body: str) -> tuple[list[str], list[tuple[str, str]]]:
     return [i["key"] for i in items if i["state"] == "done"], struck
 
 
+def untick_body(body: str, refs: list[str]) -> str:
+    """`body` with the named done items unticked back to `- [ ]`: the reverse of tick_body, for a done claim a
+    sweep proved false. Only those lines change, and only while still done. Raises ValueError for a body without
+    `## Done when` or an unknown item."""
+    items = done_when(body)
+    if items is None:
+        raise ValueError("the body has no `## Done when` heading at the start of a line")
+
+    def find(ref: str) -> dict:
+        if ref.strip().isdigit():
+            if not 1 <= int(ref) <= len(items):
+                raise ValueError(f"no item {ref}: the list has {len(items)}")
+            return items[int(ref) - 1]
+        hit = next((i for i in items if i["key"] == norm(ref)), None)
+        if hit is None:
+            raise ValueError(f"no item {ref!r} in `## Done when`")
+        return hit
+
+    lines = body.splitlines(keepends=True)
+    for ref in refs:
+        it = find(ref)
+        if it["state"] == "done":
+            m = ITEM.match(lines[it["line"]])
+            lines[it["line"]] = m.group(1) + " " + lines[it["line"]][m.end(2):]
+    return "".join(lines)
+
+
 def tally(items: list[dict]) -> dict[str, int]:
     return {s: sum(1 for i in items if i["state"] == s) for s in ("done", "dropped", "open")}
 
@@ -561,12 +591,14 @@ def candidates(nodes: dict[str, dict]) -> list[dict]:
         wt = repo.worktree(n)
         items = done_when(iss.get("body") or "")
         done = bool(items) and all(i["state"] != "open" for i in items)  # open, yet nothing left to do: not dispatched
+        lv = liveness(repo, n, wt) if wt.exists() else None
         state = ("blocked" if blockers else "in-progress" if pr else "done-unclosed" if done
+                 else "agent-exhausted" if lv and lv["resumes"] >= RETRY_CEILING
                  else "worktree" if wt.exists() else "ready")
         out.append({"key": nd["key"], "repo": repo.slug, "number": n, "title": iss["title"], "branch": branch_for(iss),
                     "blocked_by": blockers, "pr": pr["number"] if pr else None,
                     "worktree": str(wt) if wt.exists() else None, "done": done, "state": state,
-                    "liveness": liveness(repo, n, wt) if state == "worktree" else None,
+                    "liveness": lv,
                     "ready": state == "ready"})
     # every open leaf is in exactly one state: `state` is a single value, so the states cannot overlap;
     # what a later edit could break is READY, so READY must mean "nothing else holds", and nothing less
@@ -607,6 +639,9 @@ def why(c: dict) -> str:
     if c.get("done"):
         return "done-unclosed: every Done-when item is ticked or struck — close it or add an item"
     lv = c.get("liveness")
+    if c.get("state") == "agent-exhausted":
+        return (f"agent-exhausted: {lv['resumes']} resumes without a new commit — dispatch refuses; "
+                "`wave sweep --fix` escalates, the owner decides")
     return f"worktree exists ({lv['verdict']}, nothing changed for {lv['idle_min']} min)" if lv else "worktree exists"
 
 
@@ -641,19 +676,37 @@ def last_activity(repo: Repo, wt: Path, dispatched: float | None) -> float:
     return max(times) if times else wt.stat().st_mtime
 
 
+def stamp_of(wt: Path) -> dict:
+    """The dispatch stamp of a worktree, {} when there is none or it is not JSON."""
+    try:
+        return json.loads((wt / STAMP).read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def next_resumes(repo: Repo, wt: Path, stamp: dict) -> int:
+    """The stamp's resume count after one more dispatch in this worktree: a commit on the branch newer than the
+    last dispatch is progress and resets it; a dispatch over no progress is one more resume. No stamp means a
+    first agent here, not a resume."""
+    dispatched = _epoch(stamp.get("dispatched_at"))
+    if dispatched is None:
+        return 0
+    rc, out, _ = run(["git", "log", "-1", "--format=%ct", f"origin/{repo.base}..HEAD"], cwd=wt, env=repo.env)
+    last = float(out.strip()) if rc == 0 and out.strip() else None
+    return 0 if last is not None and last > dispatched else stamp.get("resumes", 0) + 1
+
+
 def liveness(repo: Repo, n: int, wt: Path | None = None) -> dict:
     """What an issue's worktree says about its agent. Nothing but files and git is read: no process is looked at."""
     wt = wt or repo.worktree(n)
-    try:
-        stamp = json.loads((wt / STAMP).read_text())
-    except (OSError, ValueError):
-        stamp = {}
+    stamp = stamp_of(wt)
     now = time.time()
     dispatched = _epoch(stamp.get("dispatched_at"))
     idle = (now - last_activity(repo, wt, dispatched)) / 60
     pr = pr_for_issue(repo, n)
     return {"issue": n, "worktree": str(wt), "age_min": round((now - dispatched) / 60) if dispatched else None,
-            "idle_min": round(idle), "pr": pr["number"] if pr else None, "verdict": verdict(idle, bool(pr))}
+            "idle_min": round(idle), "pr": pr["number"] if pr else None, "resumes": stamp.get("resumes", 0),
+            "verdict": verdict(idle, bool(pr))}
 
 
 def issue_worktrees(repo: Repo) -> list[tuple[Path, str, int]]:
@@ -823,10 +876,16 @@ def cmd_dispatch(default: Repo | None, a):
         branch = branch_for(iss)
         wt = repo.worktree(n)
         sha = repo.origin_sha()
+        resumes = 0
         if not a.dry_run:
             if wt.exists():
                 lv = liveness(repo, n, wt)  # --force over a live agent would put a second one in the same tree: say what this one looks like
                 print(f"{key(repo, n)}: worktree exists at {wt}, keeping it ({lv['verdict']}, changed {lv['idle_min']} min ago)")
+                resumes = next_resumes(repo, wt, stamp_of(wt))  # a dispatch over a worktree is a resume; a commit since the last one is progress
+                if resumes > RETRY_CEILING:
+                    raise SystemExit(f"{key(repo, n)}: agent-exhausted: {resumes - 1} resumes without a new commit "
+                                     f"(nothing changed for {lv['idle_min']} min) — dispatch refused; "
+                                     f"`wave sweep <epic> --fix` comments the escalation, the owner decides")
             else:
                 ok, out = repo.git_ok(["worktree", "add", "-q", "-b", branch, str(wt), f"origin/{repo.base}"])
                 if not ok:
@@ -836,8 +895,8 @@ def cmd_dispatch(default: Repo | None, a):
                     sh_ok(["codegraph", "init", "."], cwd=wt)
         path = repo.handoffs / f"{n}.md"
         path.write_text(render_prompt(repo, iss, branch, sha, len(targets)))
-        if not a.dry_run:  # the stamp `agents` and `doctor` read; a re-dispatch (--force) is a new agent, so a new stamp
-            (wt / STAMP).write_text(json.dumps({"issue": n, "repo": repo.slug, "dispatched_at": now_iso(), "prompt": str(path)}, indent=2) + "\n")
+        if not a.dry_run:  # the stamp `agents`, `doctor` and the retry ceiling read; a re-dispatch (--force) is a new agent, so a new stamp
+            (wt / STAMP).write_text(json.dumps({"issue": n, "repo": repo.slug, "dispatched_at": now_iso(), "prompt": str(path), "resumes": resumes}, indent=2) + "\n")
             ok, excl = repo.git_ok(["rev-parse", "--git-path", "info/exclude"], cwd=wt)  # shared by every worktree
             excl_path = wt / excl.strip()  # an absolute path stays itself
             text = excl_path.read_text() if ok and excl_path.exists() else ""
@@ -1148,17 +1207,22 @@ def wait_for(fn, timeout: int, every: int = 10):
     return None
 
 
+def edit_issue_body(repo: Repo, n: int, old: str, new: str, dry_run: bool = False) -> bool:
+    """Write an issue body on GitHub unless dry_run, printing every line that changed either way. Whether it changed."""
+    for o, w in zip(old.splitlines(), new.splitlines()):
+        if o != w:
+            print(f"  {key(repo, n)}: {o}\n  {' ' * len(key(repo, n))}  -> {w}")
+    if new != old and not dry_run:
+        repo.gh(["issue", "edit", str(n), "-R", repo.slug, "--body", new])
+    return new != old
+
+
 def tick_issue(repo: Repo, n: int, done: list[str], strike: list[tuple[str, str]], dry_run: bool = False) -> tuple[bool, dict[str, int]]:
     """Tick and strike items of an issue's Done when on GitHub: (whether the body changed, counts after). Writes only on
     a change, and never with dry_run; prints every line it changes either way."""
     body = repo.issue(n).get("body") or ""
     new = tick_body(body, done, strike)
-    for old_line, new_line in zip(body.splitlines(), new.splitlines()):
-        if old_line != new_line:
-            print(f"  {key(repo, n)}: {old_line}\n  {' ' * len(key(repo, n))}  -> {new_line}")
-    if new != body and not dry_run:
-        repo.gh(["issue", "edit", str(n), "-R", repo.slug, "--body", new])
-    return new != body, tally(done_when(new))
+    return edit_issue_body(repo, n, body, new, dry_run), tally(done_when(new))
 
 
 def apply_ledger(repo: Repo, pr: dict, v: dict) -> bool:
@@ -1452,6 +1516,122 @@ def cmd_cleanup(default: Repo | None, a):
         repo.git(["worktree", "prune"])
 
 
+# ---------------------------------------------------------------- sweep
+
+def ledger_applied(repo: Repo, n: int, pr: dict) -> bool:
+    """Whether the issue carries apply_ledger's note for this PR."""
+    comments = repo.api(f"repos/{repo.slug}/issues/{n}/comments?per_page=100", paginate=True) or []
+    return any(f"ledger applied from PR #{pr['number']}" in (c.get("body") or "") for c in comments)
+
+
+def sweep_epic(nodes: dict[str, dict]) -> list[dict]:
+    """The state sweep: every leaf that claims to be done (all Done-when items ticked or struck) or is closed,
+    re-checked against GitHub — a PR closes it, that PR is merged, and its ledger was applied. Read-only."""
+    findings = []
+    for nd in sorted(leaves(nodes), key=lambda d: (d["repo"], d["number"])):
+        r, n, iss = Repo.get(nd["repo"]), nd["number"], nd["issue"]
+        items = done_when(iss.get("body") or "")
+        done = bool(items) and all(i["state"] != "open" for i in items)
+        closed = iss["state"] == "closed"
+        if not closed and not done:
+            continue  # nothing claimed here: nothing to re-verify
+        merged = merged_pr_for_issue(r, n)
+        if merged:
+            if not ledger_applied(r, n, merged):
+                findings.append({"key": key(r, n), "repo": r.slug, "number": n, "kind": "ledger-not-applied",
+                                 "evidence": f"merged PR #{merged['number']} closes it, but no "
+                                             f"`ledger applied from PR #{merged['number']}` comment is on the issue"})
+            continue
+        open_pr = pr_for_issue(r, n)
+        behind = f"PR #{open_pr['number']} is open, not merged" if open_pr else "no PR closes it at all"
+        claimed = "closed" if closed else "every Done-when item is ticked or struck"
+        findings.append({"key": key(r, n), "repo": r.slug, "number": n,
+                         "kind": "false-closed" if closed else "false-done",
+                         "evidence": f"{claimed}, but {behind}"})
+    return findings
+
+
+def sweep_retries(repo: Repo, nums: set[int] | None = None) -> list[dict]:
+    """The retry sweep: worktrees whose stamp counts RETRY_CEILING resumes without a new commit on the branch.
+    Read-only; nums narrows it to the leaves of one epic."""
+    out = []
+    for wt, branch, n in issue_worktrees(repo):
+        if nums is not None and n not in nums:
+            continue
+        stamp = stamp_of(wt)
+        if stamp.get("resumes", 0) < RETRY_CEILING:
+            continue
+        lv = liveness(repo, n, wt)
+        rc, log, _ = run(["git", "log", "-1", "--format=%h %ct", f"origin/{repo.base}..HEAD"], cwd=wt, env=repo.env)
+        last = log.strip().split() if rc == 0 and log.strip() else None
+        commit = f"last commit {last[0]} {round((time.time() - float(last[1])) / 60)} min ago" if last else "no commit on the branch"
+        out.append({"key": key(repo, n), "repo": repo.slug, "number": n, "wt": wt, "kind": "agent-exhausted",
+                    "evidence": f"{stamp['resumes']} resumes without a new commit "
+                                f"({commit}; nothing changed for {lv['idle_min']} min)"})
+    return sorted(out, key=lambda f: f["number"])
+
+
+def apply_sweep(repo: Repo, epic: int, findings: list[dict]) -> None:
+    """--fix: revert every lie a sweep proved, comment why, and escalate the exhausted ones to the owner. It never
+    closes or deletes: a reverted leaf goes back to `next`, an exhausted one stays open — dispatch refuses it.
+    Every finding is applied on its own: one that fails is reported, the rest still run."""
+    epic_notes = []
+    for f in findings:
+        try:
+            r, n = Repo.get(f["repo"]), f["number"]
+            if f["kind"] == "false-done":
+                body = r.issue(n).get("body") or ""
+                done_refs = [str(i + 1) for i, it in enumerate(done_when(body) or []) if it["state"] == "done"]
+                edit_issue_body(r, n, body, untick_body(body, done_refs))
+                note = (f"wave sweep: {f['evidence']}. "
+                        + (f"Unticked {len(done_refs)} item(s) back to open, so `wave next` sees the work again; "
+                           "strikes stay, they are the owner's calls." if done_refs else
+                           "Nothing unticked: every item is a strike, the owner's call."))
+                r.gh(["issue", "comment", str(n), "-R", r.slug, "--body", note])
+                print(f"  {f['key']}: " + (f"unticked {len(done_refs)} item(s) back to open and commented"
+                                           if done_refs else "commented (nothing to untick: every item is a strike)"))
+            elif f["kind"] == "false-closed":
+                r.gh(["issue", "reopen", str(n), "-R", r.slug,
+                      "--comment", f"wave sweep: {f['evidence']} — reopened: a closure has to stand on a merged PR"])
+                print(f"  {f['key']}: reopened o/x#N and commented")
+            elif f["kind"] == "ledger-not-applied":
+                merged = merged_pr_for_issue(r, n)
+                if merged:
+                    apply_ledger(r, merged, {"ledger_issue": n, "issue": n})
+            else:  # agent-exhausted
+                r.gh(["issue", "comment", str(n), "-R", r.slug, "--body",
+                      f"wave sweep: agent-exhausted — {f['evidence']}. Dispatch now refuses it: the wave moves on and "
+                      "nothing was closed or discarded. The owner decides: resume by hand with a fresh instruction, "
+                      "commit what is there, or close."])
+                print(f"  {f['key']}: commented the escalation on the issue")
+                epic_notes.append(f"- {f['key']}: {f['evidence']}")
+        except (SystemExit, ValueError) as e:  # like apply_ledger: the finding is reported, the others still run
+            print(f"  {f['key']}: could not be fixed ({str(e).strip().splitlines()[-1] if str(e).strip() else e})")
+    if epic_notes:
+        repo.gh(["issue", "comment", str(epic), "-R", repo.slug, "--body",
+                 "wave sweep: agents past the retry ceiling:\n" + "\n".join(epic_notes)
+                 + "\nDispatch refuses these; the owner decides. Nothing was closed or discarded."])
+        print(f"  {key(repo, epic)}: commented the escalation on the epic")
+
+
+def cmd_sweep(default: Repo | None, a):
+    """Both sweeps: state (claimed done and closed leaves, against merged PRs) and the retry ceiling. Read-only unless --fix."""
+    repo, epic = parse_ref(a.epic, default)
+    repo.fetch()
+    nodes = tree(repo, epic)
+    findings = sweep_epic(nodes) + sweep_retries(repo, {nd["number"] for nd in leaves(nodes)})
+    print(f"epic {key(repo, epic)} — {len(leaves(nodes))} leaf issues, {len(findings)} finding(s)" + ("" if findings else ", clean"))
+    for f in findings:
+        print(f"  {f['key']} {f['kind']}: {f['evidence']}")
+    if findings and a.fix:
+        apply_sweep(repo, epic, findings)
+    if a.fix:
+        print("fixes applied" + (" — run the sweep again: what was reverted is honest now" if findings else ": nothing to fix"))
+    else:
+        print("(read-only: pass --fix to untick, reopen, apply the ledgers and comment the escalations)")
+    sys.exit(1 if findings else 0)
+
+
 def cmd_status(default: Repo | None, a):
     repo, epic = parse_ref(a.epic, default)
     nodes = tree(repo, epic)
@@ -1590,12 +1770,14 @@ def cmd_doctor(default: Repo | None, a) -> None:
             checks.append((f"CI runs `{action}` and the gate does not", False, "if it is a gate step, declare its command in `.wave.json`; then add it to `ignore_actions`", False))
         checks.append(("protected paths declared", bool(r.protected), ", ".join(r.protected) or "none: verify cannot guard anything — `repos add . --protected <paths>`", False))
         merged = {l.strip().replace("origin/", "") for l in r.git(["branch", "-r", "--merged", f"origin/{r.base}"]).splitlines()}
-        alive, dead, stale = [], [], []
+        alive, dead, stale, exhausted = [], [], [], []
         for wt, branch, n in issue_worktrees(r):
             untouched = (not r.git_ok(["rev-parse", "--verify", f"origin/{branch}"])[0] and not r.git(["log", "--oneline", f"origin/{r.base}..HEAD"], cwd=wt).strip()
                          and not (wt / STAMP).exists() and not r.git(["status", "--porcelain"], cwd=wt).strip())
             if branch in merged or untouched:
                 stale.append(wt.name)          # merged, or never dispatched, pushed, committed or edited: leftovers, `wave cleanup`
+            elif stamp_of(wt).get("resumes", 0) >= RETRY_CEILING:
+                exhausted.append((wt, n))      # past the retry ceiling: dispatch refuses it, the sweep escalates
             elif not pr_for_issue(r, n):       # unmerged work with no PR: an agent at work, or one that died
                 lv = liveness(r, n, wt)
                 (dead if lv["verdict"] == "likely dead" else alive).append((wt.name, n, lv))
@@ -1605,6 +1787,15 @@ def cmd_doctor(default: Repo | None, a) -> None:
                        (", ".join(f"{name} ({lv['idle_min']} min)" for name, _, lv in dead)
                         + " — resume the agent with `SendMessage` to its id, or "
                         + ", ".join(f"`wave dispatch --force {n}`" for _, n, _ in dead) + " to start over on top of what is there") if dead else "none", False))
+        checks.append((f"no agent past the retry ceiling ({RETRY_CEILING} resumes without a new commit)", not exhausted,
+                       ", ".join(f"{wt.name} ({stamp_of(wt).get('resumes')} resumes, changed {liveness(r, n, wt)['idle_min']} min ago) — "
+                                 "dispatch refuses it; `wave sweep <epic> --fix` escalates" for wt, n in exhausted)
+                       if exhausted else "none", False))
+        if getattr(a, "epic", None):
+            er, en = parse_ref(a.epic, r)
+            found = sweep_epic(tree(er, en))
+            checks.append((f"state sweep of {key(er, en)} (claimed done and closed leaves, against merged PRs)", not found,
+                           "; ".join(f"{f['key']} {f['kind']}" for f in found) or "clean", False))
         checks.append(("no leftover worktrees (merged or empty)", not stale, (", ".join(stale) + " — `wave cleanup`") if stale else "none", False))
         gate_left = [w for w in re.findall(r"^worktree (.+)$", r.git(["worktree", "list", "--porcelain"]), re.M) if Path(w).name.startswith(CHAIN_GATE_PREFIX)]
         checks.append(("no leftover chain-gate worktree (an interrupted `order --run-gate`)", not gate_left,
@@ -1668,7 +1859,7 @@ GUARANTEES = [
     ("an existing worktree is kept, never recreated", "cmd_dispatch", "prints 'worktree exists'", False),
     ("cleanup removes only worktrees that are clean, pushed and merged", "cmd_cleanup", "KEEP lines with the reason", False),
     ("plan refuses to run twice on the same directory or titles", "cmd_plan", "numbers.json / duplicate titles refusal", False),
-    ("every open leaf is in exactly one state", "candidates (assert)", "blocked | in-progress | done-unclosed | worktree | ready", True),
+    ("every open leaf is in exactly one state", "candidates (assert)", "blocked | in-progress | done-unclosed | agent-exhausted | worktree | ready", True),
     ("an open issue whose every Done-when item is ticked or struck is never dispatched", "candidates + premises_for", "done-unclosed: ... close it or add an item", True),
     ("verify flags AI attribution in body or commits", "verify_one", "AI-ATTRIBUTION", True),
     ("verify flags protected paths touched", "verify_one", "PROTECTED:<paths>", True),
@@ -1689,6 +1880,10 @@ GUARANTEES = [
     ("resolve --continue refuses leftover conflict markers, even once staged", "cmd_resolve --continue", "conflict markers remain", True),
     ("resolve pushes only a gated commit, with a plain push", "cmd_resolve -> run_gate", "exit 3 and nothing pushed on a red gate", True),
     ("lint flags text/data contradictions", "cmd_lint", "CONTRADICTION: ...", True),
+    ("sweep re-verifies claimed done and closed leaves against merged PRs; --fix reverts the lie with a comment and the leaf returns to next", "cmd_sweep -> sweep_epic, apply_sweep", "false-done | false-closed | ledger-not-applied", True),
+    ("three resumes without a new commit exhaust an agent: dispatch refuses the next one, sweep --fix comments the escalation on the issue and the epic, nothing closes", "cmd_dispatch + sweep_retries", "agent-exhausted: 3 resumes without a new commit", True),
+    ("an exhausted worktree is its own exclusive state, never ready", "candidates -> liveness", "agent-exhausted: N resumes without a new commit — dispatch refuses", True),
+    ("doctor reports the retry ceiling, and with --epic the state sweep, both soft", "cmd_doctor -> sweep_retries, sweep_epic", "! no agent past the retry ceiling (3 resumes ...) / ! state sweep of <epic>", True),
     ("a command run inside a worktree never re-points the registry: it names the main checkout", "Repo.from_cwd (--git-common-dir)", "repos.json path stays the main checkout; a worktree or missing path is repaired to it", True),
     ("per-repo gh account token, global login untouched", "Repo._env", "GH_TOKEN per call", True),
     ("an epic follows sub-issues and blockers into other repos; plan --slug creates there", "tree + candidates, cmd_plan", "keys owner/name#N, gh -R owner/name", True),
@@ -1804,7 +1999,7 @@ def main(argv=None):
     x = s.add_parser("next", help="leaf issues ready to dispatch"); x.add_argument("epic"); x.add_argument("--batch", type=int, default=4); x.add_argument("--json", action="store_true")
     x = s.add_parser("dispatch", help="create worktrees + prompt files (runs doctor and refuses issues that are not READY)"); x.add_argument("issues", nargs="+"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--force", action="store_true"); x.add_argument("--warm", action="store_true", help="Rust: `cargo fetch` in the main checkout first, so parallel builds only extract")
     x = s.add_parser("why", help="the premises behind READY / NOT READY for an issue, with evidence"); x.add_argument("refs", nargs="+")
-    x = s.add_parser("doctor", help="preflight: gh, git, clean checkout, gate, protected paths, dead agents, leftover worktrees, cargo cache, disk, batch size"); x.add_argument("--batch", type=int, default=4); x.add_argument("--fix-cache", action="store_true", help="move each half-extracted crate to ~/.config/setwave/quarantine/ (never deletes)")
+    x = s.add_parser("doctor", help="preflight: gh, git, clean checkout, gate, protected paths, dead agents, retry ceiling, leftover worktrees, cargo cache, disk, batch size"); x.add_argument("--batch", type=int, default=4); x.add_argument("--fix-cache", action="store_true", help="move each half-extracted crate to ~/.config/setwave/quarantine/ (never deletes)"); x.add_argument("--epic", help="also run the state sweep of this epic as a soft check")
     x = s.add_parser("agents", help="every issue worktree: age since dispatch, minutes since the newest change, PR, verdict (working | quiet | likely dead | done)")
     x = s.add_parser("prompt", help="print the agent prompt for one issue"); x.add_argument("issue"); x.add_argument("--parallel", type=int, default=4)
     x = s.add_parser("verify", help="check PRs: attribution, protected paths, CI, mergeability, worktree"); x.add_argument("prs", nargs="*"); x.add_argument("--epic"); x.add_argument("--json", action="store_true")
@@ -1814,6 +2009,7 @@ def main(argv=None):
     x = s.add_parser("close-parents", help="close parents whose sub-issues are all closed"); x.add_argument("epic"); x.add_argument("--include-epic", action="store_true"); x.add_argument("--dry-run", action="store_true")
     x = s.add_parser("cleanup", help="remove worktrees that are clean, pushed and merged"); x.add_argument("slugs", nargs="*"); x.add_argument("--dry-run", action="store_true")
     x = s.add_parser("status", help="tree with states; --post comments it on the epic"); x.add_argument("epic"); x.add_argument("--post", action="store_true")
+    x = s.add_parser("sweep", help="re-verify claimed done and closed leaves against merged PRs, and the retry ceiling; read-only unless --fix"); x.add_argument("epic"); x.add_argument("--fix", action="store_true", help="apply the state fixes (untick, reopen, apply the ledger) and comment the escalations")
     x = s.add_parser("lint", help="check issues carry what /wave needs"); x.add_argument("issues", nargs="+")
     x = s.add_parser("tick", help="tick (--done) or strike (--strike + --why) items of an issue's `## Done when`, by index or text; what merge does with a PR's ledger"); x.add_argument("issue"); x.add_argument("--done", action="append", metavar="ITEM"); x.add_argument("--strike", action="append", metavar="ITEM"); x.add_argument("--why", action="append", metavar="REASON", help="one per --strike, in the same order"); x.add_argument("--dry-run", action="store_true", help="print the lines that would change, write nothing")
     x = s.add_parser("plan", help="create an epic's issues from <dir>/index.tsv + deps.tsv + <key>.md, wiring sub-issues and blocked_by"); x.add_argument("dir"); x.add_argument("--slug"); x.add_argument("--milestone"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--force", action="store_true")
@@ -1834,7 +2030,7 @@ def main(argv=None):
         {"repos": cmd_repos, "facts": cmd_facts, "next": cmd_next, "dispatch": cmd_dispatch, "prompt": cmd_prompt,
      "verify": cmd_verify, "order": cmd_order, "merge": cmd_merge, "resolve": cmd_resolve, "close-parents": cmd_close_parents,
              "cleanup": cmd_cleanup, "status": cmd_status, "lint": cmd_lint, "plan": cmd_plan, "why": cmd_why, "doctor": cmd_doctor,
-             "agents": cmd_agents, "tick": cmd_tick,
+             "agents": cmd_agents, "tick": cmd_tick, "sweep": cmd_sweep,
          "guarantees": cmd_guarantees}[a.cmd](default, a)
     except SystemExit as e:
         exit_code = e.code if isinstance(e.code, int) else 1

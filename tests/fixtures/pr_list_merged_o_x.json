@@ -1,0 +1,14 @@
+[
+  {
+    "number": 40,
+    "title": "PR 40",
+    "headRefName": "feat/4-x",
+    "body": "Does four-a.\n\nCloses #4\n\n## Done when\n\n- [x] four-a\n"
+  },
+  {
+    "number": 41,
+    "title": "PR 41",
+    "headRefName": "feat/5-y",
+    "body": "Does five-a.\n\nCloses #5\n\n## Done when\n\n- [x] five-a\n"
+  }
+]
