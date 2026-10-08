@@ -1,0 +1,14 @@
+{
+  "id": 9063,
+  "number": 63,
+  "title": "chore 63: remove the dead branch",
+  "state": "open",
+  "body": "Parent: #1\n\nThe change touches `scripts/wave.py`, in `cmd_lint`.\n\n## Done when\n\n- [ ] the dead branch is gone (`python3 -m unittest discover -s tests`) — owner: implementer\n\n## Handoff\n\n```bash\ngit worktree add -b chore/63-cleanup ../r-63 origin/main\n```\n",
+  "labels": [
+    {
+      "name": "chore"
+    }
+  ],
+  "html_url": "https://github.com/o/r/issues/63",
+  "repository_url": "https://github.com/o/r"
+}

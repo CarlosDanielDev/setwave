@@ -2,24 +2,23 @@
 
 `wave.py lint <N…>` checa isto. Sem isto, o agente vai adivinhar — e adivinhar é o que estamos eliminando.
 
+Este arquivo é o **índice**: o estado que mora no GitHub, a trilha de comentários, as regras do repo e o ledger do PR — partes que todo tipo de issue compartilha. O corpo da issue tem **um template por tipo de trabalho**, em `issue/` — leia o arquivo antes de escrever o corpo, não parafraseie de memória:
+
+| Label | Template | O que o tipo acrescenta |
+| --- | --- | --- |
+| `bug` | [`issue/bug.md`](issue/bug.md) | `## Reprodução` com passos e a saída observada |
+| `story` | [`issue/story.md`](issue/story.md) | cada item do `Done when` observável (`código`) e com `— owner:` |
+| `chore` | [`issue/chore.md`](issue/chore.md) | `## Por que não é story` |
+| `feature` | [`issue/feature.md`](issue/feature.md) | `## Fatia` nomeando as stories que a decompõem |
+
+Sem label de tipo, o `lint` cobra o contrato comum (as seções `## Done when` e `## Handoff`, a linha `Parent: #N`, evidência `arquivo:linha`, as contradições de branch e de `Closes`) e **avisa** que o template do tipo não foi cobrado — issue híbrida existe. Todo template carrega o espinhaço comum acima; nenhuma seção obrigatória de hoje desaparece.
+
 ## Estrutura no GitHub (o estado mora aqui, não num chat)
 
 - **Épico** = issue pai com label `epic`. Filhas ligadas como **sub-issues** (API `sub_issues`), não só citadas no texto. Netas idem. `/wave` só despacha **folhas** (issues sem sub-issues).
 - **Dependência** = `blocked_by` da API (não "Depends on" só no texto). `wave next` só libera folha sem `blocked_by` aberto.
 - Uma folha = um PR = um branch = uma worktree. Pais nunca recebem PR; fecham quando as filhas fecham (`wave close-parents`).
 - Milestone opcional; o épico é a unidade.
-
-## Corpo da issue (o agente lê isto a frio)
-
-1. Primeira linha: `Parent: #N.` e, se houver, `Depends on #A, #B.` (espelha o `blocked_by`, para humanos).
-2. **O achado / a mudança**, com evidência que outro possa conferir: `arquivo:linha` no SHA da auditoria, saída de comando, medição. Sem `file:line`, sem issue.
-3. `## Done when` — lista de caixas, cada uma **observável** (teste que passa, comando que imprime X) e com **dono** (`— owner: implementer` / `reviewer`).
-4. `## ADR stub` — a bifurcação de design concreta, contexto, as opções e uma recomendação "para discordar". O PR registra a decisão em três frases.
-5. `## Out of scope` — o que não se reabre, com o porquê.
-6. `## Handoff` — bloco com:
-   - `git worktree add -b <branch> ../<repo>-<N> origin/<base>` (é daqui que `/wave` lê o nome do branch);
-   - `codegraph explore "<símbolos>"` (é daqui que `/wave` lê a query inicial);
-   - o gate do repo, os skills, os inegociáveis, `Closes #N`.
 
 ## Comentários da issue = trilha de mudanças
 

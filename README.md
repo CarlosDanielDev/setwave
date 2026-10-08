@@ -58,7 +58,7 @@ It creates the issues in order, links sub-issues, wires `blocked_by`, fills cros
 /setwave:wave 77
 ```
 
-Claude runs `doctor`, `next` (the leaves that are open, unblocked, without a PR, without a worktree), `dispatch` (a worktree and a prompt per issue), spawns one agent per prompt, `verify` on each PR as it lands, `order --plan` (conflicts predicted, the delta pinned), then **asks you for an OK** and only then `merge --plan --yes`, one PR at a time with CI green before each. It closes parents whose leaves closed, removes worktrees that are clean, pushed and merged, and posts the tree on the epic.
+Claude runs `doctor`, `next` (the leaves that are open, unblocked, without a PR, without a worktree), `dispatch` (a worktree and a prompt per issue), spawns one agent per prompt, `verify` on each PR as it lands, `wave judge` so a read-only agent — never the producer — looks for faults in each diff, `order --plan` (conflicts predicted, the delta pinned, the verdicts recorded), then **asks you for an OK** and only then `merge --plan --yes`, one PR at a time with CI green before each. It closes parents whose leaves closed, removes worktrees that are clean, pushed and merged, and posts the tree on the epic.
 
 **4. The next day.** Nothing to remember:
 
@@ -81,6 +81,7 @@ The last status comment on the epic is the paper trail. A single view across all
 | explain | `wave why <issue>` — the premises behind READY / NOT READY, with evidence | the script |
 | dispatch | `wave dispatch <issues>` — worktrees from `origin/<base>`, CodeGraph index, one prompt file per issue | Claude spawns one agent per file |
 | verify | `wave verify <PR> --epic <epic>` — no AI attribution, protected paths untouched, CI green, worktree clean and pushed, no contradictions (branch number ≠ closed issue, PR closing a parent or a still-blocked issue), a `## Done when` ledger that matches the issue; names sibling issues that cite files the PR touched | the script |
+| judge | `wave judge <PR>` — writes the PR's scoped diff into the handoffs dir; a read-only agent (`templates/judge.md`, Read/Grep/Glob only, writes only the verdict) looks for faults and writes `judge-<PR>.json` (`pass`/`fail`/`concerns`, findings citing `file:line`, the head sha it judged); re-run to validate. `order --plan` records the verdicts; `merge` refuses a PR without a pass at the head it merges: `JUDGE-MISSING` / `JUDGE-FAIL` / `JUDGE-STALE` (a push after the verdict) | the script + a read-only agent |
 | order | `wave order --epic <epic> --plan p.json` — pairwise `git merge-tree`, a chain simulation naming the step that will conflict, `serial` paths flagged, the delta pinned to a file; `--run-gate` runs the gate on the tree after each step, in a throwaway worktree, and names the first PR that turns it red (`merge --plan` then refuses without `--force`) | the script |
 | merge | `wave merge --plan p.json --yes --wait-base-ci` — refuses if the base or a PR head moved since the OK, refuses a still-blocked issue, one at a time, CI green before each, stops at the first conflict, applies each PR's ledger to its issue (`wave tick` by hand otherwise) | **you**, with an explicit OK on that exact plan |
 | resolve | `wave resolve <PR>` — merges the base into the PR's branch in its worktree, gates the commit, plain push, PR comment; a conflict stops with files and line ranges, `--continue` after you fix it | the script; **you** resolve the conflict |
@@ -124,7 +125,7 @@ Conflicts are resolved by merging the base branch *into* the PR's branch and pus
 
 ## What an issue needs
 
-See [`templates/issue-contract.md`](templates/issue-contract.md). Short version: an epic with **sub-issues** (not just mentions), dependencies as **`blocked_by`** (not just words), and a body with `file:line` evidence, a `## Done when` with owners, an `## ADR stub`, an `## Out of scope`, and a `## Handoff` block carrying the branch name and a CodeGraph query. `wave lint <issues>` tells you what is missing; a body without a handoff still runs (branch and query are derived from the title).
+See [`templates/issue-contract.md`](templates/issue-contract.md) — the index — and the **template for the issue's type**, read before writing the body, not paraphrased from memory: [`bug`](templates/issue/bug.md) must carry a `## Reprodução` with steps and the observed output; every [`story`](templates/issue/story.md) `## Done when` item is observable (a test that passes, a command that prints X) and names its owner; a [`chore`](templates/issue/chore.md) says why it is not a story; a [`feature`](templates/issue/feature.md) names the stories that slice it in `## Fatia`. Short version: an epic with **sub-issues** (not just mentions), dependencies as **`blocked_by`** (not just words), and a body with `file:line` evidence, a `## Done when` with owners, an `## ADR stub`, an `## Out of scope`, and a `## Handoff` block carrying the branch name and a CodeGraph query. `wave lint <issues>` resolves the type from the label, prints which template it is charging and each missing section by name; with no type label it charges the common contract and warns. A body without a handoff still runs (branch and query are derived from the title).
 
 Agents read the issue **and its comments**: when a PR changes a symbol another open issue cites, the agent leaves a one-line comment there, and `verify` names the issues it should have told. That is how "what the next wave inherits" becomes data instead of someone's memory.
 
@@ -133,6 +134,25 @@ Every PR body carries a **Done-when ledger**: a `## Done when` section (that exa
 ## Mistake-proofing
 
 The tool prefers making a wrong action impossible over warning about it: no `--yes`, no merge; plan SHAs moved, no merge; issue still blocked, no merge; `doctor` ✗, no dispatch; issue not READY, no dispatch; a directory already applied, no second `plan`. What cannot be made impossible is made loud: `verify` names AI attribution, protected paths touched, red CI, unclean worktrees, and contradictions. `why` prints the premises behind every READY so a "why not?" is answered with evidence, not memory. Every state is one of a fixed, exclusive set, and the code asserts it.
+
+## Guard hooks
+
+The prompt tells an agent what never to do; a hook is what still holds when the prompt is ignored. `hooks/guards.py` carries four `PreToolUse` guards that refuse the tool call with a message naming the safe alternative — and every one of them fails open: a guard that crashes, or cannot read its event, exits 0, because a broken guard must never wedge the loop it guards. `wave verify` stays the deep check on the finished PR; the guards stand between the command and the tool.
+
+```bash
+wave hooks install            # write the four guards into <repo>/.claude/settings.json — backs the file up, idempotent
+wave hooks install --dry-run  # print the diff, write nothing
+wave hooks status             # active | missing | broken, per guard; also one line in `wave doctor`
+```
+
+| guard | denies |
+| --- | --- |
+| `attribution` (Bash) | a commit or PR-body command carrying `Co-Authored-By: Claude`, "Generated with Claude Code" or `noreply@anthropic.com` — including inside a `--body-file`/`-F` file |
+| `forbidden-git` (Bash) | `git gc --prune`, `git reflog expire`, `git stash`, `git reset --hard`, `git clean -f`, `git push --force`, `git branch -D`, `rm -rf`; each refusal names the way back |
+| `secret-read` (Bash) | printing the contents of a secret: the registry's `repos.json` (it carries account tokens), `.env`, `credentials`, `auth.json`; `ls -la`, `stat` and `grep -c` stay open |
+| `dispatch-contract` (Task) | an agent dispatch whose prompt lacks the contract sections (where, task, gate, delivery, `Done when`); a `fork` is exempt — it inherits the conversation |
+
+The guards are only as good as the tests that fail without them: `tests/test_hooks.py` feeds each one the stdin JSON Claude Code pipes to a hook and pins the exit codes, crash included. A denylist, not a sandbox: a guard reads the command text, so an interpreter (`python3 -c`, `node -e`) or a recursive grep already inside a secret directory is not seen — secrets stay out of the project; the guard is the backstop, not the fix.
 
 ## What has been measured
 
@@ -237,6 +257,7 @@ skills/wave/SKILL.md            the orchestrator procedure Claude follows
 scripts/wave.py                 the deterministic steps (stdlib only)
 scripts/e2e.py                  one end-to-end run against a sandbox repository
 scripts/fake_agent.py           the agent the e2e run plays: change, commit, push, PR; keeps both sides of a conflict
+hooks/guards.py                 the PreToolUse guard hooks: attribution, forbidden git, secret reads, dispatch contract (fail open)
 templates/agent.md              the per-issue prompt handed to each agent
 templates/issue-contract.md     what an issue must carry
 tests/                          the suite: a fake gh, recorded fixtures, a temporary git repo

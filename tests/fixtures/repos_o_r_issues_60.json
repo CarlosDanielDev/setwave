@@ -1,0 +1,14 @@
+{
+  "id": 9060,
+  "number": 60,
+  "title": "bug 60: cmd_lint crashes on an empty body",
+  "state": "open",
+  "body": "Parent: #1\n\nThe crash is in `scripts/wave.py`, in `cmd_lint`.\n\n## Done when\n\n- [ ] the empty input is rejected (`python3 -m unittest discover -s tests`) — owner: implementer\n\n## Handoff\n\n```bash\ngit worktree add -b fix/60-empty ../r-60 origin/main\n```\n",
+  "labels": [
+    {
+      "name": "bug"
+    }
+  ],
+  "html_url": "https://github.com/o/r/issues/60",
+  "repository_url": "https://github.com/o/r"
+}

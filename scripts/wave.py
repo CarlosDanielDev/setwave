@@ -26,9 +26,11 @@ current directory. Stdlib only. Needs `gh` (logged in), `git` >= 2.38, optional 
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -455,6 +457,56 @@ WHY = re.compile(r"\s+—\s+(?:dropped|not done):.*$")
 
 def norm(text: str) -> str:
     return " ".join(text.split())
+
+
+# ---------------------------------------------------------------- typed issue templates
+
+ISSUE_TYPES = ("bug", "story", "chore", "feature")  # labels; each type's template: templates/issue/<type>.md
+
+
+def issue_type(iss: dict) -> str | None:
+    """The issue's type, from its labels (`bug` -> templates/issue/bug.md); None when no type label is set."""
+    names = {l["name"] for l in iss.get("labels", [])}
+    return next((t for t in ISSUE_TYPES if t in names), None)
+
+
+def section(body: str, name: str) -> str | None:
+    """The text of the `## name` section, up to the next heading; None when the heading is not there."""
+    lines = body.splitlines()
+    start = next((i for i, l in enumerate(lines) if l.rstrip() == name), None)
+    if start is None:
+        return None
+    end = next((i for i in range(start + 1, len(lines)) if HEADING.match(lines[i])), len(lines))
+    return "\n".join(lines[start + 1:end]).strip()
+
+
+def lint_type(body: str, typ: str) -> list[str]:
+    """What the type's template demands beyond the common contract, each miss named by its section."""
+    if typ == "bug":
+        rep = section(body, "## Reprodução")
+        if rep is None:
+            return ["missing `## Reprodução`: the steps to reproduce and the observed output"]
+        if not (re.search(r"^\s*(?:[-*]|\d+[.)]) ", rep, re.M) or "```" in rep):
+            return ["`## Reprodução` has no steps: list them in order, or paste the session"]
+    elif typ == "story":
+        out = []
+        for i, item in enumerate(done_when(body) or [], 1):
+            short = item["key"][:40] + ("…" if len(item["key"]) > 40 else "")
+            if not re.search(r"—\s*owner:", item["text"]):
+                out.append(f"Done when item {i} ({short}) has no `— owner:`")
+            if "`" not in item["text"]:
+                out.append(f"Done when item {i} ({short}) is not observable: name the test or the command that proves it")
+        return out
+    elif typ == "chore":
+        if not section(body, "## Por que não é story"):
+            return ["missing `## Por que não é story`: one line on why this is a chore and not a story"]
+    elif typ == "feature":
+        fatia = section(body, "## Fatia")
+        if fatia is None:
+            return ["missing `## Fatia`: the stories that slice this feature, one per line"]
+        if not re.search(r"^[-*] ", fatia, re.M):
+            return ["`## Fatia` names no stories: one bullet each, they become the sub-issues"]
+    return []
 
 
 def done_when(body: str) -> list[dict] | None:
@@ -1011,6 +1063,98 @@ def verify_one(repo: Repo, pr: dict, epic_nodes: dict | None = None) -> dict:
             "ledger_issue": own, "ok": ok}
 
 
+VERDICTS = ("pass", "fail", "concerns")
+
+
+def verdict_problems(v) -> list[str]:
+    """What disqualifies `v` as a judge verdict: the enum, a full 40-hex sha, findings that cite file and a 1-based
+    line; fail and concerns must name at least one finding. Extra keys are tolerated."""
+    if not isinstance(v, dict):
+        return ["the verdict is not a JSON object"]
+    bad = []
+    if v.get("verdict") not in VERDICTS:
+        bad.append(f"verdict must be one of {'|'.join(VERDICTS)}")
+    if not isinstance(v.get("head_sha"), str) or not re.fullmatch(r"[0-9a-f]{40}", v["head_sha"]):
+        bad.append("head_sha must be the full 40-hex sha the patch was judged at")
+    fs = v.get("findings")
+    if not isinstance(fs, list):
+        bad.append("findings must be a list")
+    else:
+        for i, f in enumerate(fs):
+            if not isinstance(f, dict) or not isinstance(f.get("file"), str) or not f["file"]:
+                bad.append(f"findings[{i}].file must be a path")
+            elif not isinstance(f.get("line"), int) or isinstance(f.get("line"), bool) or f["line"] < 1:
+                bad.append(f"findings[{i}].line must be a 1-based line")
+            elif not isinstance(f.get("note"), str) or not f["note"]:
+                bad.append(f"findings[{i}].note must say what is wrong")
+        if v.get("verdict") in ("fail", "concerns") and not fs:
+            bad.append(f"a {v.get('verdict')} names at least one finding")
+    return bad
+
+
+def judge_check(repo: Repo, n: int, head_sha: str) -> dict:
+    """The judge's verdict for PR `n`, re-validated by the kernel: `flag` is None only when a schema-valid verdict
+    says `pass` at exactly `head_sha`; anything else is one of the three JUDGE refusals (merge never trusts the
+    file, the plan, or this command's earlier answer — the sha is re-checked where the merge happens)."""
+    path = repo.handoffs / f"judge-{n}.json"
+    if not path.exists():
+        return {"flag": "JUDGE-MISSING", "detail": f"no verdict at {path}: `wave judge` writes the patch, a read-only agent writes the verdict"}
+    try:
+        v = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        return {"flag": "JUDGE-MISSING", "detail": f"{path.name} is not a readable verdict ({e})"}
+    bad = verdict_problems(v)
+    if bad:
+        return {"flag": "JUDGE-MISSING", "detail": f"{path.name}: " + "; ".join(bad)}
+    if v["verdict"] != "pass":
+        where = "; ".join(f"{f['file']}:{f['line']} {f['note']}" for f in v["findings"][:3])
+        return {"flag": "JUDGE-FAIL", "detail": f"verdict {v['verdict']}: {where}",
+                "verdict": v["verdict"], "head_sha": v["head_sha"], "findings": v["findings"]}
+    if v["head_sha"] != head_sha:
+        return {"flag": "JUDGE-STALE", "detail": f"the verdict is for {v['head_sha'][:7]}, the head is {head_sha[:7]}: a push invalidates it, judge again",
+                "verdict": "pass", "head_sha": v["head_sha"], "findings": []}
+    return {"flag": None, "detail": f"pass at {head_sha[:7]}", "verdict": "pass", "head_sha": head_sha, "findings": []}
+
+
+def cmd_judge(default: Repo | None, a):
+    """The producer never judges its own PR: write the scoped diff into the handoffs dir, have a read-only agent
+    (templates/judge.md is its prompt) judge it, and validate the verdict it writes. Exit 0 only when every PR
+    named has a fresh pass verdict; `merge` re-checks the sha at merge time whatever this said."""
+    bad = 0
+    for ref in a.prs:
+        repo, n = parse_ref(ref, default)
+        pr = next((x for x in repo.open_prs() if x["number"] == n), None)
+        if not pr:
+            print(f"{key(repo, n)}: no open PR with that number")
+            bad += 1
+            continue
+        repo.fetch()
+        head = f"origin/{pr['headRefName']}"
+        sha = repo.git(["rev-parse", head]).strip()
+        files = repo.git(["diff", "--name-only", f"origin/{repo.base}...{head}"]).split()
+        repo.handoffs.mkdir(parents=True, exist_ok=True)
+        patch = repo.handoffs / f"judge-{n}.patch"
+        patch.write_text(repo.git(["diff", f"origin/{repo.base}...{head}"]))  # base...head is by construction the diff of the files the PR touches
+        n_issue = next((int(num) for _, num in CLOSES.findall(pr.get("body") or "")), None)
+        print(f"{key(repo, n)}: patch {patch} ({len(files)} file(s): {', '.join(files) or 'none'})"
+              + (f"; its issue is #{n_issue}" if n_issue else "; its PR body names no issue"))
+        jc = judge_check(repo, n, sha)
+        if jc["flag"] is None:
+            print(f"  verdict pass at {sha[:7]} — fresh; `merge` re-checks the sha before merging")
+        elif jc["flag"] == "JUDGE-FAIL":
+            print(f"  {jc['flag']}[{jc['detail']}]")
+        else:
+            print(f"  no valid verdict yet — spawn ONE read-only agent (Read/Grep/Glob only; it edits nothing, writes only the verdict;"
+                  f" {TEMPLATES / 'judge.md'} is its prompt) with the patch above, head sha {sha}, and the issue body")
+            print(f'  it writes {repo.handoffs / f"judge-{n}.json"}:' +
+                  ' {"verdict": "pass|fail|concerns", "head_sha": "<the 40-hex sha above>", "findings": [{"file": "<path>", "line": <N>, "note": "<what is wrong>"}]}')
+            print(f"  then re-run this command; `merge` refuses a PR without a pass verdict at the head it merges"
+                  f" (JUDGE-MISSING / JUDGE-FAIL / JUDGE-STALE)")
+        if jc["flag"]:
+            bad += 1
+    sys.exit(1 if bad else 0)
+
+
 def cmd_verify(default: Repo | None, a):
     nodes = None
     if a.epic:
@@ -1091,10 +1235,12 @@ def cmd_order(default: Repo | None, a):
             else:
                 chain.append((n, sorted(set(re.findall(r"Merge conflict in (.+)", out + err))) or ["<conflict>"]))
                 trees.append(None)
+        head_shas = {n: repo.git(["rev-parse", heads[n]]).strip() for n in nums}
         result[slug] = {"order": order, "pairs": {f"{x}x{y}": v for (x, y), v in pairs.items()}, "against_base": against_base,
                         "serial": serial_prs, "chain": chain,
                         "base_sha": base_sha,
-                        "heads": {n: repo.git(["rev-parse", heads[n]]).strip() for n in nums}}
+                        "heads": head_shas,
+                        "judges": {n: judge_check(repo, n, sha) for n, sha in head_shas.items()}}
         if a.run_gate:
             result[slug]["chain_gate"] = gate_chain(repo, base_sha, order, trees, sys.stderr if a.json else sys.stdout)
         if not a.json:
@@ -1110,6 +1256,10 @@ def cmd_order(default: Repo | None, a):
                 print(f"  SERIAL (touch {', '.join(serial_paths)}): {' '.join(f'#{n}' for n in serial_prs)} — one after the other, in their issues' blocked_by order, never in one batch")
             print("  order: " + " -> ".join(f"{slug}#{n}" for n in order))
             print("  chain: " + "  ".join(f"#{n}✓" if not c else f"#{n}✗[{','.join(c)}]" for n, c in chain) + "   (✗ = merge the base into that branch right before merging it)")
+            unjudged = {n: j for n, j in result[slug]["judges"].items() if j["flag"]}
+            if unjudged:
+                print("  judge: " + " ".join(f"#{n} {j['flag']}" for n, j in unjudged.items())
+                      + f"  — `wave judge {slug}#<PR>` and let the read-only agent write the verdict; `merge` refuses without a pass at the head")
             cg = result[slug].get("chain_gate")
             if cg:
                 skipped = sorted({st["skipped"] for st in cg["steps"] if st.get("skipped")})
@@ -1290,6 +1440,10 @@ def cmd_merge(default: Repo | None, a):
                 head_now = repo.git(["rev-parse", f"origin/{pr['headRefName']}"]).strip()
                 if head_now != pl["heads"][str(n)]:
                     raise SystemExit(f"{slug}#{n}: its branch moved since the plan ({pl['heads'][str(n)][:7]} -> {head_now[:7]}). Re-run `order --plan` and ask again.")
+                if not a.force:
+                    jc = judge_check(repo, n, head_now)
+                    if jc["flag"]:
+                        raise SystemExit(f"{slug}#{n}: {jc['flag']}[{jc['detail']}] — the OK was for a judged delta: `wave judge` and ask again, or --force and say why in the PR.")
                 planned.append((repo, n))
         targets = planned or targets
     if not a.force:
@@ -1326,6 +1480,13 @@ def cmd_merge(default: Repo | None, a):
         if m != "MERGEABLE":
             print(f"{key(repo, n)}: {m}." + (f" `wave resolve` on PR {key(repo, n)} merges {repo.base} into its branch in its worktree, gates and pushes (never --force); then rerun merge from here." if m == "CONFLICTING" else ""))
             sys.exit(2)
+        # judged here too, where it cannot be skipped: the plan's verdict may predate a push, a direct merge never had one,
+        # and a PR that still has to be resolved first would only be re-judged after resolve moved its head
+        if not a.force:
+            jc = judge_check(repo, n, repo.git(["rev-parse", f"origin/{pr['headRefName']}"]).strip())
+            if jc["flag"]:
+                print(f"{key(repo, n)}: {jc['flag']}[{jc['detail']}]. Not merging — `wave judge {key(repo, n)}` and let the read-only agent write the verdict.")
+                sys.exit(2)
 
         def ci():
             states = {v.lower() for v in repo.pr_checks(n).values()}
@@ -1678,33 +1839,45 @@ def cmd_status(default: Repo | None, a):
         print("\n(posted on the epic)")
 
 
+def lint_body(body: str, n: int, typ: str | None, *, depends_wired: bool = True, sub_issues: int = 0) -> list[str]:
+    """Everything `wave lint` charges one body with: the common contract, plus the type's template when labeled.
+    `depends_wired` mirrors the issue's blocked_by and `sub_issues` its count; both come from GitHub."""
+    missing = [s for s in ("## Done when", "## Handoff") if s not in body]
+    if not BRANCH_IN_BODY.search(body):
+        missing.append("branch line `git worktree add -b <branch>` (will be derived from the title)")
+    if not re.search(r"^Parent:\s*\S*#\d+", body, re.M):
+        missing.append("`Parent: #N` first line")
+    if "Depends on" in body and not depends_wired:
+        missing.append("CONTRADICTION: body says 'Depends on' but no blocked_by is wired in GitHub")
+    mb = BRANCH_IN_BODY.search(body)
+    if mb and f"/{n}-" not in mb.group(1):
+        missing.append(f"CONTRADICTION: handoff branch `{mb.group(1)}` does not carry #{n}")
+    closes = [int(num) for _, num in CLOSES.findall(body)]
+    if closes and n not in closes:
+        missing.append(f"CONTRADICTION: body closes {closes} but this is #{n}")
+    if sub_issues and "## Handoff" in body:
+        missing.append("a parent with a Handoff block: parents are never dispatched; move the handoff to the leaves")
+    has_line = re.search(r"\b[\w./-]+\.(rs|ts|tsx|js|py|go|swift|kt|rb|php|cs|java|yml|yaml|toml|json):\d+", body)
+    has_symbol = re.search(r"`[\w./-]+\.(rs|ts|tsx|js|py|go|swift|kt|rb|php|cs|java)`[^\n]{0,80}`[A-Za-z_][\w.]*`", body)
+    if not (has_line or has_symbol):
+        missing.append("no evidence: neither `file:line` nor `file` + `symbol`")
+    return missing + (lint_type(body, typ) if typ else [])
+
+
 def cmd_lint(default: Repo | None, a):
     problems = 0
     for ref in a.issues:
         repo, n = parse_ref(ref, default)
         iss = repo.issue(n)
         body = iss.get("body") or ""
-        missing = [s for s in ("## Done when", "## Handoff") if s not in body]
-        if not BRANCH_IN_BODY.search(body):
-            missing.append("branch line `git worktree add -b <branch>` (will be derived from the title)")
-        if not re.search(r"^Parent:\s*\S*#\d+", body, re.M):
-            missing.append("`Parent: #N` first line")
-        if "Depends on" in body and not repo.blocked_by(n):
-            missing.append("CONTRADICTION: body says 'Depends on' but no blocked_by is wired in GitHub")
-        mb = BRANCH_IN_BODY.search(body)
-        if mb and f"/{n}-" not in mb.group(1):
-            missing.append(f"CONTRADICTION: handoff branch `{mb.group(1)}` does not carry #{n}")
-        closes = [int(num) for _, num in CLOSES.findall(body)]
-        if closes and n not in closes:
-            missing.append(f"CONTRADICTION: body closes {closes} but this is #{n}")
-        if repo.sub_issues(n) and "## Handoff" in body and n != getattr(a, "epic", 0):
-            missing.append("a parent with a Handoff block: parents are never dispatched; move the handoff to the leaves")
-        has_line = re.search(r"\b[\w./-]+\.(rs|ts|tsx|js|py|go|swift|kt|rb|php|cs|java|yml|yaml|toml|json):\d+", body)
-        has_symbol = re.search(r"`[\w./-]+\.(rs|ts|tsx|js|py|go|swift|kt|rb|php|cs|java)`[^\n]{0,80}`[A-Za-z_][\w.]*`", body)
-        if not (has_line or has_symbol):
-            missing.append("no evidence: neither `file:line` nor `file` + `symbol`")
+        typ = issue_type(iss)
+        missing = lint_body(body, n, typ,
+                            depends_wired=bool(repo.blocked_by(n)) if "Depends on" in body else True,
+                            sub_issues=len(repo.sub_issues(n)) if "## Handoff" in body else 0)
         problems += bool(missing)
-        print(f"{key(repo, n)}: " + ("ok" if not missing else "; ".join(missing)))
+        where = f"[{typ}] templates/issue/{typ}.md" if typ else "[no type] the common contract"
+        note = "" if typ else " (no type label — bug, story, chore, feature — its template was not charged)"
+        print(f"{key(repo, n)}: {where} — " + ("ok" if not missing else "; ".join(missing)) + note)
     sys.exit(1 if problems else 0)
 
 
@@ -1769,6 +1942,18 @@ def cmd_doctor(default: Repo | None, a) -> None:
         for action in r.ci_gate()[1]:
             checks.append((f"CI runs `{action}` and the gate does not", False, "if it is a gate step, declare its command in `.wave.json`; then add it to `ignore_actions`", False))
         checks.append(("protected paths declared", bool(r.protected), ", ".join(r.protected) or "none: verify cannot guard anything — `repos add . --protected <paths>`", False))
+        hdata, hwhy = load_settings(r.root / ".claude" / "settings.json")
+        hhave = installed_guards(hdata) if hdata is not None else set()
+        hbroken = sorted(n for n in hhave if ping_guard(guard_command(n)))
+        hmissing = sorted(n for n, _, _ in GUARD_HOOKS if n not in hhave)
+        hsum = f"{len(hhave)}/{len(GUARD_HOOKS)} active"
+        if hwhy:
+            hsum += f", settings.json {hwhy}"
+        if hmissing:
+            hsum += f", missing: {', '.join(hmissing)} — `wave hooks install`"
+        if hbroken:
+            hsum += f", broken: {', '.join(hbroken)}"
+        checks.append(("guard hooks installed", not (hwhy or hmissing or hbroken), hsum, False))
         merged = {l.strip().replace("origin/", "") for l in r.git(["branch", "-r", "--merged", f"origin/{r.base}"]).splitlines()}
         alive, dead, stale, exhausted = [], [], [], []
         for wt, branch, n in issue_worktrees(r):
@@ -1836,6 +2021,102 @@ def cmd_doctor(default: Repo | None, a) -> None:
         sys.exit(1)
 
 
+# ---------------------------------------------------------------- guard hooks
+
+HOOKS_SCRIPT = HERE.parent / "hooks" / "guards.py"
+GUARD_HOOKS = [
+    # (name, PreToolUse matcher, what it denies) — the prose of templates/agent.md, made environmental
+    ("attribution", "Bash", "an AI attribution line in a commit or PR-body command"),
+    ("forbidden-git", "Bash", "a destructive git command (gc --prune, reflog expire, stash, reset --hard, clean -f, push --force, branch -D, rm -rf)"),
+    ("secret-read", "Bash", "printing the contents of a secret file (the registry's repos.json, .env, credentials, auth.json)"),
+    ("dispatch-contract", "Task", "an Agent dispatch whose prompt lacks the contract sections (where, task, gate, delivery, Done when)"),
+]
+
+
+def guard_command(name: str) -> str:
+    return f"python3 {HOOKS_SCRIPT} {name}"
+
+
+def load_settings(path: Path) -> tuple[dict | None, str | None]:
+    """(settings, why not): {} when the file does not exist yet, None when it cannot be used as a base."""
+    try:
+        raw = path.read_text()
+    except FileNotFoundError:
+        return {}, None
+    except OSError as e:
+        return None, f"cannot be read ({e})"
+    try:
+        data = json.loads(raw)
+    except ValueError as e:
+        return None, f"does not parse ({e})"
+    return (data, None) if isinstance(data, dict) else (None, "is not a JSON object")
+
+
+def installed_guards(data: dict) -> set[str]:
+    """Names of the plugin's guards already present in the settings, whatever else lives in there."""
+    blocks = data.get("hooks") or {}
+    if not isinstance(blocks, dict):
+        return set()
+    commands = set()
+    for b in blocks.get("PreToolUse") or []:
+        if isinstance(b, dict):
+            commands.update(h.get("command") for h in b.get("hooks") or [] if isinstance(h, dict))
+    return {name for name, _, _ in GUARD_HOOKS if guard_command(name) in commands}
+
+
+def ping_guard(command: str) -> str | None:
+    """None when the hook answers for itself, else why it is broken (a guard that cannot run fails open, so ask it)."""
+    ok, out = sh_ok([*shlex.split(command), "--ping"])
+    return None if ok else out.strip()[:200] or "exited nonzero with no output"
+
+
+def cmd_hooks(default: Repo | None, a) -> None:
+    """Register the guards in the project's .claude/settings.json: idempotent, backed up, --dry-run to look first."""
+    if default is None:
+        raise SystemExit("run inside a repo checkout, or pass --repo")
+    path = default.root / ".claude" / "settings.json"
+    data, why = load_settings(path)
+    if a.action == "status":
+        print(f"guard hooks of {default.slug} — {path}" + (f" ({why})" if why else ""))
+        have = installed_guards(data) if data is not None else set()
+        for name, matcher, what in GUARD_HOOKS:
+            if name not in have:
+                print(f"  {name:<18} missing  ({what}) — `wave hooks install`")
+                continue
+            broken = ping_guard(guard_command(name))
+            print(f"  {name:<18} {'active' if not broken else f'broken   ping failed: {broken} — check the plugin checkout'}")
+        return
+    if data is None:
+        raise SystemExit(f"hooks refused: {path} {why} — fix it by hand; install never overwrites a file it cannot read")
+    if not isinstance(data.get("hooks", {}), dict) or not isinstance(data.get("hooks", {}).get("PreToolUse", []), list):
+        raise SystemExit(f"hooks refused: {path} has a `hooks` value install cannot extend safely — fix it by hand")
+    have = installed_guards(data)
+    todo = [(name, matcher) for name, matcher, _ in GUARD_HOOKS if name not in have]
+    if not todo:
+        print(f"already installed: {len(GUARD_HOOKS)}/{len(GUARD_HOOKS)} guard hooks present in {path}")
+        return
+    for name, matcher in todo:
+        data.setdefault("hooks", {}).setdefault("PreToolUse", []).append(
+            {"matcher": matcher, "hooks": [{"type": "command", "command": guard_command(name)}]})
+    new_text = json.dumps(data, indent=2) + "\n"
+    if a.dry_run:
+        print("".join(difflib.unified_diff(path.read_text().splitlines(True) if path.exists() else [],
+                                           new_text.splitlines(True), fromfile=str(path), tofile=f"{path} (hooks install)")))
+        print(f"{len(todo)} hook(s) would be added: {', '.join(name for name, _ in todo)} — nothing written (--dry-run)")
+        return
+    backup = None
+    if path.exists():
+        backup = path.with_name(f"{path.name}.bak-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}")
+        while backup.exists():
+            backup = path.with_name(f"{backup.name}-1")
+        shutil.copy2(path, backup)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(new_text)
+    for name, matcher in todo:
+        print(f"installed {name} (PreToolUse[{matcher}])")
+    print(f"wrote {path}" + (f", backup: {backup}" if backup else ""))
+
+
 # ---------------------------------------------------------------- guarantees
 
 GUARANTEES = [
@@ -1868,6 +2149,9 @@ GUARANTEES = [
     ("verify refuses a PR whose own issue is closed only by a commit message", "verify_one (+ cmd_merge)", "NO-CLOSES-IN-BODY[#N ...]", True),
     ("verify refuses a PR without a `## Done when` ledger, or whose items differ from its issue's", "verify_one -> ledger_check (+ cmd_merge)", "LEDGER-MISSING[...] / LEDGER-MISMATCH[...] / ISSUE-NO-DONE-WHEN[...]", True),
     ("merge applies the PR's ledger to its issue after the merge, in one comment, and reopens it while an item is open", "cmd_merge -> apply_ledger -> tick_issue", "ledger applied from PR #N: X done, Y dropped, Z remain", True),
+    ("no merge of a PR the judge never judged: the producer is never the judge of its own PR", "cmd_merge -> judge_check (cmd_judge writes the patch)", "JUDGE-MISSING[no verdict at <handoffs>/judge-<PR>.json]", True),
+    ("no merge of a PR the judge failed or held concerns on", "cmd_merge -> judge_check", "JUDGE-FAIL[verdict fail: <file:line, ...>]", True),
+    ("no merge on a verdict whose head_sha is not the head being merged: any push invalidates the judgement", "cmd_merge -> judge_check", "JUDGE-STALE[the verdict is for abc1234, the head is def5678]", True),
     ("tick changes only the open lines it names, every other byte kept; a body without `## Done when` is refused", "tick_body (cmd_tick, apply_ledger)", "exit 2: tick refused: ...", True),
     ("verify names sibling issues that cite files the PR touched", "verify_one --epic", "notify lines", False),
     ("order predicts pairwise and chained textual conflicts", "cmd_order", "pairs + chain ✗", True),
@@ -1879,7 +2163,8 @@ GUARANTEES = [
     ("resolve leaves a conflict for a human, naming files and line ranges", "cmd_resolve -> conflict_hunks", "exit 2: f.txt: lines 1-5", True),
     ("resolve --continue refuses leftover conflict markers, even once staged", "cmd_resolve --continue", "conflict markers remain", True),
     ("resolve pushes only a gated commit, with a plain push", "cmd_resolve -> run_gate", "exit 3 and nothing pushed on a red gate", True),
-    ("lint flags text/data contradictions", "cmd_lint", "CONTRADICTION: ...", True),
+    ("lint flags text/data contradictions", "cmd_lint -> lint_body", "CONTRADICTION: ...", True),
+    ("lint charges the issue's type template by label, names it and each missing section; no type label warns and charges the common contract", "cmd_lint -> lint_body + lint_type", "[bug] templates/issue/bug.md — missing `## Reprodução`: ...; [no type] the common contract — ok (no type label — ...)", True),
     ("sweep re-verifies claimed done and closed leaves against merged PRs; --fix reverts the lie with a comment and the leaf returns to next", "cmd_sweep -> sweep_epic, apply_sweep", "false-done | false-closed | ledger-not-applied", True),
     ("three resumes without a new commit exhaust an agent: dispatch refuses the next one, sweep --fix comments the escalation on the issue and the epic, nothing closes", "cmd_dispatch + sweep_retries", "agent-exhausted: 3 resumes without a new commit", True),
     ("an exhausted worktree is its own exclusive state, never ready", "candidates -> liveness", "agent-exhausted: N resumes without a new commit — dispatch refuses", True),
@@ -1891,6 +2176,11 @@ GUARANTEES = [
     ("the script never force-pushes, resets, stashes, or deletes", "by absence", "grep the source for 'force', 'reset --hard', 'stash', 'rm -rf': zero hits", True),
     ("the e2e run writes only to a sandbox: never the plugin's own repo, a name without -sandbox only with --any-repo", "scripts/e2e.py check_target", "e2e refused: ...", True),
     ("the e2e fake agent pushes only its issue's own branch, never the base", "scripts/fake_agent.py check_branch", "<branch> is not the branch of #N", True),
+    # the guard hooks (hooks/guards.py): the prose rules of templates/agent.md, enforced by the environment. All fail open.
+    ("no AI attribution in a commit or PR-body command (fail open: a broken guard exits 0)", "hooks/guards.py attribution <- settings PreToolUse[Bash]", "exit 2: attribution-guard: this command carries AI attribution (...) — drop the trailer", True),
+    ("no forbidden git command through Bash — gc --prune, reflog expire, stash, reset --hard, clean -f, push --force, branch -D, rm -rf — each refusal naming the safe alternative (fail open: a broken guard exits 0)", "hooks/guards.py forbidden-git <- settings PreToolUse[Bash]", "exit 2: forbidden-git-guard: `git stash` is refused: commit the work to a branch instead", True),
+    ("no secret file's contents are printed — the registry's repos.json, .env, credentials, auth.json; ls, stat and grep -c stay open (fail open: a broken guard exits 0)", "hooks/guards.py secret-read <- settings PreToolUse[Bash]", "exit 2: secret-read-guard: use `ls -la`, `stat` or `grep -c` instead", True),
+    ("no Agent dispatch whose prompt lacks the contract sections — where, task, gate, delivery, Done when; a fork is exempt (fail open: a broken guard exits 0)", "hooks/guards.py dispatch-contract <- settings PreToolUse[Task]", "exit 2: dispatch-contract-guard: it lacks the dispatch contract: the gate to run, ...", True),
 ]
 
 
@@ -2003,6 +2293,7 @@ def main(argv=None):
     x = s.add_parser("agents", help="every issue worktree: age since dispatch, minutes since the newest change, PR, verdict (working | quiet | likely dead | done)")
     x = s.add_parser("prompt", help="print the agent prompt for one issue"); x.add_argument("issue"); x.add_argument("--parallel", type=int, default=4)
     x = s.add_parser("verify", help="check PRs: attribution, protected paths, CI, mergeability, worktree"); x.add_argument("prs", nargs="*"); x.add_argument("--epic"); x.add_argument("--json", action="store_true")
+    x = s.add_parser("judge", help="write a PR's scoped patch for a read-only judge agent, validate the verdict it writes (merge refuses without a pass at the head)"); x.add_argument("prs", nargs="+")
     x = s.add_parser("order", help="pairwise merge-tree -> merge order, per repo"); x.add_argument("prs", nargs="*"); x.add_argument("--epic"); x.add_argument("--json", action="store_true"); x.add_argument("--plan", help="write the approved delta (base sha + PR heads + order) to this file"); x.add_argument("--run-gate", action="store_true", help="run the repo's gate on the tree after each step of the chain, in a throwaway worktree: names the PR that turns it red")
     x = s.add_parser("merge", help="merge PRs in order, one at a time, CI green before each"); x.add_argument("prs", nargs="*"); x.add_argument("--yes", action="store_true"); x.add_argument("--plan", help="plan file from `order --plan`: refuses if the base or any PR head moved since"); x.add_argument("--force", action="store_true"); x.add_argument("--squash", action="store_true"); x.add_argument("--ci-timeout", type=int, default=1200); x.add_argument("--wait-base-ci", action="store_true")
     x = s.add_parser("resolve", help="merge the base into a conflicting PR's branch in its worktree, gate, push (never --force), comment; a conflict is left for you, then --continue"); x.add_argument("pr"); x.add_argument("--continue", dest="cont", action="store_true")
@@ -2014,6 +2305,8 @@ def main(argv=None):
     x = s.add_parser("tick", help="tick (--done) or strike (--strike + --why) items of an issue's `## Done when`, by index or text; what merge does with a PR's ledger"); x.add_argument("issue"); x.add_argument("--done", action="append", metavar="ITEM"); x.add_argument("--strike", action="append", metavar="ITEM"); x.add_argument("--why", action="append", metavar="REASON", help="one per --strike, in the same order"); x.add_argument("--dry-run", action="store_true", help="print the lines that would change, write nothing")
     x = s.add_parser("plan", help="create an epic's issues from <dir>/index.tsv + deps.tsv + <key>.md, wiring sub-issues and blocked_by"); x.add_argument("dir"); x.add_argument("--slug"); x.add_argument("--milestone"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--force", action="store_true")
 
+    x = s.add_parser("hooks", help="guard hooks: install [--dry-run] writes them into the project's .claude/settings.json (idempotent, backed up); status: active | missing | broken")
+    x.add_argument("action", choices=["install", "status"]); x.add_argument("--dry-run", action="store_true")
     x = s.add_parser("stats", help="what the log says: runs, durations, failures per command")
     x = s.add_parser("guarantees", help="every promise the plugin makes, where it is enforced, whether a test pins it"); x.add_argument("--json", action="store_true")
 
@@ -2028,9 +2321,9 @@ def main(argv=None):
     t0 = time.time(); exit_code = 0
     try:
         {"repos": cmd_repos, "facts": cmd_facts, "next": cmd_next, "dispatch": cmd_dispatch, "prompt": cmd_prompt,
-     "verify": cmd_verify, "order": cmd_order, "merge": cmd_merge, "resolve": cmd_resolve, "close-parents": cmd_close_parents,
+     "verify": cmd_verify, "judge": cmd_judge, "order": cmd_order, "merge": cmd_merge, "resolve": cmd_resolve, "close-parents": cmd_close_parents,
              "cleanup": cmd_cleanup, "status": cmd_status, "lint": cmd_lint, "plan": cmd_plan, "why": cmd_why, "doctor": cmd_doctor,
-             "agents": cmd_agents, "tick": cmd_tick, "sweep": cmd_sweep,
+             "agents": cmd_agents, "tick": cmd_tick, "sweep": cmd_sweep, "hooks": cmd_hooks,
          "guarantees": cmd_guarantees}[a.cmd](default, a)
     except SystemExit as e:
         exit_code = e.code if isinstance(e.code, int) else 1
