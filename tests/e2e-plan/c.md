@@ -1,6 +1,6 @@
 Parent: {{e}}
 
-Add `runs/{{run}}.txt`, a file no other leaf touches: it merges cleanly in any order.
+Add `runs/{{run}}.txt`, written by `scripts/fake_agent.py`'s `append` — a file no other leaf touches, so it merges cleanly in any order.
 
 ```fake-agent
 append runs/{{run}}.txt

@@ -1,0 +1,14 @@
+{
+  "id": 9064,
+  "number": 64,
+  "title": "feature 64: typed issue templates",
+  "state": "open",
+  "body": "Parent: #1\n\nThe change lives in `scripts/wave.py`, in `cmd_lint`.\n\n## Done when\n\n- [ ] the epic ships when every story closes — owner: implementer\n\n## Handoff\n\n```bash\ngit worktree add -b feat/64-feature ../r-64 origin/main\n```\n",
+  "labels": [
+    {
+      "name": "feature"
+    }
+  ],
+  "html_url": "https://github.com/o/r/issues/64",
+  "repository_url": "https://github.com/o/r"
+}

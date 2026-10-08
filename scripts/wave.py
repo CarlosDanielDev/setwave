@@ -454,6 +454,56 @@ def norm(text: str) -> str:
     return " ".join(text.split())
 
 
+# ---------------------------------------------------------------- typed issue templates
+
+ISSUE_TYPES = ("bug", "story", "chore", "feature")  # labels; each type's template: templates/issue/<type>.md
+
+
+def issue_type(iss: dict) -> str | None:
+    """The issue's type, from its labels (`bug` -> templates/issue/bug.md); None when no type label is set."""
+    names = {l["name"] for l in iss.get("labels", [])}
+    return next((t for t in ISSUE_TYPES if t in names), None)
+
+
+def section(body: str, name: str) -> str | None:
+    """The text of the `## name` section, up to the next heading; None when the heading is not there."""
+    lines = body.splitlines()
+    start = next((i for i, l in enumerate(lines) if l.rstrip() == name), None)
+    if start is None:
+        return None
+    end = next((i for i in range(start + 1, len(lines)) if HEADING.match(lines[i])), len(lines))
+    return "\n".join(lines[start + 1:end]).strip()
+
+
+def lint_type(body: str, typ: str) -> list[str]:
+    """What the type's template demands beyond the common contract, each miss named by its section."""
+    if typ == "bug":
+        rep = section(body, "## Reprodução")
+        if rep is None:
+            return ["missing `## Reprodução`: the steps to reproduce and the observed output"]
+        if not (re.search(r"^\s*(?:[-*]|\d+[.)]) ", rep, re.M) or "```" in rep):
+            return ["`## Reprodução` has no steps: list them in order, or paste the session"]
+    elif typ == "story":
+        out = []
+        for i, item in enumerate(done_when(body) or [], 1):
+            short = item["key"][:40] + ("…" if len(item["key"]) > 40 else "")
+            if not re.search(r"—\s*owner:", item["text"]):
+                out.append(f"Done when item {i} ({short}) has no `— owner:`")
+            if "`" not in item["text"]:
+                out.append(f"Done when item {i} ({short}) is not observable: name the test or the command that proves it")
+        return out
+    elif typ == "chore":
+        if not section(body, "## Por que não é story"):
+            return ["missing `## Por que não é story`: one line on why this is a chore and not a story"]
+    elif typ == "feature":
+        fatia = section(body, "## Fatia")
+        if fatia is None:
+            return ["missing `## Fatia`: the stories that slice this feature, one per line"]
+        if not re.search(r"^[-*] ", fatia, re.M):
+            return ["`## Fatia` names no stories: one bullet each, they become the sub-issues"]
+    return []
+
+
 def done_when(body: str) -> list[dict] | None:
     """The items of the first `## Done when` section (exactly that heading, at the start of a line), up to the next
     heading: each with its line index, raw text, state (done | dropped | open) and key (the item's own words,
@@ -1498,33 +1548,45 @@ def cmd_status(default: Repo | None, a):
         print("\n(posted on the epic)")
 
 
+def lint_body(body: str, n: int, typ: str | None, *, depends_wired: bool = True, sub_issues: int = 0) -> list[str]:
+    """Everything `wave lint` charges one body with: the common contract, plus the type's template when labeled.
+    `depends_wired` mirrors the issue's blocked_by and `sub_issues` its count; both come from GitHub."""
+    missing = [s for s in ("## Done when", "## Handoff") if s not in body]
+    if not BRANCH_IN_BODY.search(body):
+        missing.append("branch line `git worktree add -b <branch>` (will be derived from the title)")
+    if not re.search(r"^Parent:\s*\S*#\d+", body, re.M):
+        missing.append("`Parent: #N` first line")
+    if "Depends on" in body and not depends_wired:
+        missing.append("CONTRADICTION: body says 'Depends on' but no blocked_by is wired in GitHub")
+    mb = BRANCH_IN_BODY.search(body)
+    if mb and f"/{n}-" not in mb.group(1):
+        missing.append(f"CONTRADICTION: handoff branch `{mb.group(1)}` does not carry #{n}")
+    closes = [int(num) for _, num in CLOSES.findall(body)]
+    if closes and n not in closes:
+        missing.append(f"CONTRADICTION: body closes {closes} but this is #{n}")
+    if sub_issues and "## Handoff" in body:
+        missing.append("a parent with a Handoff block: parents are never dispatched; move the handoff to the leaves")
+    has_line = re.search(r"\b[\w./-]+\.(rs|ts|tsx|js|py|go|swift|kt|rb|php|cs|java|yml|yaml|toml|json):\d+", body)
+    has_symbol = re.search(r"`[\w./-]+\.(rs|ts|tsx|js|py|go|swift|kt|rb|php|cs|java)`[^\n]{0,80}`[A-Za-z_][\w.]*`", body)
+    if not (has_line or has_symbol):
+        missing.append("no evidence: neither `file:line` nor `file` + `symbol`")
+    return missing + (lint_type(body, typ) if typ else [])
+
+
 def cmd_lint(default: Repo | None, a):
     problems = 0
     for ref in a.issues:
         repo, n = parse_ref(ref, default)
         iss = repo.issue(n)
         body = iss.get("body") or ""
-        missing = [s for s in ("## Done when", "## Handoff") if s not in body]
-        if not BRANCH_IN_BODY.search(body):
-            missing.append("branch line `git worktree add -b <branch>` (will be derived from the title)")
-        if not re.search(r"^Parent:\s*\S*#\d+", body, re.M):
-            missing.append("`Parent: #N` first line")
-        if "Depends on" in body and not repo.blocked_by(n):
-            missing.append("CONTRADICTION: body says 'Depends on' but no blocked_by is wired in GitHub")
-        mb = BRANCH_IN_BODY.search(body)
-        if mb and f"/{n}-" not in mb.group(1):
-            missing.append(f"CONTRADICTION: handoff branch `{mb.group(1)}` does not carry #{n}")
-        closes = [int(num) for _, num in CLOSES.findall(body)]
-        if closes and n not in closes:
-            missing.append(f"CONTRADICTION: body closes {closes} but this is #{n}")
-        if repo.sub_issues(n) and "## Handoff" in body and n != getattr(a, "epic", 0):
-            missing.append("a parent with a Handoff block: parents are never dispatched; move the handoff to the leaves")
-        has_line = re.search(r"\b[\w./-]+\.(rs|ts|tsx|js|py|go|swift|kt|rb|php|cs|java|yml|yaml|toml|json):\d+", body)
-        has_symbol = re.search(r"`[\w./-]+\.(rs|ts|tsx|js|py|go|swift|kt|rb|php|cs|java)`[^\n]{0,80}`[A-Za-z_][\w.]*`", body)
-        if not (has_line or has_symbol):
-            missing.append("no evidence: neither `file:line` nor `file` + `symbol`")
+        typ = issue_type(iss)
+        missing = lint_body(body, n, typ,
+                            depends_wired=bool(repo.blocked_by(n)) if "Depends on" in body else True,
+                            sub_issues=len(repo.sub_issues(n)) if "## Handoff" in body else 0)
         problems += bool(missing)
-        print(f"{key(repo, n)}: " + ("ok" if not missing else "; ".join(missing)))
+        where = f"[{typ}] templates/issue/{typ}.md" if typ else "[no type] the common contract"
+        note = "" if typ else " (no type label — bug, story, chore, feature — its template was not charged)"
+        print(f"{key(repo, n)}: {where} — " + ("ok" if not missing else "; ".join(missing)) + note)
     sys.exit(1 if problems else 0)
 
 
@@ -1688,7 +1750,8 @@ GUARANTEES = [
     ("resolve leaves a conflict for a human, naming files and line ranges", "cmd_resolve -> conflict_hunks", "exit 2: f.txt: lines 1-5", True),
     ("resolve --continue refuses leftover conflict markers, even once staged", "cmd_resolve --continue", "conflict markers remain", True),
     ("resolve pushes only a gated commit, with a plain push", "cmd_resolve -> run_gate", "exit 3 and nothing pushed on a red gate", True),
-    ("lint flags text/data contradictions", "cmd_lint", "CONTRADICTION: ...", True),
+    ("lint flags text/data contradictions", "cmd_lint -> lint_body", "CONTRADICTION: ...", True),
+    ("lint charges the issue's type template by label, names it and each missing section; no type label warns and charges the common contract", "cmd_lint -> lint_body + lint_type", "[bug] templates/issue/bug.md — missing `## Reprodução`: ...; [no type] the common contract — ok (no type label — ...)", True),
     ("a command run inside a worktree never re-points the registry: it names the main checkout", "Repo.from_cwd (--git-common-dir)", "repos.json path stays the main checkout; a worktree or missing path is repaired to it", True),
     ("per-repo gh account token, global login untouched", "Repo._env", "GH_TOKEN per call", True),
     ("an epic follows sub-issues and blockers into other repos; plan --slug creates there", "tree + candidates, cmd_plan", "keys owner/name#N, gh -R owner/name", True),

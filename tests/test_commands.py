@@ -8,7 +8,7 @@ The epic o/r#1 has seven leaves, one per state:
 import json
 import unittest
 
-from helpers import TMP, gh_calls, run_wave, sandbox, wave
+from helpers import TMP, TESTS, gh_calls, run_wave, sandbox, wave
 
 
 def setUpModule():
@@ -196,15 +196,61 @@ class Merge(unittest.TestCase):
 
 
 class Lint(unittest.TestCase):
-    def test_a_complete_body(self):
-        p = run_wave("lint", "2")
-        self.assertEqual((p.returncode, p.stdout), (0, "o/r#2: ok\n"))
-
     def test_contradictions(self):
         p = run_wave("lint", "6")
         self.assertEqual(p.returncode, 1)
         self.assertIn("CONTRADICTION: handoff branch `feat/99-x` does not carry #6", p.stdout)
         self.assertIn("CONTRADICTION: body closes [9] but this is #6", p.stdout)
+
+
+class TypedLint(unittest.TestCase):
+    """The issue's label picks its template (`templates/issue/<type>.md`); `lint` charges what it adds."""
+
+    def test_a_bug_without_reproduction(self):
+        p = run_wave("lint", "60")
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("o/r#60: [bug] templates/issue/bug.md — missing `## Reprodução`: the steps to reproduce and the observed output", p.stdout)
+
+    def test_a_bug_with_reproduction_is_ok(self):
+        p = run_wave("lint", "61")
+        self.assertEqual((p.returncode, p.stdout), (0, "o/r#61: [bug] templates/issue/bug.md — ok\n"), p.stdout)
+
+    def test_a_story_needs_an_owner_and_a_check_per_done_when_item(self):
+        p = run_wave("lint", "62")
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("Done when item 1 (it works) has no `— owner:`", p.stdout)
+        self.assertIn("Done when item 1 (it works) is not observable: name the test or the command that proves it", p.stdout)
+        self.assertIn("Done when item 2 (docs updated)", p.stdout)
+
+    def test_a_chore_says_why_it_is_not_a_story(self):
+        p = run_wave("lint", "63")
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("missing `## Por que não é story`: one line on why this is a chore and not a story", p.stdout)
+
+    def test_a_feature_names_the_stories_that_slice_it(self):
+        p = run_wave("lint", "64")
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("missing `## Fatia`: the stories that slice this feature, one per line", p.stdout)
+
+    def test_no_type_label_warns_and_charges_the_common_contract(self):
+        p = run_wave("lint", "2")
+        self.assertEqual((p.returncode, p.stdout),
+                         (0, "o/r#2: [no type] the common contract — ok (no type label — bug, story, chore, feature — "
+                             "its template was not charged)\n"), p.stdout)
+
+    def test_each_template_carries_what_the_lint_charges(self):
+        required = {"bug": ["## Reprodução"], "story": ["## Done when", "## Handoff"],
+                    "chore": ["## Por que não é story"], "feature": ["## Fatia"]}
+        for typ, sections in required.items():
+            text = (TESTS.parent / "templates" / "issue" / f"{typ}.md").read_text(encoding="utf-8")
+            for s in sections:
+                self.assertIn(s, text, typ)
+
+    def test_the_e2e_plan_bodies_lint_clean(self):
+        for k, n in (("a", 2), ("b", 3), ("c", 4)):
+            body = wave.fill_refs((TESTS / "e2e-plan" / f"{k}.md").read_text().replace("{{run}}", "20260101000000"),
+                                  {"e": 1, "a": 2, "b": 3, "c": 4})
+            self.assertEqual(wave.lint_body(body, n, None), [], f"{k}.md")
 
 
 class NoWrites(unittest.TestCase):

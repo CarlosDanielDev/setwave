@@ -1,0 +1,14 @@
+{
+  "id": 9062,
+  "number": 62,
+  "title": "story 62: the lint learns one more check",
+  "state": "open",
+  "body": "Parent: #1\n\nThe change lives in `scripts/wave.py`, in `cmd_lint`.\n\n## Done when\n\n- [ ] it works\n- [ ] docs updated\n\n## Handoff\n\n```bash\ngit worktree add -b feat/62-story ../r-62 origin/main\n```\n",
+  "labels": [
+    {
+      "name": "story"
+    }
+  ],
+  "html_url": "https://github.com/o/r/issues/62",
+  "repository_url": "https://github.com/o/r"
+}
