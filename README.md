@@ -48,7 +48,7 @@ wave plan ./my-epic --milestone "v2" --dry-run   # look
 wave plan ./my-epic --milestone "v2"             # create, link, wire
 ```
 
-It creates the issues in order, links sub-issues, wires `blocked_by`, fills cross-references, and refuses to run twice. A Claude session doing an audit (poka-yoke, a design review) is the natural author of those bodies; `wave lint` checks them.
+It creates the issues in order, links sub-issues, wires `blocked_by`, fills cross-references, and refuses to run twice. `/setwave:define` is the session that authors those bodies ([Planning an epic](#planning-an-epic)); `wave lint` checks them.
 
 *An existing project* (a milestone or label full of flat issues, "depends on #14" written in the text): the plugin reads only real sub-issues and real `blocked_by`, so wire them by hand today — `gh api repos/o/r/issues/<epic>/sub_issues -F sub_issue_id=<id>` and `…/issues/<n>/dependencies/blocked_by -F issue_id=<id>` — or wait for `wave adopt` ([#11](https://github.com/CarlosDanielDev/setwave/issues/11)), which does exactly that from a milestone or label.
 
@@ -86,7 +86,7 @@ The last status comment on the epic is the paper trail. A single view across all
 | merge | `wave merge --plan p.json --yes --wait-base-ci` — refuses if the base or a PR head moved since the OK, refuses a still-blocked issue, one at a time, CI green before each, stops at the first conflict, applies each PR's ledger to its issue (`wave tick` by hand otherwise) | **you**, with an explicit OK on that exact plan |
 | resolve | `wave resolve <PR>` — merges the base into the PR's branch in its worktree, gates the commit, plain push, PR comment; a conflict stops with files and line ranges, `--continue` after you fix it | the script; **you** resolve the conflict |
 | close out | `wave close-parents`, `wave cleanup`, `wave status --post` | the script |
-| plan an epic | `wave plan <dir>` — issues from bodies + `index.tsv` + `deps.tsv`; links, wires, fills references; refuses to run twice | the audit session writes the bodies |
+| plan an epic | `wave plan <dir>` — issues from bodies + `index.tsv` + `deps.tsv`; links, wires, fills references; refuses to run twice | the `/setwave:define` session writes the bodies |
 | measure | `wave stats` — every run logged to `~/.config/setwave/log.jsonl` | the log |
 
 Conflicts are resolved by merging the base branch *into* the PR's branch and pushing normally. Never a force push. Never `--auto`. `wave resolve <PR>` does that in the PR's worktree: a clean merge is gated and pushed, and the PR gets a comment naming the base SHA; a conflicting one is left in place with each file's line ranges, for you to resolve and hand back with `wave resolve <PR> --continue`, which refuses leftover conflict markers. A dirty worktree is refused, never stashed.
@@ -128,6 +128,10 @@ Conflicts are resolved by merging the base branch *into* the PR's branch and pus
 See [`templates/issue-contract.md`](templates/issue-contract.md) — the index — and the **template for the issue's type**, read before writing the body, not paraphrased from memory: [`bug`](templates/issue/bug.md) must carry a `## Reprodução` with steps and the observed output; every [`story`](templates/issue/story.md) `## Done when` item is observable (a test that passes, a command that prints X) and names its owner; a [`chore`](templates/issue/chore.md) says why it is not a story; a [`feature`](templates/issue/feature.md) names the stories that slice it in `## Fatia`. Short version: an epic with **sub-issues** (not just mentions), dependencies as **`blocked_by`** (not just words), and a body with `file:line` evidence, a `## Done when` with owners, an `## ADR stub`, an `## Out of scope`, and a `## Handoff` block carrying the branch name and a CodeGraph query. `wave lint <issues>` resolves the type from the label, prints which template it is charging and each missing section by name; with no type label it charges the common contract and warns. A body without a handoff still runs (branch and query are derived from the title).
 
 Agents read the issue **and its comments**: when a PR changes a symbol another open issue cites, the agent leaves a one-line comment there, and `verify` names the issues it should have told. That is how "what the next wave inherits" becomes data instead of someone's memory.
+
+## Planning an epic
+
+The bodies `/setwave:wave` executes are authored by **`/setwave:define`** — [`skills/define/SKILL.md`](skills/define/SKILL.md), the refinement session that only leaves an issue when an implementer would start it without asking a single question. It loads the issue, its parent and its comments, and never re-asks what the parent decided; it interviews the owner in rounds, every question numbered and each carrying a recommended answer; environment facts go to a read-only subagent, not to the owner; and five escalation sensors watch for uncertainty the session cannot resolve — any one firing, it suggests promoting the work to an epic instead of forcing it into one issue. The output is a plan directory (`index.tsv` + one body per issue, the input `wave plan` takes), linted with the same rules `wave lint` runs on GitHub before anything exists — and the only door to GitHub is `wave plan`, behind `--dry-run` and an explicit OK. What the session cannot close becomes a `## Pendências (bloqueiam o Ready)` list in the drafted body, each line with an owner.
 
 Every PR body carries a **Done-when ledger**: a `## Done when` section (that exact heading) with the issue's list copied in order, each item `- [x]` done, `- [ ] item — not done: why`, or `- [ ] ~~item~~ — dropped: reason`. `verify` refuses a PR without one (`LEDGER-MISSING`), with items that differ from the issue's after whitespace normalisation (`LEDGER-MISMATCH`), or for an issue with no `## Done when` to compare with (`ISSUE-NO-DONE-WHEN`). After the merge, `merge` applies it to the issue with `wave tick` — only the open lines it names change — and leaves one comment, "ledger applied from PR #N: 5 done, 1 dropped"; while an item is still open the issue is reopened, so the next prompt's **Remaining** section lists only that item. An open issue whose every item is ticked or struck is `done-unclosed` in `next`: never dispatched. `status` counts the boxes per leaf and sums them on the epic line.
 
@@ -254,6 +258,7 @@ A guard is only as good as the test that fails without it: when you add one, rem
 .claude-plugin/marketplace.json this repo is its own marketplace
 .wave.json                      this repo's own gate and serial files
 skills/wave/SKILL.md            the orchestrator procedure Claude follows
+skills/define/SKILL.md          the authoring procedure: the refinement session that ends only at Ready
 scripts/wave.py                 the deterministic steps (stdlib only)
 scripts/e2e.py                  one end-to-end run against a sandbox repository
 scripts/fake_agent.py           the agent the e2e run plays: change, commit, push, PR; keeps both sides of a conflict
