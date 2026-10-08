@@ -146,8 +146,9 @@ class ClosingKeywords(unittest.TestCase):
                 self.assertFalse([c for c in gh_calls()[before:] if c[:2] == ["pr", "merge"]])
 
     def test_no_hint_or_prompt_example_closes_anything(self):
-        prompt = (wave.TEMPLATES / "agent.md").read_text()
-        self.assertEqual(wave.CLOSES.findall(prompt), [], "the raw template names no closing ref")
+        for name in ("agent.md", "judge.md"):
+            prompt = (wave.TEMPLATES / name).read_text()
+            self.assertEqual(wave.CLOSES.findall(prompt), [], f"the raw template names no closing ref")
         iss = {"number": 2, "title": "t", "html_url": "https://github.com/o/r/issues/2"}
         rendered = wave.render_prompt(repo(), iss, "feat/2-t", "0" * 40, 2)
         self.assertEqual([int(n) for _, n in wave.CLOSES.findall(rendered)], [2], "the rendered prompt closes only its issue")

@@ -11,7 +11,7 @@ import subprocess
 import sys
 import unittest
 
-from helpers import TMP, WAVE, run_wave, sandbox, wave
+from helpers import TMP, WAVE, judge_pass, run_wave, sandbox, wave
 
 ISSUE = ("Parent: #1\n\nWhy, with  two spaces and a trailing one \n\n## Done when\n\n"
          "- [ ] first thing — owner: implementer\n"
@@ -181,6 +181,7 @@ class Verify(unittest.TestCase):
 class Merge(unittest.TestCase):
     def test_a_partial_ledger_is_applied_and_the_issue_reopened_with_one_comment(self):
         before = wave.Repo.get("o/r").issue(53)["body"]
+        judge_pass(34)  # merge refuses an unjudged PR (JUDGE-MISSING); this test is about the ledger
         p, calls = writes_allowed("merge", "34", "--yes", "--ci-timeout", "5", log="merge-34")
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertTrue([c for c in calls if c[:2] == ["pr", "merge"]])
@@ -196,6 +197,7 @@ class Merge(unittest.TestCase):
         self.assertLess(merged_at, calls.index(next(c for c in calls if c[:2] == ["issue", "edit"])), "applied after the merge")
 
     def test_a_full_ledger_comments_and_leaves_the_close_to_github(self):
+        judge_pass(20)  # merge refuses an unjudged PR (JUDGE-MISSING); this test is about the ledger
         p, calls = writes_allowed("merge", "20", "--yes", "--ci-timeout", "5", log="merge-20")
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         comments = [c for c in calls if c[:2] == ["issue", "comment"]]

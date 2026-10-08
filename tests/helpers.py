@@ -101,6 +101,19 @@ def run_wave(*args, cwd=None) -> subprocess.CompletedProcess:
     return subprocess.run([sys.executable, str(WAVE), *args], cwd=cwd or sandbox(), capture_output=True, text=True)
 
 
+def judge_pass(pr: int, verdict: str = "pass", sha: str | None = None) -> Path:
+    """Seed the judge verdict for `pr` the way the read-only judge agent would write it: at its head (or `sha`)."""
+    repo = wave.Repo.get("o/r")
+    branch = next(x["headRefName"] for x in repo.open_prs() if x["number"] == pr)
+    d = CLONE.parent / f"{CLONE.name}-handoffs"
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / f"judge-{pr}.json"
+    f.write_text(json.dumps({
+        "verdict": verdict, "head_sha": sha or repo.git(["rev-parse", f"origin/{branch}"]).strip(),
+        "findings": [] if verdict == "pass" else [{"file": "g.txt", "line": 1, "note": "the seeded fault"}]}))
+    return f
+
+
 def gh_calls() -> list[list[str]]:
     log = TMP / "gh.log"
     return [json.loads(l) for l in log.read_text().splitlines()] if log.exists() else []
