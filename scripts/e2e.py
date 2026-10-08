@@ -4,11 +4,13 @@
     python3 scripts/e2e.py <checkout of owner/name-sandbox> [--any-repo] [--ci-timeout S]
 
 plan an epic of three leaves from tests/e2e-plan/ -> dispatch them -> scripts/fake_agent.py plays each agent
-(change, commit `Closes #N`, push, PR) -> verify --epic -> order: the chain names the leaf that conflicts ->
+(change, commit `Closes #N`, push, PR) -> verify --epic -> judge (refused without verdicts, then the run plays
+the judge itself: a pass verdict per PR at its head) -> order: the chain names the leaf that conflicts ->
 order --plan + merge --plan --yes --wait-base-ci for the others -> wave resolve on the conflicting one (stops on
-the conflict by design), the fake agent keeps both sides, resolve --continue gates and pushes -> order --plan +
-merge for it -> close-parents --include-epic -> cleanup -> status --post. Every step is timed and logged; a step
-that exits other than expected stops the run and says what is left open.
+the conflict by design), the fake agent keeps both sides, resolve --continue gates and pushes -> the leaf is
+re-judged (resolve moved its head) -> order --plan + merge for it -> close-parents --include-epic -> cleanup ->
+status --post. Every step is timed and logged; a step that exits other than expected stops the run and says
+what is left open.
 
 Running this is the owner's OK for the merges it makes, in the sandbox and nowhere else: it refuses the plugin's
 own repository always, and any repository whose name does not end in `-sandbox` unless --any-repo. It never
@@ -97,6 +99,18 @@ def checks_done(slug: str, pr: int):
     return buckets
 
 
+def fake_judgement(root: Path, slug: str, pr: int) -> None:
+    """The run plays the judge too: a pass verdict at the PR's current head, so the loop can prove the plumbing —
+    the schema, the sha pinning, the refusals. It cannot prove an independent mind looked; that is the real loop's job."""
+    branch = gh_json(["pr", "view", str(pr), "-R", slug, "--json", "headRefName"])["headRefName"]
+    sha = subprocess.run(["git", "rev-parse", f"origin/{branch}"], cwd=root, capture_output=True, text=True, check=True).stdout.strip()
+    handoffs = root.parent / f"{root.name}-handoffs"
+    handoffs.mkdir(parents=True, exist_ok=True)
+    (handoffs / f"judge-{pr}.json").write_text(json.dumps(
+        {"verdict": "pass", "head_sha": sha,
+         "findings": [{"file": ".wave.json", "line": 1, "note": "e2e fake judge: plumbing only, not judgement"}]}))
+
+
 def main(argv=None) -> None:
     p = argparse.ArgumentParser(prog="e2e", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("checkout", help="local clone of the sandbox repository")
@@ -138,6 +152,7 @@ def main(argv=None) -> None:
         for pr in prs.values():
             wait(log, f"CI on PR {pr}", lambda pr=pr: checks_done(slug, pr), a.ci_timeout)
         step(log, "verify", wv("verify", "--epic", str(epic)), root)
+        step(log, "judge (no verdict yet)", wv("judge", *map(str, prs.values())), root, expect=1)
         chain = json.loads(step(log, "order (predict)", wv("order", "--epic", str(epic), "--json"), root))[slug]["chain"]
         conflicting = [n for n, files in chain if files]
         if len(conflicting) != 1:
@@ -147,11 +162,17 @@ def main(argv=None) -> None:
         say = f"OK: you ran scripts/e2e.py against {slug}; that is the owner's OK for this merge, in {slug} and nowhere else."
         step(log, "order --plan", wv("order", *first, "--plan", str(run_dir / "plan-1.json")), root)
         print(say)
+        step(log, "merge (refused: no verdict)", wv("merge", "--plan", str(run_dir / "plan-1.json"), "--yes"), root, expect=1)
+        for n, pr in prs.items():
+            fake_judgement(root, slug, pr)
+        step(log, "judge", wv("judge", *map(str, prs.values())), root)
         step(log, "merge", wv("merge", "--plan", str(run_dir / "plan-1.json"), "--yes", "--wait-base-ci", "--ci-timeout", str(a.ci_timeout)), root)
         step(log, f"resolve {late} (conflict)", wv("resolve", str(late)), root, expect=2)
         step(log, f"agent resolves {late}", fa("resolve"), wts[next(n for n, pr in prs.items() if pr == late)])
         step(log, f"resolve {late} --continue", wv("resolve", str(late), "--continue"), root)
         wait(log, f"CI on PR {late}", lambda: checks_done(slug, late), a.ci_timeout)
+        fake_judgement(root, slug, late)  # resolve moved the head: the old verdict is stale by design
+        step(log, f"judge PR {late}", wv("judge", str(late)), root)
         step(log, "order --plan", wv("order", str(late), "--plan", str(run_dir / "plan-2.json")), root)
         print(say)
         step(log, "merge", wv("merge", "--plan", str(run_dir / "plan-2.json"), "--yes", "--wait-base-ci", "--ci-timeout", str(a.ci_timeout)), root)
