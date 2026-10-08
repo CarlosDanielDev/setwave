@@ -1,0 +1,7 @@
+# ADR 003 — the sweep re-verifies claimed state against merged PRs, and reverts a lie without ever closing
+
+2026-10-08 · issue #36
+
+The incident of record is openclaw-luana-workspace's #2999: work marked "processed" that no merged PR ever carried, discovered late because nothing re-checked the claim against reality. That collection's answer, `skills/squad-rise-worker/scripts/check-ready-issues.sh`, re-verifies "processed" against a real PR on every cycle and hands false positives back to the queue — this layer is that scan, ported: every leaf that claims done (all Done-when items ticked or struck) or is closed is re-checked against GitHub for a merged PR with its ledger applied. The second silent failure it sweeps is the eternal claim — a dead agent resumed forever with no commit, holding the wave — closed by the retry ceiling (three no-progress dispatches exhaust an agent; escalation to the owner, never an automatic kill).
+
+Chosen: `wave sweep` is its own command, and `doctor --epic` calls it as a sub-check rather than absorbing it — doctor is the environment preflight, sweep is a state diagnosis, and each stays testable alone. The revert is untick / reopen / apply-ledger / comment, never close and never delete: a closure and a strike are the owner's calls, and a sweep that could close issues could also silence real work. The TTL claim lock stays out on the same evidence: with state re-verified against merged PRs, a claim wedge would be redundancy — the sweep makes it obsolete instead of licensing it.

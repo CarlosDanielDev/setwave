@@ -2203,6 +2203,8 @@ GUARANTEES = [
     ("no forbidden git command through Bash — gc --prune, reflog expire, stash, reset --hard, clean -f, push --force, branch -D, rm -rf — each refusal naming the safe alternative (fail open: a broken guard exits 0)", "hooks/guards.py forbidden-git <- settings PreToolUse[Bash]", "exit 2: forbidden-git-guard: `git stash` is refused: commit the work to a branch instead", True),
     ("no secret file's contents are printed — the registry's repos.json, .env, credentials, auth.json; ls, stat and grep -c stay open (fail open: a broken guard exits 0)", "hooks/guards.py secret-read <- settings PreToolUse[Bash]", "exit 2: secret-read-guard: use `ls -la`, `stat` or `grep -c` instead", True),
     ("no Agent dispatch whose prompt lacks the contract sections — where, task, gate, delivery, Done when; a fork is exempt (fail open: a broken guard exits 0)", "hooks/guards.py dispatch-contract <- settings PreToolUse[Task]", "exit 2: dispatch-contract-guard: it lacks the dispatch contract: the gate to run, ...", True),
+    # the skill-lint (scripts/validate_skills.py): a skill whose frontmatter is broken silently stops being offered to the tooling
+    ("no skill whose frontmatter is broken — name kebab matching its directory, a description of at least 40 chars, no dead template link", "ci.yml skill-lint <- validate_skills.py", "CI red: skills/<dir>/SKILL.md: name `X` differs from its directory ...", True),
 ]
 
 
