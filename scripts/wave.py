@@ -67,9 +67,10 @@ IGNORE_ACTIONS = ["actions/checkout", "actions/setup-*", "actions/cache", "actio
 # changed less than WORKING_MIN minutes ago = working, up to DEAD_MIN = quiet, more and no PR = likely dead
 WORKING_MIN = 10
 DEAD_MIN = 30
-STAMP = ".setwave.json"  # written by dispatch into each worktree, excluded from git: issue, repo, dispatched_at, prompt, resumes
-# dispatches over a worktree without a new commit on its branch: at this many, the agent is agent-exhausted —
-# dispatch refuses a further one and `wave sweep --fix` escalates to the owner; nothing is ever closed by itself
+STAMP = ".setwave.json"  # written by dispatch into each worktree, excluded from git: issue, repo, dispatched_at, prompt, resumes, respawns
+# dispatches over a worktree without a new commit on its branch — a plain resume and a respawn with a new strategy
+# count alike: at RETRY_CEILING of them, the agent is agent-exhausted — dispatch refuses a further one and
+# `wave sweep --fix` escalates to the owner; nothing is ever closed by itself
 RETRY_CEILING = 3
 # more parallel agents than this once hit the API rate limit and left a half-extracted crate in the shared cargo cache
 MAX_BATCH = 6
@@ -645,7 +646,7 @@ def candidates(nodes: dict[str, dict]) -> list[dict]:
         done = bool(items) and all(i["state"] != "open" for i in items)  # open, yet nothing left to do: not dispatched
         lv = liveness(repo, n, wt) if wt.exists() else None
         state = ("blocked" if blockers else "in-progress" if pr else "done-unclosed" if done
-                 else "agent-exhausted" if lv and lv["resumes"] >= RETRY_CEILING
+                 else "agent-exhausted" if lv and no_progress(lv) >= RETRY_CEILING
                  else "worktree" if wt.exists() else "ready")
         out.append({"key": nd["key"], "repo": repo.slug, "number": n, "title": iss["title"], "branch": branch_for(iss),
                     "blocked_by": blockers, "pr": pr["number"] if pr else None,
@@ -692,7 +693,8 @@ def why(c: dict) -> str:
         return "done-unclosed: every Done-when item is ticked or struck — close it or add an item"
     lv = c.get("liveness")
     if c.get("state") == "agent-exhausted":
-        return (f"agent-exhausted: {lv['resumes']} resumes without a new commit — dispatch refuses; "
+        extra = f", {lv['respawns']} with a new strategy" if lv.get("respawns") else ""
+        return (f"agent-exhausted: {lv['resumes']} resumes without a new commit{extra} — dispatch refuses; "
                 "`wave sweep --fix` escalates, the owner decides")
     return f"worktree exists ({lv['verdict']}, nothing changed for {lv['idle_min']} min)" if lv else "worktree exists"
 
@@ -736,16 +738,26 @@ def stamp_of(wt: Path) -> dict:
         return {}
 
 
-def next_resumes(repo: Repo, wt: Path, stamp: dict) -> int:
-    """The stamp's resume count after one more dispatch in this worktree: a commit on the branch newer than the
-    last dispatch is progress and resets it; a dispatch over no progress is one more resume. No stamp means a
-    first agent here, not a resume."""
+def no_progress(stamp: dict) -> int:
+    """Dispatches over a worktree without a new commit: plain resumes plus respawns with a new strategy alike.
+    The retry ceiling counts the sum — a strategy change is not progress."""
+    return stamp.get("resumes", 0) + stamp.get("respawns", 0)
+
+
+def next_resume_counts(repo: Repo, wt: Path, stamp: dict, respawn: bool) -> tuple[int, int]:
+    """The stamp's (resumes, respawns) after one more dispatch in this worktree: a commit on the branch newer
+    than the last dispatch is progress and resets both; a dispatch over no progress is one more plain resume,
+    or one more respawn when the orchestrator returns with a new strategy after a repeated failure. No stamp
+    means a first agent here, not a resume."""
     dispatched = _epoch(stamp.get("dispatched_at"))
     if dispatched is None:
-        return 0
+        return (0, 0)
     rc, out, _ = run(["git", "log", "-1", "--format=%ct", f"origin/{repo.base}..HEAD"], cwd=wt, env=repo.env)
     last = float(out.strip()) if rc == 0 and out.strip() else None
-    return 0 if last is not None and last > dispatched else stamp.get("resumes", 0) + 1
+    if last is not None and last > dispatched:
+        return (0, 0)
+    return (stamp.get("resumes", 0) + (0 if respawn else 1),
+            stamp.get("respawns", 0) + (1 if respawn else 0))
 
 
 def liveness(repo: Repo, n: int, wt: Path | None = None) -> dict:
@@ -758,7 +770,7 @@ def liveness(repo: Repo, n: int, wt: Path | None = None) -> dict:
     pr = pr_for_issue(repo, n)
     return {"issue": n, "worktree": str(wt), "age_min": round((now - dispatched) / 60) if dispatched else None,
             "idle_min": round(idle), "pr": pr["number"] if pr else None, "resumes": stamp.get("resumes", 0),
-            "verdict": verdict(idle, bool(pr))}
+            "respawns": stamp.get("respawns", 0), "verdict": verdict(idle, bool(pr))}
 
 
 def issue_worktrees(repo: Repo) -> list[tuple[Path, str, int]]:
@@ -928,16 +940,17 @@ def cmd_dispatch(default: Repo | None, a):
         branch = branch_for(iss)
         wt = repo.worktree(n)
         sha = repo.origin_sha()
-        resumes = 0
+        resumes, respawns = 0, 0
         if not a.dry_run:
             if wt.exists():
                 lv = liveness(repo, n, wt)  # --force over a live agent would put a second one in the same tree: say what this one looks like
-                print(f"{key(repo, n)}: worktree exists at {wt}, keeping it ({lv['verdict']}, changed {lv['idle_min']} min ago)")
-                resumes = next_resumes(repo, wt, stamp_of(wt))  # a dispatch over a worktree is a resume; a commit since the last one is progress
-                if resumes > RETRY_CEILING:
-                    raise SystemExit(f"{key(repo, n)}: agent-exhausted: {resumes - 1} resumes without a new commit "
-                                     f"(nothing changed for {lv['idle_min']} min) — dispatch refused; "
-                                     f"`wave sweep <epic> --fix` comments the escalation, the owner decides")
+                print(f"{key(repo, n)}: worktree exists at {wt}, keeping it ({lv['verdict']}, changed {lv['idle_min']} min ago)"
+                      + (" — respawn with a new strategy" if a.respawn else ""))
+                resumes, respawns = next_resume_counts(repo, wt, stamp_of(wt), a.respawn)  # a dispatch over a worktree is a resume, or a respawn when --respawn says this one returns with a new strategy; a commit since the last one is progress
+                if resumes + respawns > RETRY_CEILING:
+                    raise SystemExit(f"{key(repo, n)}: agent-exhausted: {resumes + respawns - 1} dispatches without a new commit "
+                                     f"({resumes} resumes, {respawns} respawns; nothing changed for {lv['idle_min']} min) — "
+                                     f"dispatch refused; `wave sweep <epic> --fix` comments the escalation, the owner decides")
             else:
                 ok, out = repo.git_ok(["worktree", "add", "-q", "-b", branch, str(wt), f"origin/{repo.base}"])
                 if not ok:
@@ -948,7 +961,10 @@ def cmd_dispatch(default: Repo | None, a):
         path = repo.handoffs / f"{n}.md"
         path.write_text(render_prompt(repo, iss, branch, sha, len(targets)))
         if not a.dry_run:  # the stamp `agents`, `doctor` and the retry ceiling read; a re-dispatch (--force) is a new agent, so a new stamp
-            (wt / STAMP).write_text(json.dumps({"issue": n, "repo": repo.slug, "dispatched_at": now_iso(), "prompt": str(path), "resumes": resumes}, indent=2) + "\n")
+            (wt / STAMP).write_text(json.dumps({"issue": n, "repo": repo.slug, "dispatched_at": now_iso(), "prompt": str(path),
+                                                "resumes": resumes, "respawns": respawns}, indent=2) + "\n")
+            totals = getattr(a, "stamp_totals", {"resumes": 0, "respawns": 0})  # logged for `wave stats`: the waves' escalation mix
+            a.stamp_totals = {"resumes": totals["resumes"] + resumes, "respawns": totals["respawns"] + respawns}
             ok, excl = repo.git_ok(["rev-parse", "--git-path", "info/exclude"], cwd=wt)  # shared by every worktree
             excl_path = wt / excl.strip()  # an absolute path stays itself
             text = excl_path.read_text() if ok and excl_path.exists() else ""
@@ -1713,21 +1729,22 @@ def sweep_epic(nodes: dict[str, dict]) -> list[dict]:
 
 
 def sweep_retries(repo: Repo, nums: set[int] | None = None) -> list[dict]:
-    """The retry sweep: worktrees whose stamp counts RETRY_CEILING resumes without a new commit on the branch.
-    Read-only; nums narrows it to the leaves of one epic."""
+    """The retry sweep: worktrees whose stamp counts RETRY_CEILING no-progress dispatches (resumes and respawns
+    alike) without a new commit on the branch. Read-only; nums narrows it to the leaves of one epic."""
     out = []
     for wt, branch, n in issue_worktrees(repo):
         if nums is not None and n not in nums:
             continue
         stamp = stamp_of(wt)
-        if stamp.get("resumes", 0) < RETRY_CEILING:
+        if no_progress(stamp) < RETRY_CEILING:
             continue
         lv = liveness(repo, n, wt)
         rc, log, _ = run(["git", "log", "-1", "--format=%h %ct", f"origin/{repo.base}..HEAD"], cwd=wt, env=repo.env)
         last = log.strip().split() if rc == 0 and log.strip() else None
         commit = f"last commit {last[0]} {round((time.time() - float(last[1])) / 60)} min ago" if last else "no commit on the branch"
+        mix = f", {stamp['respawns']} with a new strategy" if stamp.get("respawns") else ""
         out.append({"key": key(repo, n), "repo": repo.slug, "number": n, "wt": wt, "kind": "agent-exhausted",
-                    "evidence": f"{stamp['resumes']} resumes without a new commit "
+                    "evidence": f"{stamp['resumes']} resumes without a new commit{mix} "
                                 f"({commit}; nothing changed for {lv['idle_min']} min)"})
     return sorted(out, key=lambda f: f["number"])
 
@@ -1961,7 +1978,7 @@ def cmd_doctor(default: Repo | None, a) -> None:
                          and not (wt / STAMP).exists() and not r.git(["status", "--porcelain"], cwd=wt).strip())
             if branch in merged or untouched:
                 stale.append(wt.name)          # merged, or never dispatched, pushed, committed or edited: leftovers, `wave cleanup`
-            elif stamp_of(wt).get("resumes", 0) >= RETRY_CEILING:
+            elif no_progress(stamp_of(wt)) >= RETRY_CEILING:
                 exhausted.append((wt, n))      # past the retry ceiling: dispatch refuses it, the sweep escalates
             elif not pr_for_issue(r, n):       # unmerged work with no PR: an agent at work, or one that died
                 lv = liveness(r, n, wt)
@@ -1972,8 +1989,9 @@ def cmd_doctor(default: Repo | None, a) -> None:
                        (", ".join(f"{name} ({lv['idle_min']} min)" for name, _, lv in dead)
                         + " — resume the agent with `SendMessage` to its id, or "
                         + ", ".join(f"`wave dispatch --force {n}`" for _, n, _ in dead) + " to start over on top of what is there") if dead else "none", False))
-        checks.append((f"no agent past the retry ceiling ({RETRY_CEILING} resumes without a new commit)", not exhausted,
-                       ", ".join(f"{wt.name} ({stamp_of(wt).get('resumes')} resumes, changed {liveness(r, n, wt)['idle_min']} min ago) — "
+        checks.append((f"no agent past the retry ceiling ({RETRY_CEILING} no-progress dispatches)", not exhausted,
+                       ", ".join(f"{wt.name} ({stamp_of(wt).get('resumes')} resumes, {stamp_of(wt).get('respawns', 0)} respawns, "
+                                 f"changed {liveness(r, n, wt)['idle_min']} min ago) — "
                                  "dispatch refuses it; `wave sweep <epic> --fix` escalates" for wt, n in exhausted)
                        if exhausted else "none", False))
         if getattr(a, "epic", None):
@@ -2166,9 +2184,11 @@ GUARANTEES = [
     ("lint flags text/data contradictions", "cmd_lint -> lint_body", "CONTRADICTION: ...", True),
     ("lint charges the issue's type template by label, names it and each missing section; no type label warns and charges the common contract", "cmd_lint -> lint_body + lint_type", "[bug] templates/issue/bug.md — missing `## Reprodução`: ...; [no type] the common contract — ok (no type label — ...)", True),
     ("sweep re-verifies claimed done and closed leaves against merged PRs; --fix reverts the lie with a comment and the leaf returns to next", "cmd_sweep -> sweep_epic, apply_sweep", "false-done | false-closed | ledger-not-applied", True),
-    ("three resumes without a new commit exhaust an agent: dispatch refuses the next one, sweep --fix comments the escalation on the issue and the epic, nothing closes", "cmd_dispatch + sweep_retries", "agent-exhausted: 3 resumes without a new commit", True),
+    ("three no-progress dispatches — plain resumes and respawns with a new strategy alike — exhaust an agent: dispatch refuses the next one, sweep --fix comments the escalation on the issue and the epic, nothing closes", "cmd_dispatch + sweep_retries", "agent-exhausted: 3 dispatches without a new commit (R resumes, P respawns)", True),
+    ("the second identical failure is a respawn with the failure context attached, never a third identical resume: --respawn marks it in the stamp", "cmd_dispatch --respawn + skills/wave/SKILL.md step 4", ".setwave.json respawns field; 'respawn with a new strategy' on dispatch", True),
+    ("wave stats measures the waves' escalation mix: plain resumes against respawns, from the dispatch log", "cmd_stats <- log_run <- cmd_dispatch", "dispatch escalations: R plain resumes, P respawns with a new strategy", True),
     ("an exhausted worktree is its own exclusive state, never ready", "candidates -> liveness", "agent-exhausted: N resumes without a new commit — dispatch refuses", True),
-    ("doctor reports the retry ceiling, and with --epic the state sweep, both soft", "cmd_doctor -> sweep_retries, sweep_epic", "! no agent past the retry ceiling (3 resumes ...) / ! state sweep of <epic>", True),
+    ("doctor reports the retry ceiling, and with --epic the state sweep, both soft", "cmd_doctor -> sweep_retries, sweep_epic", "! no agent past the retry ceiling (3 no-progress dispatches ...) / ! state sweep of <epic>", True),
     ("a command run inside a worktree never re-points the registry: it names the main checkout", "Repo.from_cwd (--git-common-dir)", "repos.json path stays the main checkout; a worktree or missing path is repaired to it", True),
     ("per-repo gh account token, global login untouched", "Repo._env", "GH_TOKEN per call", True),
     ("an epic follows sub-issues and blockers into other repos; plan --slug creates there", "tree + candidates, cmd_plan", "keys owner/name#N, gh -R owner/name", True),
@@ -2287,7 +2307,7 @@ def main(argv=None):
     x.add_argument("action", choices=["list", "add", "scan"]); x.add_argument("path", nargs="?"); x.add_argument("--slug"); x.add_argument("--account"); x.add_argument("--base"); x.add_argument("--worktree-prefix", help="where worktrees go, e.g. ~/kyte-worktrees/demeter-  (default ../<repo>-)"); x.add_argument("--gate", nargs="*"); x.add_argument("--protected", nargs="*")
     x = s.add_parser("facts", help="what was discovered about repos"); x.add_argument("slugs", nargs="*")
     x = s.add_parser("next", help="leaf issues ready to dispatch"); x.add_argument("epic"); x.add_argument("--batch", type=int, default=4); x.add_argument("--json", action="store_true")
-    x = s.add_parser("dispatch", help="create worktrees + prompt files (runs doctor and refuses issues that are not READY)"); x.add_argument("issues", nargs="+"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--force", action="store_true"); x.add_argument("--warm", action="store_true", help="Rust: `cargo fetch` in the main checkout first, so parallel builds only extract")
+    x = s.add_parser("dispatch", help="create worktrees + prompt files (runs doctor and refuses issues that are not READY)"); x.add_argument("issues", nargs="+"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--force", action="store_true"); x.add_argument("--warm", action="store_true", help="Rust: `cargo fetch` in the main checkout first, so parallel builds only extract"); x.add_argument("--respawn", action="store_true", help="this dispatch returns with a new strategy after the same failure twice: the stamp counts a respawn, not a plain resume")
     x = s.add_parser("why", help="the premises behind READY / NOT READY for an issue, with evidence"); x.add_argument("refs", nargs="+")
     x = s.add_parser("doctor", help="preflight: gh, git, clean checkout, gate, protected paths, dead agents, retry ceiling, leftover worktrees, cargo cache, disk, batch size"); x.add_argument("--batch", type=int, default=4); x.add_argument("--fix-cache", action="store_true", help="move each half-extracted crate to ~/.config/setwave/quarantine/ (never deletes)"); x.add_argument("--epic", help="also run the state sweep of this epic as a soft check")
     x = s.add_parser("agents", help="every issue worktree: age since dispatch, minutes since the newest change, PR, verdict (working | quiet | likely dead | done)")
@@ -2334,8 +2354,12 @@ def main(argv=None):
 
 def log_run(a, default: Repo | None, seconds: float, exit_code: int) -> None:
     """Append one line per run: the raw material for `stats`. Never fails the command."""
-    append_log({"at": now_iso(), "cmd": a.cmd, "args": [x for x in sys.argv[1:] if x != a.cmd], "repo": default.slug if default else None,
-                "seconds": round(seconds, 1), "exit": exit_code})
+    rec = {"at": now_iso(), "cmd": a.cmd, "args": [x for x in sys.argv[1:] if x != a.cmd], "repo": default.slug if default else None,
+           "seconds": round(seconds, 1), "exit": exit_code}
+    st = getattr(a, "stamp_totals", None)  # a dispatch records the escalation mix it stamped: plain resumes vs respawns
+    if st:
+        rec["resumes"], rec["respawns"] = st["resumes"], st["respawns"]
+    append_log(rec)
 
 
 def append_log(rec: dict) -> None:
@@ -2364,6 +2388,11 @@ def cmd_stats() -> None:
     merges = [r for r in by.get("merge", []) if "--yes" in r["args"]]
     if merges:
         print(f"\nmerge runs with --yes: {len(merges)}, stopped by conflict/CI: {sum(1 for r in merges if r['exit'])}")
+    d = by.get("dispatch", [])
+    resumes = sum(r.get("resumes", 0) for r in d)
+    respawns = sum(r.get("respawns", 0) for r in d)
+    if resumes or respawns:
+        print(f"\ndispatch escalations: {resumes} plain resumes, {respawns} respawns with a new strategy")
 
 
 if __name__ == "__main__":

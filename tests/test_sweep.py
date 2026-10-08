@@ -134,6 +134,44 @@ class RetryCeiling(unittest.TestCase):
         self.assertIn("agent-exhausted", wave.why(cands[6]))
         self.assertIn("3 resumes", wave.why(cands[6]))
 
+    def test_a_respawn_is_counted_apart_and_logged_for_stats(self):
+        # x-9: one fresh dispatch, then two --respawn dispatches, each without a new commit:
+        # the stamp counts respawns, not resumes, and every dispatch logs both for `wave stats`
+        p = run_wave("dispatch", "9", "--force", cwd=S)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        stamp = json.loads((TMP / "x-9" / ".setwave.json").read_text())
+        self.assertEqual((stamp["resumes"], stamp["respawns"]), (0, 0), "a first agent is neither")
+        for i in (1, 2):
+            p = run_wave("dispatch", "9", "--force", "--respawn", cwd=S)
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+            stamp = json.loads((TMP / "x-9" / ".setwave.json").read_text())
+            self.assertEqual((stamp["resumes"], stamp["respawns"]), (0, i), f"respawn {i} counted, resumes untouched")
+        logs = [json.loads(l) for l in (TMP / "config" / "log.jsonl").read_text().splitlines()]
+        d = [r for r in logs if r["cmd"] == "dispatch" and r["repo"] == "o/x" and r["args"][:1] == ["9"]]
+        self.assertEqual([(r.get("resumes"), r.get("respawns")) for r in d], [(0, 0), (0, 1), (0, 2)],
+                         "each dispatch logs its escalation mix for wave stats")
+
+    def test_the_ceiling_counts_resumes_and_respawns_together(self):
+        # x-10: a stamp of its own — two respawns, then one plain resume fits under the ceiling, the next is refused
+        wt = TMP / "x-10"
+        git("worktree", "add", "-q", "-b", "feat/10-ceiling-mix-leaf", str(wt), "origin/main", cwd=S)
+        at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        (wt / ".setwave.json").write_text(json.dumps(
+            {"issue": 10, "repo": "o/x", "dispatched_at": at, "prompt": "p.md", "resumes": 0, "respawns": 2}))
+        p = run_wave("dispatch", "10", "--force", cwd=S)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        stamp = json.loads((wt / ".setwave.json").read_text())
+        self.assertEqual((stamp["resumes"], stamp["respawns"]), (1, 2), "a plain resume is still a resume")
+        refused = run_wave("dispatch", "10", "--force", cwd=S)
+        self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+        self.assertIn("agent-exhausted", refused.stdout + refused.stderr)
+        self.assertIn("2 respawns", refused.stdout + refused.stderr, "the refusal names both kinds")
+        after = json.loads((wt / ".setwave.json").read_text())
+        self.assertEqual((after["resumes"], after["respawns"]), (1, 2), "the refusal writes nothing")
+        nd = {"key": "o/x#10", "repo": "o/x", "number": 10, "issue": repo().issue(10), "children": [], "parent": "o/x#1"}
+        c = wave.candidates({"o/x#10": nd})[0]
+        self.assertEqual(c["state"], "agent-exhausted", "the ceiling counts the two kinds together")
+
     def test_a_commit_resets_the_counter(self):
         # x-8: its own worktree, so this holds whatever order the classes run in
         p = run_wave("dispatch", "8", "--force", cwd=S)
