@@ -1,0 +1,10 @@
+{
+  "id": 1207,
+  "number": 7,
+  "title": "Resume-counted leaf",
+  "state": "open",
+  "body": "Parent: #1\n\n## Done when\n\n- [ ] seven\n",
+  "labels": [],
+  "html_url": "https://github.com/o/x/issues/7",
+  "repository_url": "https://api.github.com/repos/o/x"
+}

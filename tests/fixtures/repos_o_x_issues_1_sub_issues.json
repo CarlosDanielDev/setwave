@@ -1,0 +1,72 @@
+[
+  {
+    "id": 1202,
+    "number": 2,
+    "title": "False done leaf",
+    "state": "open",
+    "body": "Parent: #1\n\n## Done when\n\n- [x] one\n- [ ] ~~two~~ \u2014 dropped: not needed\n",
+    "labels": [],
+    "html_url": "https://github.com/o/x/issues/2",
+    "repository_url": "https://api.github.com/repos/o/x"
+  },
+  {
+    "id": 1203,
+    "number": 3,
+    "title": "False closed leaf",
+    "state": "closed",
+    "body": "Parent: #1\n\n## Done when\n\n- [ ] half\n",
+    "labels": [],
+    "html_url": "https://github.com/o/x/issues/3",
+    "repository_url": "https://api.github.com/repos/o/x"
+  },
+  {
+    "id": 1204,
+    "number": 4,
+    "title": "Closed, merged PR, ledger missing",
+    "state": "closed",
+    "body": "Parent: #1\n\n## Done when\n\n- [ ] four-a\n",
+    "labels": [],
+    "html_url": "https://github.com/o/x/issues/4",
+    "repository_url": "https://api.github.com/repos/o/x"
+  },
+  {
+    "id": 1205,
+    "number": 5,
+    "title": "Closed, merged PR, ledger applied",
+    "state": "closed",
+    "body": "Parent: #1\n\n## Done when\n\n- [x] five-a\n",
+    "labels": [],
+    "html_url": "https://github.com/o/x/issues/5",
+    "repository_url": "https://api.github.com/repos/o/x"
+  },
+  {
+    "id": 1206,
+    "number": 6,
+    "title": "Exhausted leaf",
+    "state": "open",
+    "body": "Parent: #1\n\n## Done when\n\n- [ ] six\n",
+    "labels": [],
+    "html_url": "https://github.com/o/x/issues/6",
+    "repository_url": "https://api.github.com/repos/o/x"
+  },
+  {
+    "id": 1207,
+    "number": 7,
+    "title": "Resume-counted leaf",
+    "state": "open",
+    "body": "Parent: #1\n\n## Done when\n\n- [ ] seven\n",
+    "labels": [],
+    "html_url": "https://github.com/o/x/issues/7",
+    "repository_url": "https://api.github.com/repos/o/x"
+  },
+  {
+    "id": 1208,
+    "number": 8,
+    "title": "Fresh leaf",
+    "state": "open",
+    "body": "Parent: #1\n\n## Done when\n\n- [ ] eight\n",
+    "labels": [],
+    "html_url": "https://github.com/o/x/issues/8",
+    "repository_url": "https://api.github.com/repos/o/x"
+  }
+]
