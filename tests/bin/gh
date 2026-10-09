@@ -6,7 +6,9 @@
   gh pr checks 20 ...                                           -> pr_checks_20.json
   gh pr view 20 ...                                             -> pr_view_20.json
   gh issue list -R a/one --state open ...                       -> issue_list_open_a_one.json, else issue_list_a_one.json, else issue_list.json
-  gh auth token --user X                                        -> prints tok-X (an obvious fake, never a real token)
+  gh auth token --user X                                        -> prints tok-X on stdout (an obvious fake, never a real
+                                                                   token) and an update-notice warning on stderr, like gh:
+                                                                   only stdout is the token, so joining the streams fails
   gh repo view ...                                              -> repo_view.json
 
 A missing fixture answers like GitHub does for an unknown path: exit 1. Anything that would
@@ -20,6 +22,8 @@ With FAKE_GH_API_WRITE=1, a non-GET api call answers ok: logged, never sent.
 With FAKE_GH_COMMENT=1, `pr comment N -R o/r` answers https://github.com/o/r/pull/N#issuecomment-1: logged, never sent.
 With FAKE_GH_EDIT=1, `issue edit`, `issue comment` and `issue reopen` answer the issue's URL: logged, never sent.
 With FAKE_GH_MERGE=1, `pr merge N -R o/r` answers that it merged: logged, never sent.
+With FAKE_GH_TOKEN=fail|two|empty, `auth token` fails (the stale token still hits stdout, the
+reason goes to stderr) / prints two lines on stdout / prints nothing on stdout (issue #27).
 """
 import json
 import os
@@ -63,7 +67,20 @@ def main(args: list[str]) -> int:
         with open(os.environ["FAKE_GH_ENV_LOG"], "a") as log:
             log.write(json.dumps({"args": args, "GH_TOKEN": os.environ.get("GH_TOKEN")}) + "\n")
     if args[:3] == ["auth", "token", "--user"]:
-        print(f"tok-{args[3]}")
+        # issue #27: gh writes update notices and keyring warnings to stderr; stdout alone is the token.
+        # Every success prints one alongside tok-X, so code that joins the streams stores the warning in
+        # GH_TOKEN and the token tests catch it.
+        if os.environ.get("FAKE_GH_TOKEN") == "fail":      # not logged in: the stale token still hits stdout
+            print(f"tok-{args[3]}")
+            print(f"fake gh: no token for {args[3]} (not logged in)", file=sys.stderr)
+            return 1
+        if os.environ.get("FAKE_GH_TOKEN") == "two":       # a stdout that is not exactly one line
+            print(f"tok-{args[3]}\na second line gh would never print")
+        elif os.environ.get("FAKE_GH_TOKEN") == "empty":   # a stdout without the token
+            pass
+        else:
+            print(f"tok-{args[3]}")
+        print("warning: fake gh: an update notice like gh's own; stdout alone is the token", file=sys.stderr)
         return 0
     if args[:2] == ["issue", "create"] and os.environ.get("FAKE_GH_CREATE"):
         print(f"https://github.com/{args[args.index('-R') + 1]}/issues/{os.environ['FAKE_GH_CREATE']}")
