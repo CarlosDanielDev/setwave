@@ -428,6 +428,12 @@ class Repo:
         return json.loads(self.gh(["pr", "list", "-R", self.slug, "--state", "merged", "--limit", "100", "--search", search,
                                    "--json", "number,body,headRefName"]))
 
+    def prs_for_head(self, branch: str) -> list[dict]:
+        """Every PR whose head is this branch, any state. GitHub is the truth here: a squash merge and a
+        remote branch deleted after the merge are both invisible to `git branch --merged`."""
+        return json.loads(self.gh(["pr", "list", "-R", self.slug, "--state", "all", "--head", branch,
+                                   "--limit", "200", "--json", "number,state,headRefName"]))
+
     def pr_checks(self, n: int) -> dict[str, str]:
         """name -> bucket: pass | fail | pending | skipping | cancel (gh's own normalisation)."""
         ok, out = self.gh_ok(["pr", "checks", str(n), "-R", self.slug, "--json", "name,bucket"])
@@ -2063,31 +2069,74 @@ def cmd_close_parents(default: Repo | None, a):
                 print(f"closed {k}")
 
 
+def du_kb(path: Path) -> int:
+    """The size of a directory in KB (`du -sk`), 0 when it cannot be read."""
+    ok, out = sh_ok(["du", "-sk", str(path)])
+    parts = out.split() if ok else []
+    return int(parts[0]) if parts else 0
+
+
+def fmt_kb(kb: int) -> str:
+    return f"{kb / 1024:.1f} MB" if kb >= 1024 else f"{kb} KB"
+
+
 def cmd_cleanup(default: Repo | None, a):
+    """Worktrees whose work lives somewhere else go, with the disk they held: a merged PR's (the truth for
+    a squash merge and a deleted remote, which `--merged` never sees), a closed one with --include-closed,
+    an empty seat. An open PR (another epic's issue at work), a dispatch stamp, dirt or an unpushed head
+    always keep it. Branches stay: a branch is cheap, a worktree is not."""
     repos = [Repo.get(s) for s in a.slugs] if a.slugs else [default] if default else []
+    if a.stale_days is not None and a.stale_days < 0:
+        raise SystemExit(f"--stale-days wants N >= 0 days, got {a.stale_days}")
+    if a.yes and a.stale_days is None:
+        raise SystemExit("--yes only matters with --stale-days: it removes the stale worktrees")
+    total_kb, removed_n = 0, 0
     for repo in repos:
         repo.fetch()
-        merged = {l.strip().replace("origin/", "") for l in repo.git(["branch", "-r", "--merged", f"origin/{repo.base}"]).splitlines()}
-        for block in repo.git(["worktree", "list", "--porcelain"]).split("\n\n"):
-            m = re.search(r"^worktree (.+)$", block, re.M)
-            b = re.search(r"^branch refs/heads/(.+)$", block, re.M)
-            if not m or not b:
-                continue
-            wt = Path(m.group(1))
-            if wt == repo.root or not re.match(rf"{re.escape(repo.worktree(0).name[:-1])}\d+$", wt.name):
-                continue
-            branch = b.group(1)
-            dirty = bool(repo.git(["status", "--porcelain"], cwd=wt).strip())
-            ok, unpushed = repo.git_ok(["log", "--oneline", "@{u}.."], cwd=wt)
-            if dirty or (ok and unpushed.strip()) or branch not in merged:
-                print(f"KEEP {wt.name}: dirty={dirty} unpushed={bool(unpushed.strip()) if ok else '?'} merged={branch in merged}")
-                continue
-            if a.dry_run:
-                print(f"would remove {wt}")
-            else:
+        for wt, branch, _n in issue_worktrees(repo):
+            def remove(why: str) -> None:
+                nonlocal total_kb, removed_n
+                kb = du_kb(wt)
+                if a.dry_run:
+                    print(f"would remove {wt.name}: {why}, {fmt_kb(kb)}")
+                    return
                 repo.git(["worktree", "remove", str(wt)])
-                print(f"removed {wt.name} (branch {branch} kept)")
+                total_kb, removed_n = total_kb + kb, removed_n + 1
+                print(f"removed {wt.name}: {why}, reclaimed {fmt_kb(kb)} (branch {branch} kept)")
+            if repo.git(["status", "--porcelain"], cwd=wt).strip():
+                print(f"KEEP {wt.name}: dirty")
+                continue
+            ok, remote = repo.git_ok(["rev-parse", "--verify", "--quiet", f"origin/{branch}"])
+            if ok and remote.strip() != repo.git(["rev-parse", "HEAD"], cwd=wt).strip():
+                print(f"KEEP {wt.name}: unpushed (origin/{branch} is behind)")
+                continue
+            pr = next(iter(repo.prs_for_head(branch)), None)
+            state, num = (pr or {}).get("state"), (pr or {}).get("number")
+            if state == "MERGED":
+                remove(f"PR #{num} merged")
+            elif state == "CLOSED":
+                if a.include_closed:
+                    remove(f"PR #{num} closed without merge (--include-closed)")
+                else:
+                    print(f"KEEP {wt.name}: closed without merge: `--include-closed` to remove")
+            elif state == "OPEN":
+                print(f"KEEP {wt.name}: PR #{num} open (in progress)")
+            elif int(repo.git_ok(["rev-list", "--count", f"origin/{repo.base}..HEAD"], cwd=wt)[1] or 0):
+                days = round((time.time() - last_activity(repo, wt, _epoch(stamp_of(wt).get("dispatched_at")))) / 86400)
+                if a.stale_days is not None and days >= a.stale_days:
+                    if a.yes:
+                        remove(f"stale: nothing changed for {days} days and no PR")
+                    else:
+                        print(f"STALE {wt.name}: no PR, newest change {days} days ago, {fmt_kb(du_kb(wt))} — `--yes` to remove")
+                else:
+                    print(f"KEEP {wt.name}: no PR, newest change {days} days ago")
+            elif stamp_of(wt):
+                print(f"KEEP {wt.name}: dispatched, no commit yet")
+            else:
+                remove("empty: no PR, no commits")
         repo.git(["worktree", "prune"])
+    if removed_n:
+        print(f"reclaimed {fmt_kb(total_kb)} from {removed_n} worktree(s)")
 
 
 # ---------------------------------------------------------------- sweep
@@ -2388,7 +2437,7 @@ def cmd_doctor(default: Repo | None, a) -> None:
             untouched = (not r.git_ok(["rev-parse", "--verify", f"origin/{branch}"])[0] and not r.git(["log", "--oneline", f"origin/{r.base}..HEAD"], cwd=wt).strip()
                          and not (wt / STAMP).exists() and not r.git(["status", "--porcelain"], cwd=wt).strip())
             if branch in merged or untouched:
-                stale.append(wt.name)          # merged, or never dispatched, pushed, committed or edited: leftovers, `wave cleanup`
+                stale.append((wt.name, du_kb(wt)))  # merged, or never dispatched, pushed, committed or edited: leftovers, `wave cleanup`
             elif no_progress(stamp_of(wt)) >= RETRY_CEILING:
                 exhausted.append((wt, n))      # past the retry ceiling: dispatch refuses it, the sweep escalates
             elif not pr_for_issue(r, n):       # unmerged work with no PR: an agent at work, or one that died
@@ -2410,7 +2459,8 @@ def cmd_doctor(default: Repo | None, a) -> None:
             found = sweep_epic(tree(er, en))
             checks.append((f"state sweep of {key(er, en)} (claimed done and closed leaves, against merged PRs)", not found,
                            "; ".join(f"{f['key']} {f['kind']}" for f in found) or "clean", False))
-        checks.append(("no leftover worktrees (merged or empty)", not stale, (", ".join(stale) + " — `wave cleanup`") if stale else "none", False))
+        checks.append(("no leftover worktrees (merged or empty)", not stale,
+                       (", ".join(nm for nm, _ in stale) + f" — {fmt_kb(sum(kb for _, kb in stale))} total — `wave cleanup`") if stale else "none", False))
         gate_left = [w for w in re.findall(r"^worktree (.+)$", r.git(["worktree", "list", "--porcelain"]), re.M) if Path(w).name.startswith(CHAIN_GATE_PREFIX)]
         checks.append(("no leftover chain-gate worktree (an interrupted `order --run-gate`)", not gate_left,
                        "; ".join(f"leftover {w} — `git worktree remove --force {w}` (`git worktree prune` if the directory is gone)" for w in gate_left) or "none", False))
@@ -2574,7 +2624,10 @@ GUARANTEES = [
     ("no dispatch when doctor finds a hard failure", "cmd_dispatch -> cmd_doctor", "dispatch refused", False),
     ("no dispatch of an issue that is not READY", "cmd_dispatch -> premises_for", "refusal lists the failed premises", False),
     ("an existing worktree is kept, never recreated", "cmd_dispatch", "prints 'worktree exists'", False),
-    ("cleanup removes only worktrees that are clean, pushed and merged", "cmd_cleanup", "KEEP lines with the reason", False),
+    ("cleanup removes only worktrees that are clean, pushed and merged", "cmd_cleanup", "KEEP lines with the reason", True),
+    ("cleanup decides by the PR, not by `--merged`: a merged PR's worktree goes (a squash merge and a deleted remote included), a closed-without-merge one stays until --include-closed, an open PR, a dispatch stamp, dirt or an unpushed head always stay; every removal prints the disk it reclaims and the total", "cmd_cleanup -> Repo.prs_for_head, du_kb", "removed k-6: PR #40 merged, reclaimed 12 KB (branch feat/6-merged kept); KEEP k-8: PR #42 open (in progress)", True),
+    ("cleanup --stale-days N lists kept worktrees with no open PR and nothing newer than N days, with their size, and removes them only with --yes", "cmd_cleanup --stale-days", "STALE k-9: no PR, newest change 40 days ago, 12 KB — `--yes` to remove", True),
+    ("doctor reports leftover worktrees with their total size", "cmd_doctor -> du_kb", "! no leftover worktrees (merged or empty): k-20 — 24 KB total — `wave cleanup`", True),
     ("plan refuses to run twice on the same directory or titles", "cmd_plan", "numbers.json / duplicate titles refusal", False),
     ("adopt turns a milestone, a label or explicit refs into an epic: sub-issues attached, textual dependencies (depends on / blocked by / after / needs, cross-repo) wired as blocked_by; an issue that already has a parent is reported, not moved", "cmd_adopt -> textual_deps, Repo.parent", "adopt report: attached / blocked by / already has a parent — reported, not moved", True),
     ("adopt reads before it writes: a second run attaches nothing twice, wires nothing twice, comments nothing twice", "cmd_adopt (sub_issues, blocked_by and comments read before every write)", "already a sub-issue / already blocked by; the second run makes no write call", True),
@@ -2920,7 +2973,7 @@ def main(argv=None):
     x = s.add_parser("merge", help="merge PRs in order, one at a time, CI green before each"); x.add_argument("prs", nargs="*"); x.add_argument("--yes", action="store_true"); x.add_argument("--plan", help="plan file from `order --plan`: refuses if the base or any PR head moved since"); x.add_argument("--force", action="store_true"); x.add_argument("--squash", action="store_true"); x.add_argument("--ci-timeout", type=int, default=1200); x.add_argument("--wait-base-ci", action="store_true")
     x = s.add_parser("resolve", help="merge the base into a conflicting PR's branch in its worktree, gate, push (never --force), comment; a conflict is left for you, then --continue"); x.add_argument("pr"); x.add_argument("--continue", dest="cont", action="store_true")
     x = s.add_parser("close-parents", help="close parents whose sub-issues are all closed"); x.add_argument("epic"); x.add_argument("--include-epic", action="store_true"); x.add_argument("--dry-run", action="store_true")
-    x = s.add_parser("cleanup", help="remove worktrees that are clean, pushed and merged"); x.add_argument("slugs", nargs="*"); x.add_argument("--dry-run", action="store_true")
+    x = s.add_parser("cleanup", help="remove worktrees whose work lives elsewhere (a merged PR, an empty seat), printing the disk each removal reclaims; branches stay"); x.add_argument("slugs", nargs="*"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--include-closed", action="store_true", help="also remove worktrees whose PR closed without merging"); x.add_argument("--stale-days", type=int, metavar="N", help="also list kept worktrees with no open PR and nothing newer than N days, with their size; with --yes, remove those too"); x.add_argument("--yes", action="store_true", help="with --stale-days: remove the stale worktrees as well")
     x = s.add_parser("status", help="tree with states; --post comments it on the epic"); x.add_argument("epic"); x.add_argument("--post", action="store_true")
     x = s.add_parser("sweep", help="re-verify claimed done and closed leaves against merged PRs, and the retry ceiling; read-only unless --fix"); x.add_argument("epic"); x.add_argument("--fix", action="store_true", help="apply the state fixes (untick, reopen, apply the ledger) and comment the escalations")
     x = s.add_parser("lint", help="check issues carry what /wave needs"); x.add_argument("issues", nargs="+")
