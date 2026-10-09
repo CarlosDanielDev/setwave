@@ -15,6 +15,8 @@ Regras inegociáveis:
 - NUNCA execute ação destrutiva contra dados reais (deleção, purge, migração em banco real); testes usam dobles e tempdir.
 - Evidência antes de afirmação: nada de "verde" sem a saída colada, exit code por passo (nada de `| tail` escondendo o código). Mutation-check em toda guarda nova: remova a proteção, veja o teste falhar, restaure, cole as duas saídas.
 
+{{PROFILE}}
+
 ## 1. Onde
 
 Worktree JÁ CRIADA: `{{WORKTREE}}`, branch `{{BRANCH}}`, nascida de `origin/{{BASE}}` = `{{SHA}}` em {{DATE}} — **carimbo de hora, não fato**. Primeiro comando:

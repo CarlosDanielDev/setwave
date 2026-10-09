@@ -76,7 +76,7 @@ The last status comment on the epic is the paper trail. A single view across all
 | --- | --- | --- |
 | preflight | `wave doctor` — gh, git ≥ 2.38, clean checkout, real gate, protected paths, dead-agent and leftover worktrees, half-extracted crates in the cargo cache (`--fix-cache` moves them aside), disk and size of the batch; `dispatch` refuses on ✗, `dispatch --warm` runs `cargo fetch` once first | the script |
 | watch agents | `wave agents` — every issue worktree: minutes since dispatch, minutes since the newest change, open PR, and a verdict (`working`, `quiet`, `likely dead`, `done`); `doctor` names the likely dead with their recovery | files and git, never processes |
-| discover | `wave facts` — remote, base branch, gate from CI or manifest, protected paths | the repo |
+| discover | `wave facts` — remote, base branch, gate from CI or manifest, protected paths, and the repo's profile: its own orchestration, one provider per phase of the loop | the repo |
 | find the wave | `wave next <epic> --batch 4` — every open leaf in exactly one state: blocked, in progress, done-unclosed, worktree, ready | GitHub |
 | explain | `wave why <issue>` — the premises behind READY / NOT READY, with evidence | the script |
 | dispatch | `wave dispatch <issues>` — worktrees from `origin/<base>`, CodeGraph index, one prompt file per issue | Claude spawns one agent per file |
@@ -121,7 +121,23 @@ Conflicts are resolved by merging the base branch *into* the PR's branch and pus
 
 `protected`: paths a PR must not touch (`verify` fails if it does). `serial`: paths where two PRs cannot land in one batch — a migrations list, a generated index, a version file — because a textual merge cannot see an index collision; `order` flags them to land one after the other in `blocked_by` order.
 
-- The gate is read from the CI workflow (`run:` lines), or from the manifest (`Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`, `Package.swift`). Steps that are GitHub *actions* are not seen yet ([#3](https://github.com/CarlosDanielDev/setwave/issues/3)); declare those.
+- The gate is read from the CI workflow (`run:` lines), or from the manifest (`Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`, `Package.swift`, or a `Makefile` with `test`/`check`/`lint`/`ci` targets). Steps that are GitHub *actions* are not seen yet ([#3](https://github.com/CarlosDanielDev/setwave/issues/3)); declare those.
+
+## Profiles — the repo's own orchestration
+
+A repository often carries its own way of working: skills, commands, agent definitions, hooks, issue templates, a Makefile, rule files. The plugin reads that orchestration the way it reads the gate — by name and location, deterministic — and renders it into every agent prompt as a **profile**: one provider per phase of the loop (define an issue, prepare a handoff, start work, sync before dispatch, agent rules, review, enforcement, gate, worktree location). `wave facts` prints it, each phase with its provider and where it came from — `detected` (a known name on disk), `declared` (a `phases` key in `.wave.json`), or `default` (the plugin's stack, the one proven on the first epic).
+
+Detection is by convention: `.claude/skills/define` is the define phase; `.claude/skills/issue-handoff` the handoff; `.claude/skills/kickoff` or `.claude/commands/start-*` the kickoff; a `Makefile` `sync` target or `.claude/commands/sync-main` the sync; `CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md` the rule files; `.claude/agents/*review*` and `*-qa*` the review; `.claude/hooks/*` and `.claude/settings.json` hooks the enforcement. A `CLAUDE.md`-only repo gets its rules named and the default stack for everything else; a hooks-only repo gets its hooks named; a repo with nothing gets the plain default stack, and the prompt says so.
+
+What convention cannot know, `.wave.json` declares — `phases` overrides any phase, and `agent_skills` and `rules` add to what was found:
+
+```json
+{"phases": {"define": "define", "handoff": "issue-handoff", "kickoff": "kickoff",
+            "sync": "make sync-main", "agent_skills": ["git-workflow", "work-tracking"],
+            "rules": ["docs/CONVENTIONS.md"]}}
+```
+
+`facts` shows what was detected and what was not, so the line to add is obvious. The agent prompt names the repo's skills in order, before the default stack; the hooks it will trip on; and the rule files to read first — never their contents, so the prompt stays the same size in every repo. A repo rule that contradicts a non-negotiable (no AI attribution, no destructive git) loses, and the agent says so in its PR. `dispatch` runs the sync provider before creating any worktree (`make sync`, or the command `phases.sync` declares; a `.claude/commands/*` file is prose for the agent, only named). `doctor` lists the repo's hooks and warns when one cannot run (not executable, or its interpreter missing — the dispatch-contract hook would otherwise fail silently for every agent), and warns when the `Makefile` or a rule file names a command the gate does not contain.
 
 ## What an issue needs
 
