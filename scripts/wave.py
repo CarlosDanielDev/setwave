@@ -49,6 +49,9 @@ REGISTRY = CONFIG_DIR / "repos.json"
 
 ATTRIBUTION = re.compile(r"co-authored-by:\s*claude|generated with \[?claude code|noreply@anthropic\.com", re.I)
 CLOSES = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?::\s*|\s+)(?:([\w.-]+/[\w.-]+))?#(\d+)\b", re.I)
+# textual dependencies `wave adopt` wires as real blocked_by: a verb, then a ref — a bare #N is this repo's
+# issue, owner/name#N another repo's. A ref with no verb in front of it is a mention, not a dependency.
+DEPENDS = re.compile(r"\b(?:depends on|blocked by|needs|after)\s+((?:[\w.-]+/[\w.-]+)?)#(\d+)", re.I)
 BRANCH_IN_BODY = re.compile(r"git worktree add -b\s+(\S+)")
 CODEGRAPH_IN_BODY = re.compile(r'codegraph explore "([^"]+)"')
 REF = re.compile(r"^(?:(?P<slug>[\w.-]+/[\w.-]+))?#?(?P<n>\d+)$")
@@ -345,6 +348,13 @@ class Repo:
         if not ok:
             return []
         return self.api(f"repos/{self.slug}/issues/{n}/dependencies/blocked_by?per_page=100", paginate=True) or []
+
+    def parent(self, n: int) -> dict | None:
+        """The issue's parent (the sub-issue API's read end), or None when it has none — or the server has no such endpoint."""
+        ok, _ = self.gh_ok(["api", f"repos/{self.slug}/issues/{n}/parent"])
+        if not ok:
+            return None
+        return self.api(f"repos/{self.slug}/issues/{n}/parent")
 
     def open_prs(self) -> list[dict]:
         if self._prs is None:
@@ -2158,6 +2168,9 @@ GUARANTEES = [
     ("an existing worktree is kept, never recreated", "cmd_dispatch", "prints 'worktree exists'", False),
     ("cleanup removes only worktrees that are clean, pushed and merged", "cmd_cleanup", "KEEP lines with the reason", False),
     ("plan refuses to run twice on the same directory or titles", "cmd_plan", "numbers.json / duplicate titles refusal", False),
+    ("adopt turns a milestone, a label or explicit refs into an epic: sub-issues attached, textual dependencies (depends on / blocked by / after / needs, cross-repo) wired as blocked_by; an issue that already has a parent is reported, not moved", "cmd_adopt -> textual_deps, Repo.parent", "adopt report: attached / blocked by / already has a parent — reported, not moved", True),
+    ("adopt reads before it writes: a second run attaches nothing twice, wires nothing twice, comments nothing twice", "cmd_adopt (sub_issues, blocked_by and comments read before every write)", "already a sub-issue / already blocked by; the second run makes no write call", True),
+    ("adopt never edits a body: a missing `## Done when` gets a comment asking for observable criteria, and the lint output rides the adopt report", "cmd_adopt -> lint_body", "commented: no `## Done when`; lint: ...", True),
     ("every open leaf is in exactly one state", "candidates (assert)", "blocked | in-progress | done-unclosed | agent-exhausted | worktree | ready", True),
     ("an open issue whose every Done-when item is ticked or struck is never dispatched", "candidates + premises_for", "done-unclosed: ... close it or add an item", True),
     ("verify flags AI attribution in body or commits", "verify_one", "AI-ATTRIBUTION", True),
@@ -2300,6 +2313,150 @@ def cmd_plan(default: Repo | None, a):
     print(f"\n{len(rows)} issues created; key->number map in {d / 'numbers.json'}")
 
 
+# ---------------------------------------------------------------- adopt
+
+ADOPT_NOTE_TAG = "`wave adopt`"
+ADOPT_NOTE = (ADOPT_NOTE_TAG + ": this issue has no `## Done when` list, so `next` cannot tell done from to-do "
+              "and a PR cannot carry its ledger. Add one — every item an observable criterion: a test that "
+              "passes, a command that prints what it should.")
+
+
+def textual_deps(text: str, slug: str) -> set[tuple[str, int]]:
+    """The (owner/name, n) of every textual dependency in `text`: a verb (`depends on`, `blocked by`, `after`,
+    `needs`) followed by a ref — a bare #N is this repo's issue, `owner/name#N` another repo's."""
+    return {(m.group(1) or slug, int(m.group(2))) for m in DEPENDS.finditer(text)}
+
+
+def pick_by_selector(issues: list[dict], milestone: str | None, label: str | None) -> list[dict]:
+    """The issues that carry the milestone title or the label, in `gh issue list` order."""
+    if milestone:
+        return [i for i in issues if (i.get("milestone") or {}).get("title") == milestone]
+    return [i for i in issues if label in {l["name"] for l in i["labels"]}]
+
+
+def cmd_adopt(default: Repo | None, a):
+    """Turn an existing milestone, label or explicit issue list into an epic the plugin can run: `--epic N`
+    designates the epic, or one is created titled after the milestone/label with the `epic` label. Every
+    selected open issue is attached as a sub-issue — one that already has a parent is reported, not moved —
+    and the textual dependencies written in bodies and comments become real `blocked_by`. A body without a
+    `## Done when` gets a comment asking for observable criteria, never an edit, and the `wave lint` output
+    rides the report. Every read happens before any write, so a second run adds nothing twice."""
+    repo = Repo.get(a.slug) if a.slug else default
+    if repo is None:
+        raise SystemExit("run inside the repo or pass --slug owner/name")
+    if bool(a.milestone) + bool(a.label) + bool(a.issues) != 1:
+        raise SystemExit('select the issues one way: --milestone "<title>", --label <name>, or issue refs')
+    if a.issues and not a.epic:
+        raise SystemExit("explicit refs need an epic to join: --epic N")
+    issues = json.loads(repo.gh(["issue", "list", "-R", repo.slug, "--state", "open", "--limit", "500",
+                                 "--json", "number,id,title,body,state,labels,milestone"]))
+    if a.issues:
+        picked = []
+        for ref in a.issues:
+            r, n = parse_ref(ref, repo)
+            if r.slug != repo.slug:
+                raise SystemExit(f"{key(r, n)}: adopt adopts one repo's issues at a time; run it again for {r.slug}")
+            iss = r.issue(n)
+            if iss["state"] != "open":
+                print(f"{key(r, n)}: closed, not adopted")
+                continue
+            picked.append(iss)
+    else:
+        picked = pick_by_selector(issues, a.milestone, a.label)
+    if not picked:
+        sel = f'milestone "{a.milestone}"' if a.milestone else f'label "{a.label}"' if a.label else "the refs given"
+        raise SystemExit(f"no open issue selected: nothing in {repo.slug} carries {sel}")
+
+    epic_repo, epic_n, created = repo, None, False
+    if a.epic:
+        epic_repo, epic_n = parse_ref(a.epic, repo)
+    else:  # read before create: a second adopt finds the epic the first one made and reuses it
+        title = a.milestone or a.label
+        hit = next((i for i in issues if i["title"] == title), None)
+        epic_n = hit["number"] if hit else None
+    where = f'milestone "{a.milestone}"' if a.milestone else f'label "{a.label}"' if a.label else "explicit refs"
+    print(f"adopt {repo.slug}: {where} — {len(picked)} open issue(s)")
+
+    attached = set()
+    if epic_n is not None:
+        attached = {(slug_of_api(s["repository_url"]), s["number"]) for s in epic_repo.sub_issues(epic_n)}
+
+    # reads: parent, existing blockers, comments — per issue, before any write below
+    entries, unreadable = [], []
+    for iss in sorted(picked, key=lambda i: i["number"]):
+        n, body = iss["number"], iss.get("body") or ""
+        bodies = [c.get("body") or "" for c in repo.api(f"repos/{repo.slug}/issues/{n}/comments")]
+        body_deps = textual_deps(body, repo.slug)
+        comment_deps = textual_deps("\n".join(bodies), repo.slug) - body_deps
+        blockers, unread = [], []
+        for slug, dn in sorted((body_deps | comment_deps) - {(repo.slug, n)}):
+            try:
+                blockers.append((slug, dn, Repo.get(slug).issue(dn)["id"]))
+            except SystemExit:
+                unread.append((slug, dn, n))
+        unreadable += unread
+        entries.append({"n": n, "id": iss["id"], "title": iss["title"], "parent": repo.parent(n),
+                        "comment_deps": comment_deps, "blockers": blockers,
+                        "wired": {(slug_of_api(b["repository_url"]), b["number"]) for b in repo.blocked_by(n)},
+                        "attach": epic_n is None or (repo.slug, n) not in attached,
+                        "epic_itself": epic_n is not None and (epic_repo.slug, epic_n) == (repo.slug, n),
+                        "nudge": done_when(body) is None
+                                 and not any(ADOPT_NOTE_TAG in t and "## Done when" in t for t in bodies),
+                        "lint": lint_body(body, n, issue_type(iss))})
+
+    if epic_n is None and not a.dry_run:
+        name = a.milestone or a.label
+        url = repo.gh(["issue", "create", "-R", repo.slug, "--title", name, "--label", "epic", "--body",
+                       f"`wave adopt` gathered the open issues of {repo.slug} that carried the "
+                       f"{'milestone' if a.milestone else 'label'} \"{name}\" under this issue and wired "
+                       f"their textual dependencies as blocked_by."])
+        epic_n, created = int(url.strip().rstrip("/").split("/")[-1]), True
+    if epic_n is None:  # a dry run with no epic to reuse: only the promise of one
+        print(f'epic: would create one titled "{a.milestone or a.label}" with the `epic` label')
+    else:
+        print(f"epic: {key(epic_repo, epic_n)} (" + (f"created from {where}, label `epic`)" if created else "existing)"))
+
+    counts = {"attached": 0, "wired": 0, "commented": 0}
+    for e in entries:
+        n, notes = e["n"], []
+        if e["parent"] is not None:
+            notes.append("already has a parent: " + key(Repo.get(slug_of_api(e["parent"]["repository_url"])),
+                                                        e["parent"]["number"]) + " — reported, not moved")
+        elif e["epic_itself"]:
+            notes.append("is the epic")
+        elif not e["attach"]:
+            notes.append("already a sub-issue")
+        elif a.dry_run:
+            notes.append("would attach as a sub-issue")
+        else:
+            epic_repo.api(f"repos/{epic_repo.slug}/issues/{epic_n}/sub_issues", "POST", {"sub_issue_id": e["id"]})
+            counts["attached"] += 1
+            notes.append("attached")
+        for slug, dn, bid in e["blockers"]:
+            if (slug, dn) in e["wired"]:
+                notes.append(f"already blocked by {slug}#{dn}")
+            elif a.dry_run:
+                notes.append(f"would wire blocked by {slug}#{dn}")
+            else:
+                repo.api(f"repos/{repo.slug}/issues/{n}/dependencies/blocked_by", "POST", {"issue_id": bid})
+                counts["wired"] += 1
+                notes.append(f"blocked by {slug}#{dn}" + (" (from a comment)" if (slug, dn) in e["comment_deps"] else ""))
+        if e["nudge"]:
+            if a.dry_run:
+                notes.append("would comment: no `## Done when`")
+            else:
+                repo.gh(["issue", "comment", str(n), "-R", repo.slug, "--body", ADOPT_NOTE])
+                counts["commented"] += 1
+                notes.append("commented: no `## Done when` (asked for observable criteria)")
+        print(f"  #{n} {e['title'][:50]} — " + ("; ".join(notes) if notes else "nothing to do"))
+        for m in e["lint"]:
+            print(f"      lint: {m}")
+    if unreadable:
+        print("could not read: " + ", ".join(f"{slug}#{dn} (wanted by #{n})" for slug, dn, n in unreadable))
+    print(f"{counts['attached']} sub-issue(s) attached, {counts['wired']} blocked_by wired, "
+          f"{counts['commented']} Done-when ask(s) commented" + (" — nothing written (--dry-run)" if a.dry_run else ""))
+
+
 # ---------------------------------------------------------------- main
 
 def main(argv=None):
@@ -2328,6 +2485,7 @@ def main(argv=None):
     x = s.add_parser("lint", help="check issues carry what /wave needs"); x.add_argument("issues", nargs="+")
     x = s.add_parser("tick", help="tick (--done) or strike (--strike + --why) items of an issue's `## Done when`, by index or text; what merge does with a PR's ledger"); x.add_argument("issue"); x.add_argument("--done", action="append", metavar="ITEM"); x.add_argument("--strike", action="append", metavar="ITEM"); x.add_argument("--why", action="append", metavar="REASON", help="one per --strike, in the same order"); x.add_argument("--dry-run", action="store_true", help="print the lines that would change, write nothing")
     x = s.add_parser("plan", help="create an epic's issues from <dir>/index.tsv + deps.tsv + <key>.md, wiring sub-issues and blocked_by"); x.add_argument("dir"); x.add_argument("--slug"); x.add_argument("--milestone"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--force", action="store_true")
+    x = s.add_parser("adopt", help="turn an existing milestone or label (or explicit refs) into an epic: attaches sub-issues, wires textual dependencies as blocked_by, comments what is missing"); x.add_argument("issues", nargs="*"); x.add_argument("--milestone"); x.add_argument("--label"); x.add_argument("--epic", help="an existing issue to designate as the epic; without it one is created titled after the milestone/label, with the `epic` label"); x.add_argument("--slug"); x.add_argument("--dry-run", action="store_true", help="print what would be wired and what could not be read; write nothing")
 
     x = s.add_parser("hooks", help="guard hooks: install [--dry-run] writes them into the project's .claude/settings.json (idempotent, backed up); status: active | missing | broken")
     x.add_argument("action", choices=["install", "status"]); x.add_argument("--dry-run", action="store_true")
@@ -2346,7 +2504,7 @@ def main(argv=None):
     try:
         {"repos": cmd_repos, "facts": cmd_facts, "next": cmd_next, "dispatch": cmd_dispatch, "prompt": cmd_prompt,
      "verify": cmd_verify, "judge": cmd_judge, "order": cmd_order, "merge": cmd_merge, "resolve": cmd_resolve, "close-parents": cmd_close_parents,
-             "cleanup": cmd_cleanup, "status": cmd_status, "lint": cmd_lint, "plan": cmd_plan, "why": cmd_why, "doctor": cmd_doctor,
+             "cleanup": cmd_cleanup, "status": cmd_status, "lint": cmd_lint, "plan": cmd_plan, "adopt": cmd_adopt, "why": cmd_why, "doctor": cmd_doctor,
              "agents": cmd_agents, "tick": cmd_tick, "sweep": cmd_sweep, "hooks": cmd_hooks,
          "guarantees": cmd_guarantees}[a.cmd](default, a)
     except SystemExit as e:
