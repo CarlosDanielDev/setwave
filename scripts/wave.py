@@ -321,10 +321,25 @@ class Repo:
             return ["go vet ./...", "go test ./..."]
         if (r / "Package.swift").exists():
             return ["swift build", "swift test"]
+        make = [f"make {t}" for t in GATE_TARGETS if t in makefile_targets(r)]
+        if make:
+            return make
         return ["<no gate found: read the repo, decide, and write it to .wave.json>"]
 
     def has_codegraph(self) -> bool:
         return (self.root / ".codegraph").exists()
+
+    def profile(self) -> dict:
+        """The repo's own orchestration: detect_profile's phases plus the gate and the worktree location,
+        which read the config and CI that only this class sees."""
+        p = detect_profile(self.root, self.cfg)
+        gate = [(c, s) for c, s in self.gate_sources() if not c.startswith("<")]
+        p["phases"]["gate"] = {"provider": [c for c, _ in gate],
+                               "source": {"config": "declared"}.get(gate[0][1], "detected") if gate else "default"}
+        prefix = self.cfg.get("worktree_prefix")
+        p["phases"]["worktree"] = ({"provider": prefix, "source": "declared"} if prefix
+                                   else {"provider": "../<repo>-<N>", "source": "default"})
+        return p
 
     def fetch(self) -> None:
         self.git(["fetch", "-q", "--prune", "origin"])
@@ -368,6 +383,253 @@ class Repo:
             if len(parts) >= 2:
                 res[parts[0]] = parts[1]
         return res
+
+
+# ---------------------------------------------------------------- profile
+
+GATE_TARGETS = ("test", "check", "lint", "ci")  # Makefile targets offered as gate candidates, in this order
+RULE_FILES = ("CLAUDE.md", "AGENTS.md", "CONTRIBUTING.md")
+KNOWN_INTERPRETERS = {"python3", "python", "bash", "sh", "zsh", "node", "ruby", "perl"}
+SKILLS_OF_A_PHASE = {"define", "kickoff", "issue-handoff"}  # named by their own phase, not by the skills line
+# gate-shaped commands, the same family `ci_gate` reads from workflow `run:` lines (plus `ruff`): what the
+# docs may promise. Anything else in a CLAUDE.md is prose, not a gate candidate.
+DOC_GATE_CMD = re.compile(r"((?:cargo|npm|pnpm|yarn|bun|pytest|python3? -m|uv run|go |make|mix|gradle|\./gradlew|"
+                          r"swift|xcodebuild|dotnet|flutter|dart|ruff)\b.*)$")
+
+
+def makefile_targets(root: Path) -> list[str]:
+    """Every runnable target the root Makefile defines (a `name:` line at column 0), in file order."""
+    mk = root / "Makefile"
+    if not mk.exists():
+        return []
+    out = []
+    for line in mk.read_text(errors="replace").splitlines():
+        m = re.match(r"([^\s:=][^:=]*?)\s*:{1,2}(?:\s|$)", line)
+        for t in m.group(1).split() if m else []:
+            if not t.startswith((".", "%", "$")) and t not in out:
+                out.append(t)
+    return out
+
+
+def _stems(d: Path) -> list[str]:
+    """Names of the files in d, extension dropped, sorted — the `.claude/commands`, `agents` and
+    `issue-templates` convention is one definition per file."""
+    return sorted(p.stem for p in d.iterdir() if p.is_file() and not p.name.startswith(".")) if d.is_dir() else []
+
+
+def _skill_names(root: Path) -> list[str]:
+    """Skill names under `.claude/skills/`: a directory is one skill, so is a bare `.md` file."""
+    d = root / ".claude" / "skills"
+    if not d.is_dir():
+        return []
+    return sorted(p.name if p.is_dir() else p.stem for p in d.iterdir() if not p.name.startswith("."))
+
+
+def _src(declared: bool, detected: bool) -> str:
+    return " + ".join(label for label, on in (("declared", declared), ("detected", detected)) if on) or "default"
+
+
+def hook_health(root: Path) -> list[dict]:
+    """Every hook the repo declares — files under `.claude/hooks/` and the commands `.claude/settings.json`
+    registers — with whether it can run. A hook that is not executable, or whose interpreter is missing,
+    fails silently for every agent meant to trip on it. A file a settings command runs through an
+    interpreter (`python3 x.py`) needs no executable bit."""
+    wired: set[str] = set()
+    commands: list[tuple[str, str | None, str | None, str | None]] = []
+    data, _ = load_settings(root / ".claude" / "settings.json")
+    if isinstance(data, dict):
+        for blocks in (data.get("hooks") or {}).values():
+            for b in blocks if isinstance(blocks, list) else []:
+                if not isinstance(b, dict):
+                    continue
+                for h in b.get("hooks") or []:
+                    cmd = h.get("command") if isinstance(h, dict) else None
+                    if cmd is not None and not isinstance(cmd, str):
+                        commands.append((str(cmd), None, None, "command is not a string"))
+                        continue
+                    if not cmd:
+                        continue
+                    try:
+                        toks = shlex.split(cmd)
+                    except ValueError as e:
+                        commands.append((cmd, None, None, f"cannot parse the command ({e})"))
+                        continue
+                    interp = Path(toks[0]).name if toks and Path(toks[0]).name in KNOWN_INTERPRETERS else None
+                    script = next((t for t in (toks[1:] if interp else toks)
+                                   if "/" in t or t.endswith((".py", ".sh", ".js", ".ts"))), None)
+                    commands.append((cmd, interp, script, None))
+                    if interp and script:
+                        p = Path(script)
+                        wired.add((p if p.is_absolute() else root / p).resolve().as_posix())
+    out = []
+    d = root / ".claude" / "hooks"
+    if d.is_dir():
+        for f in sorted(p for p in d.iterdir() if p.is_file()):
+            why = None
+            interp = None
+            first = f.read_text(errors="replace").splitlines()[:1]
+            if first and first[0].startswith("#!"):
+                toks = first[0][2:].split()
+                tok = toks[1] if toks and toks[0].endswith("env") and len(toks) > 1 else (toks[0] if toks else None)
+                interp = Path(tok).name if tok else None
+            if f.resolve().as_posix() not in wired and not os.access(f, os.X_OK):
+                why = "not executable (chmod +x)"
+            elif interp and shutil.which(interp) is None:
+                why = f"interpreter `{interp}` is not on PATH"
+            out.append({"path": f.relative_to(root).as_posix(), "interpreter": interp, "ok": why is None, "why": why})
+    for cmd, interp, script, broken in commands:
+        why = broken
+        if interp and shutil.which(interp) is None:
+            why = f"interpreter `{interp}` is not on PATH"
+        elif script:
+            sp = Path(script)
+            if not sp.is_absolute():
+                sp = root / sp
+            if not sp.exists():
+                why = f"names `{script}`, which does not exist"
+        out.append({"path": script or cmd, "command": cmd, "interpreter": interp, "ok": why is None, "why": why})
+    return out
+
+
+def doc_commands(root: Path) -> list[tuple[str, str]]:
+    """(command, where): the gate-shaped commands the repo's own docs tell people to run — the Makefile's
+    gate targets and the fenced command lines of the rule files. `doctor` warns when the gate does not
+    contain one: the docs promise it, the gate never runs it."""
+    out = [(f"make {t}", "Makefile") for t in GATE_TARGETS if t in makefile_targets(root)]
+    for doc in [f for f in RULE_FILES if (root / f).exists()]:
+        fence = False
+        try:
+            lines = (root / doc).read_text(errors="replace").splitlines()
+        except OSError:
+            continue  # a rule file that is a directory or unreadable: doctor has enough to say already
+        for line in lines:
+            if line.strip().startswith("```"):
+                fence = not fence
+            elif fence:
+                m = DOC_GATE_CMD.match(line.strip().lstrip("$ ").strip())
+                if m and m.group(1).strip() not in [c for c, _ in out]:
+                    out.append((m.group(1).strip(), doc))
+    return out
+
+
+def detect_profile(root: Path, cfg: dict) -> dict:
+    """The repo's own orchestration, by name and location, per phase: what `.wave.json` `phases` declares
+    is `declared`, a known name on disk is `detected`, what remains is the plugin's `default`. Detection
+    reads the checkout's working tree; the gate and the worktree location are added by `Repo.profile`."""
+    declared = cfg.get("phases")
+    if declared is None:
+        declared = {}
+    elif not isinstance(declared, dict):
+        raise SystemExit(f"{root}/.wave.json: `phases` must be an object with one key per phase "
+                         f"(define, handoff, kickoff, sync, rules, agent_skills, review, enforcement), "
+                         f"got {type(declared).__name__}")
+    for key in ("rules", "agent_skills"):
+        if key in declared and not isinstance(declared[key], list):
+            raise SystemExit(f"{root}/.wave.json: `phases.{key}` must be a list of names, got {type(declared[key]).__name__}")
+
+    def phase(name: str, detected=None, default=None):
+        if declared.get(name):
+            return {"provider": declared[name], "source": "declared"}
+        if detected:
+            return {"provider": detected, "source": "detected"}
+        return {"provider": default if default is not None else [], "source": "default"}
+
+    skills = _skill_names(root)
+    commands = _stems(root / ".claude" / "commands")
+    agents = _stems(root / ".claude" / "agents")
+    templates = _stems(root / ".claude" / "issue-templates")
+    targets = makefile_targets(root)
+    hooks = hook_health(root)
+    handoff = next((p for p in (root / ".claude" / "skills" / "issue-handoff" / "SKILL.md",
+                                root / ".claude" / "skills" / "issue-handoff.md") if p.exists()), None)
+    declared_rules = [r for r in declared.get("rules", []) if isinstance(r, str)] \
+        if isinstance(declared.get("rules"), list) else []
+    found_rules = [f for f in RULE_FILES if (root / f).exists()]
+    declared_skills = [s for s in declared.get("agent_skills", []) if isinstance(s, str)] \
+        if isinstance(declared.get("agent_skills"), list) else []
+    extra_skills = declared_skills + [s for s in skills if s not in SKILLS_OF_A_PHASE and s not in declared_skills]
+    kick = None
+    if not declared.get("kickoff"):
+        kick = "kickoff" if "kickoff" in skills else next((c for c in commands if c.startswith("start-")), None)
+    phases = {
+        "define": phase("define",
+                        detected="define" if "define" in skills else ("issue-templates" if templates else None),
+                        default="templates/issue-contract.md + `wave plan`"),
+        "handoff": phase("handoff", detected="issue-handoff" if handoff else None, default="`wave prepare` (#14)"),
+        "kickoff": phase("kickoff", detected=kick, default="the agent prompt's step 0"),
+        "sync": phase("sync",
+                      detected="make sync" if "sync" in targets else ("sync-main" if "sync-main" in commands else None),
+                      default="git fetch --prune"),
+        "rules": {"provider": declared_rules + [f for f in found_rules if f not in declared_rules],
+                  "source": _src(bool(declared_rules), bool(found_rules))},
+        "agent_skills": {"provider": extra_skills,
+                         "source": _src(bool(declared_skills), bool([s for s in skills if s not in SKILLS_OF_A_PHASE]))},
+        "review": phase("review", detected=[a for a in agents if fnmatch(a, "*review*") or fnmatch(a, "*-qa*")] or None,
+                        default="poka-yoke re-audit before the PR"),
+        "enforcement": phase("enforcement", detected=list(dict.fromkeys(h["path"] for h in hooks)) or None,
+                             default="none (the gate is the enforcement)"),
+    }
+    if handoff and phases["handoff"]["source"] == "detected":
+        phases["handoff"]["text"] = handoff.relative_to(root).as_posix()
+    return {"phases": phases, "skills": skills, "commands": commands, "agents": agents,
+            "hooks": hooks, "issue_templates": templates, "makefile_targets": targets}
+
+
+def profile_prompt(p: dict) -> str:
+    """The `{{PROFILE}}` block of the agent prompt: what the repo itself provides for each phase of the
+    loop, named so the agent expects it — or the plain default stack when nothing is found. Rule files
+    are named, never copied (the agent reads them; the prompt stays the same size in every repo)."""
+    ph = p["phases"]
+    skills = list(ph["agent_skills"]["provider"])
+    for name in ("kickoff", "define", "handoff"):
+        prov = ph[name]
+        if prov["source"] == "detected" and prov["provider"] not in skills:
+            skills.append(prov["provider"])
+    if not (skills or p["hooks"] or ph["rules"]["provider"] or p["agents"] or p["commands"] or p["issue_templates"]):
+        return ("Nenhuma orquestração própria detectada neste repositório (nada em `.claude/`, nenhum "
+                "CLAUDE.md/AGENTS.md/CONTRIBUTING.md): use a stack padrão acima como está.")
+    lines = ["Este repositório tem orquestração própria:",
+             ("- skills dele, nesta ordem, antes da stack padrão: " + ", ".join(f"`{s}`" for s in skills))
+             if skills else "- nenhuma skill própria: a stack padrão acima vale."]
+    if p["hooks"]:
+        lines.append("- hooks que se impõem (o Claude Code os roda; espere tropeçar neles): "
+                     + ", ".join("`" + h["path"] + (f" ({h['why']})" if h["why"] else "") + "`" for h in p["hooks"]))
+    if ph["rules"]["provider"]:
+        lines.append("- leia antes estes arquivos de regras: "
+                     + ", ".join(f"`{r}`" for r in ph["rules"]["provider"])
+                     + ". Regra do repo que contradiz as inegociáveis acima (atribuição de IA, `git` destrutivo) "
+                       "perde para elas — e você diz isso no PR.")
+    if ph["review"]["source"] == "detected":
+        lines.append("- review/QA é feito por: " + ", ".join(f"`{a}`" for a in ph["review"]["provider"]) + ".")
+    return "\n".join(lines)
+
+
+def sync_provider(repo: "Repo", dry_run: bool) -> str:
+    """The repo's own sync before any worktree is cut: `make sync`, or the command `phases.sync` declares.
+    A `.claude/commands/*` provider is prose for the agent, not a script: the prompt names it, nothing
+    runs here. A sync that fails refuses the dispatch — worktrees cut from an unsynced base are the
+    conflict `resolve` would spend an afternoon on."""
+    ph = repo.profile()["phases"]["sync"]
+    if ph["source"] == "default":
+        return ""
+    provider = ph["provider"]
+    if not isinstance(provider, str):
+        raise SystemExit(f"{repo.slug}: `phases.sync` must be a command (e.g. `make sync-main`), "
+                         f"got {type(provider).__name__}")
+    if (repo.root / ".claude" / "commands" / provider).exists():
+        msg = f"{repo.slug}: sync: `.claude/commands/{provider}` is repo prose for the agent, nothing to run here"
+        print(msg)
+        return msg
+    cmd = shlex.split(provider)
+    what = f"{repo.slug}: sync: `{' '.join(cmd)}` in {repo.root}"
+    if dry_run:
+        print(what + " (dry-run)")
+        return what + " (dry-run)"
+    print(what)
+    ok, out = sh_ok(cmd, cwd=repo.root, env=repo.env)
+    if not ok:
+        raise SystemExit(f"{repo.slug}: dispatch refused: the repo's sync provider `{' '.join(cmd)}` failed:\n{out}")
+    return what
 
 
 # ---------------------------------------------------------------- refs & tree
@@ -844,6 +1106,7 @@ def render_prompt(repo: Repo, iss: dict, branch: str, sha: str, parallel: int) -
         "CODEGRAPH_NOTE": "o repo tem `.codegraph/`; use `codegraph explore \"...\"` antes de grep/Read" if repo.has_codegraph()
                           else "sem índice CodeGraph aqui; se `codegraph` existir no PATH, rode `codegraph init .` na worktree primeiro",
         "ACCOUNT": f"conta gh `{repo.account}` (use `GH_TOKEN=$(gh auth token --user {repo.account})` nos comandos gh)" if repo.account else "conta gh ativa",
+        "PROFILE": profile_prompt(repo.profile()),
         "PARALLEL": str(max(parallel - 1, 0)),
     }
     for k, v in fields.items():
@@ -892,6 +1155,7 @@ def cmd_facts(default: Repo | None, a):
     for r in repos:
         print(json.dumps({"slug": r.slug, "root": str(r.root), "account": r.account or "(active)", "base": r.base,
                           "config_source": r.cfg_source, "gate": r.gate(), "gate_sources": dict(r.gate_sources()), "protected": r.protected, "codegraph": r.has_codegraph(),
+                          "profile": r.profile(),
                           "worktree_example": str(r.worktree(1)), "handoffs": str(r.handoffs)}, indent=2))
 
 
@@ -923,6 +1187,7 @@ def cmd_dispatch(default: Repo | None, a):
                 raise SystemExit(f"dispatch refused: {key(repo, n)} is not ready — {'; '.join(bad)}. `wave why {key(repo, n)}`")
     for repo in {r for r, _ in targets}:
         repo.fetch()
+        sync_provider(repo, a.dry_run)
         repo.handoffs.mkdir(exist_ok=True)
         if a.warm:  # archives downloaded once, here, so the worktrees' parallel builds only extract
             if not (repo.root / "Cargo.toml").exists():
@@ -1958,6 +2223,16 @@ def cmd_doctor(default: Repo | None, a) -> None:
         checks.append(("gate is declared and real", bool(gate) and not gate[0].startswith("<"), " && ".join(gate), True))
         for action in r.ci_gate()[1]:
             checks.append((f"CI runs `{action}` and the gate does not", False, "if it is a gate step, declare its command in `.wave.json`; then add it to `ignore_actions`", False))
+        for cmd, where in doc_commands(r.root):
+            if cmd not in gate:
+                checks.append((f"`{where}` names `{cmd}` and the gate does not", False,
+                               "if it is a gate step, declare it in `.wave.json`'s gate", False))
+        hooks = r.profile()["hooks"]
+        if hooks:
+            broken = [h for h in hooks if not h["ok"]]
+            checks.append((f"the repo's own hooks can run ({len(hooks)})", not broken,
+                           "; ".join(f"{h['path']}: {h['why']}" for h in broken)
+                           or ", ".join(h["path"] for h in hooks), False))
         checks.append(("protected paths declared", bool(r.protected), ", ".join(r.protected) or "none: verify cannot guard anything — `repos add . --protected <paths>`", False))
         hdata, hwhy = load_settings(r.root / ".claude" / "settings.json")
         hhave = installed_guards(hdata) if hdata is not None else set()
@@ -2147,6 +2422,13 @@ GUARANTEES = [
     ("base CI red after a merge stops the queue", "cmd_merge --wait-base-ci", "exit 4 with the semantic-conflict note", False),
     (".wave.json is read from origin/<base> after the fetch, not from a main checkout left behind; doctor names a stale copy", "Repo._load_cfg <- Repo.fetch, cmd_doctor", "facts config_source: origin/main:.wave.json; ! main checkout's `.wave.json` matches origin/main's: differs in gate", True),
     ("doctor names every CI action the gate does not cover", "cmd_doctor -> Repo.ci_gate", "! CI runs `x/y@v1` and the gate does not", True),
+    ("the repo's own orchestration is detected per phase, by name and location, and `.wave.json` phases overrides it", "Repo.profile -> detect_profile", "facts profile.phases: provider + detected | declared | default", True),
+    ("the agent prompt carries the profile: repo skills in order before the default stack, hooks enforced, rule files first; nothing found says so", "render_prompt -> profile_prompt", "the {{PROFILE}} block of templates/agent.md", True),
+    ("dispatch runs the repo's sync provider before creating worktrees", "cmd_dispatch -> sync_provider", "make sync in <root>; a failure refuses, a `.claude/commands/*` provider is only named", True),
+    ("Makefile targets test/check/lint/ci are gate candidates when the manifest falls through", "Repo._manifest_gate -> makefile_targets", "gate_sources: (make test, manifest)", True),
+    ("doctor warns when the Makefile or the rule files name a command the gate lacks", "cmd_doctor -> doc_commands", "! `CLAUDE.md` names `make ci` and the gate does not", True),
+    ("doctor lists the repo's hooks and warns when one cannot run", "cmd_doctor -> hook_health", "! the repo's own hooks can run (3): <path>: not executable (chmod +x)", True),
+    ("plan refuses a body missing the repo's issue-template sections", "cmd_plan -> template_problems", "plan refused: one lacks the repo template's ## Handoff", True),
     ("doctor tells an agent at work from a likely dead one, and names the recovery", "cmd_doctor -> liveness", "! no agent likely dead: <worktrees> — SendMessage or `wave dispatch --force N`", True),
     ("a likely dead worktree stays `worktree` in next, never `in progress`", "candidates -> liveness", "worktree exists (likely dead, nothing changed for N min)", True),
     ("doctor fails on a crate cargo marked extracted but left half-written", "cmd_doctor -> broken_crates", "✗ cargo cache ...: <crate> is missing N of M files", True),
@@ -2238,6 +2520,28 @@ def fill_refs(body: str, numbers: dict[str, int]) -> str:
     return body
 
 
+def template_problems(repo: "Repo", d: Path, rows: list[list[str]]) -> list[tuple[str, list[str]]]:
+    """(key, missing headings) for each body that lacks a `## ` section the repo's own issue template
+    requires: `.claude/issue-templates/<label>.md` for the row's first labelled type, else `default.md`.
+    No template, no charge — the plugin's contract stays the one `wave lint` charges on GitHub."""
+    tdir = repo.root / ".claude" / "issue-templates"
+    if not tdir.is_dir():
+        return []
+    out = []
+    for k, _, labels, _ in rows:
+        tpl = next((tdir / f"{l.strip()}.md" for l in labels.split(",") if (tdir / f"{l.strip()}.md").exists()), None)
+        if tpl is None and (tdir / "default.md").exists():
+            tpl = tdir / "default.md"
+        if tpl is None:
+            continue
+        need = [l.strip() for l in tpl.read_text().splitlines() if l.startswith("## ")]
+        body = (d / f"{k}.md").read_text().splitlines()
+        missing = [h for h in need if not any(l.strip() == h for l in body)]
+        if missing:
+            out.append((k, missing))
+    return out
+
+
 def cmd_plan(default: Repo | None, a):
     """Create an epic's issues from a directory: <dir>/index.tsv, <dir>/deps.tsv, <dir>/<key>.md.
 
@@ -2257,6 +2561,10 @@ def cmd_plan(default: Repo | None, a):
             raise SystemExit(f"index.tsv row needs 4 tab-separated fields: {r}")
         if not (d / f"{r[0]}.md").exists():
             raise SystemExit(f"missing body {d / (r[0] + '.md')}")
+    problems = template_problems(repo, d, rows)
+    if problems and not a.force:
+        raise SystemExit("plan refused: " + "; ".join(f"{k} lacks the repo template's {', '.join(m)}"
+                                                      for k, m in problems) + " (`--force` creates anyway)")
     if a.dry_run:
         for k, title, labels, parent in rows:
             print(f"{k:<6} parent={parent:<6} [{labels}] {title}")
