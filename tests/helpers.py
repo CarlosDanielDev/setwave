@@ -96,6 +96,31 @@ def sandbox() -> Path:
     return CLONE
 
 
+ONE, TWO = TMP / "one", TMP / "two"
+
+
+def cross_repos() -> None:
+    """Two more registered repos, a/one and b/two, each with its own gh `account` — the world of the
+    cross-repo tests (tests/test_cross_repo.py, tests/test_epics.py). Idempotent, like sandbox()."""
+    sandbox()
+    if TWO.exists():
+        return
+    reg_file = TMP / "config" / "repos.json"
+    reg = json.loads(reg_file.read_text())
+    for slug, clone in (("a/one", ONE), ("b/two", TWO)):
+        bare = TMP / "remote" / f"{slug}.git"
+        bare.parent.mkdir(parents=True, exist_ok=True)
+        git("init", "-q", "--bare", str(bare), cwd=TMP)
+        git("clone", "-q", str(bare), str(clone), cwd=TMP)
+        (clone / ".wave.json").write_text(json.dumps({"base": "main"}))
+        git("add", ".", cwd=clone)
+        git("commit", "-q", "-m", "base", cwd=clone)
+        git("push", "-q", "origin", "main", cwd=clone)
+        reg["repos"][slug] = {"path": str(clone), "account": slug.split("/")[0]}
+    reg_file.write_text(json.dumps(reg))
+    (TMP / "two-5").mkdir()
+
+
 def run_wave(*args, cwd=None) -> subprocess.CompletedProcess:
     """`wave.py <args>` as a user runs it, from inside the clone (or `cwd`), against the fake gh."""
     return subprocess.run([sys.executable, str(WAVE), *args], cwd=cwd or sandbox(), capture_output=True, text=True)

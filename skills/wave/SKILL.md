@@ -9,7 +9,7 @@ description: Drive a GitHub epic to merged PRs, wave by wave, from any repo, acc
 /setwave:wave <epic>          e.g. /setwave:wave 77   or   /setwave:wave owner/repo#77
 ```
 
-That is the whole prompt, every time. Invoked with no epic, ask for the ref (`wave epics`, the cross-repo overview, is planned: #10 in this plugin's own repo). The data comes from GitHub and git at run time, so the same words work in the next session, the next wave, the next repo, the next account.
+That is the whole prompt, every time. **Step 0 — invoked with no epic (`/setwave:wave` alone):** run `wave epics --json`, show the table it returns, and offer the owner the first row — the epic with the most ready work — as the proposed epic; the owner picks. No open epics → say so and stop. The data comes from GitHub and git at run time, so the same words work in the next session, the next wave, the next repo, the next account.
 
 Script: `${CLAUDE_PLUGIN_ROOT}/scripts/wave.py` (Python 3 stdlib; needs `gh` logged in, `git` ≥ 2.38; `codegraph` optional). Define once per session:
 

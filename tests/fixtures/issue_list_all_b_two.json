@@ -1,0 +1,28 @@
+[
+  {
+    "number": 5,
+    "title": "Leaf in another repo, blocked across repos",
+    "state": "open",
+    "labels": []
+  },
+  {
+    "number": 6,
+    "title": "Epic: second",
+    "state": "open",
+    "labels": [
+      {
+        "name": "epic"
+      }
+    ]
+  },
+  {
+    "number": 7,
+    "title": "Leaf with an open PR",
+    "state": "open",
+    "labels": [
+      {
+        "name": "epic"
+      }
+    ]
+  }
+]

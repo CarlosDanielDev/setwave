@@ -89,7 +89,7 @@ class ClonedFromAnywhere(unittest.TestCase):
     def test_a_ref_to_a_missing_repo_is_cloned_registered_and_the_command_continues(self):
         p = wave_quiet("facts", "o/x", cwd=CLONE)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        self.assertIn(f"cloned o/x into {X}", p.stdout)
+        self.assertIn(f"cloned o/x into {X}", p.stderr)
         self.assertEqual(facts_of(p.stdout)["root"], str(X))
         self.assertEqual(reg_entry("o/x"), {"path": str(X)}, "the clone is registered, so the next ref finds it")
         self.assertIn(["repo", "clone", "o/x", str(X)], calls())
@@ -97,7 +97,7 @@ class ClonedFromAnywhere(unittest.TestCase):
     def test_the_size_is_printed_before_cloning(self):
         p = wave_quiet("facts", "o/x", cwd=CLONE)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        self.assertIn("o/x is 2.0 MB on GitHub", p.stdout)
+        self.assertIn("o/x is 2.0 MB on GitHub", p.stderr)
 
     def test_the_clone_never_passes_a_depth(self):
         wave_quiet("facts", "o/x", cwd=CLONE)
@@ -125,7 +125,7 @@ class ClonedFromAnywhere(unittest.TestCase):
     def test_over_the_default_limit_it_stops_and_prints_the_clone_command(self):
         p = wave_quiet("facts", "o/big", cwd=CLONE)
         self.assertEqual(p.returncode, 1)
-        self.assertIn("o/big is 878.9 MB on GitHub", p.stdout)
+        self.assertIn("o/big is 878.9 MB on GitHub", p.stderr)
         self.assertIn("over the 500 MB", p.stdout + p.stderr)
         self.assertIn("gh repo clone o/big", p.stdout + p.stderr)
         self.assertFalse([c for c in calls() if c[:2] == ["repo", "clone"]], "nothing was cloned")

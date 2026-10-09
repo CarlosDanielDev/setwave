@@ -1,0 +1,7 @@
+[
+  {"number": 1, "title": "Epic: cross-repo", "state": "open", "labels": []},
+  {"number": 9, "title": "Leaf in the epic's repo", "state": "open", "labels": []},
+  {"number": 10, "title": "Epic: fully closed", "state": "closed", "labels": []},
+  {"number": 11, "title": "Closed leaf one", "state": "closed", "labels": []},
+  {"number": 12, "title": "Closed leaf two", "state": "closed", "labels": []}
+]

@@ -171,7 +171,7 @@ def clone_repo(reg: dict, slug: str) -> Path:
     if not ok:
         raise SystemExit(f"{slug}: cannot read its size (`gh repo view {slug} --json diskUsage`)\n{out}")
     mb = json.loads(out).get("diskUsage", 0) / 1024
-    print(f"{slug} is {mb:.1f} MB on GitHub")
+    print(f"{slug} is {mb:.1f} MB on GitHub", file=sys.stderr)  # progress is never stdout: `--json` consumers parse stdout
     ask_over = reg.get("clone_ask_over_mb", 500)
     if mb > ask_over:
         raise SystemExit(f"{slug} is over the {ask_over} MB this tool clones without asking — cloning is safe but not free, "
@@ -185,7 +185,7 @@ def clone_repo(reg: dict, slug: str) -> Path:
     if ok and shallow.strip() == "true":
         raise SystemExit(f"{dest} is a shallow clone: worktrees, `merge-tree` and `--merged` need history — "
                          "remove it and clone again without --depth")
-    print(f"cloned {slug} into {dest}")
+    print(f"cloned {slug} into {dest}", file=sys.stderr)
     return dest
 
 
@@ -1242,6 +1242,67 @@ def cmd_next(default: Repo | None, a):
     for c in cands:
         print(f"  {c['key']:<40} {why(c):<36} {c['title'][:60]}")
     print(f"\nnext wave (batch {a.batch}): " + (" ".join(c["key"] for c in ready) if ready else "nothing ready"))
+
+
+def epics_of(repo: Repo) -> list[dict]:
+    """The repo's open epic roots: an open issue that has sub-issues or carries the `epic` label, minus
+    every issue that is itself a sub-issue — only roots count. Every issue is fetched (`--state all`) so
+    the open filter is enforced here, not assumed from the query: a closed epic can never slip in."""
+    found = json.loads(repo.gh(["issue", "list", "-R", repo.slug, "--state", "all", "--limit", "500",
+                                "--json", "number,title,labels,state"]))
+    open_issues = [i for i in found if i["state"] == "open"]
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        subs = list(pool.map(lambda i: repo.sub_issues(i["number"]), open_issues))
+    child = {(slug_of_api(c["repository_url"]), int(c["number"])) for ss in subs for c in ss}
+    return [iss for iss, ss in zip(open_issues, subs)
+            if (ss or "epic" in {l["name"] for l in iss.get("labels", [])})
+            and (repo.slug, iss["number"]) not in child]
+
+
+def epic_stats(repo: Repo, iss: dict) -> dict:
+    """One `wave epics` row: the epic's leaves and where they stand (the `candidates` states, summed),
+    and the date of the newest `wave status --post` comment — the paper trail left on the epic."""
+    nodes = tree(repo, iss["number"])
+    cands = candidates(nodes)
+    lvs = leaves(nodes)
+    comments = repo.api(f"repos/{repo.slug}/issues/{iss['number']}/comments?per_page=100", paginate=True) or []
+    last = max((c["created_at"] for c in comments if (c.get("body") or "").startswith("## wave status")), default=None)
+    return {"epic": key(repo, iss["number"]), "repo": repo.slug, "number": iss["number"], "title": iss["title"],
+            "leaves": len(lvs), "closed": sum(1 for nd in lvs if nd["issue"]["state"] == "closed"),
+            "ready": sum(1 for c in cands if c["ready"]), "blocked": sum(1 for c in cands if c["state"] == "blocked"),
+            "in_progress": sum(1 for c in cands if c["state"] == "in-progress"),
+            "last_status": last, "command": f"/setwave:wave {key(repo, iss['number'])}"}
+
+
+def cmd_epics(default: Repo | None, a):
+    """`wave epics`: every open epic across the registry's repos (or --slug / --repo for one), readiest first."""
+    if a.slug and getattr(a, "repo", None):
+        raise SystemExit("give --slug or --repo, not both")
+    if a.slug:
+        found = [epic_stats(Repo.get(a.slug), iss) for iss in epics_of(Repo.get(a.slug))]
+    elif getattr(a, "repo", None):
+        r = Repo.from_cwd(a.repo)
+        found = [epic_stats(r, iss) for iss in epics_of(r)]
+    else:
+        found = []
+        for slug in sorted(load_registry()["repos"]):
+            try:  # one stale checkout or unreadable repo must not blind the whole overview: name it, move on
+                r = Repo.get(slug)
+                found += [epic_stats(r, iss) for iss in epics_of(r)]
+            except SystemExit as e:
+                print(f"skip {slug}: {str(e).strip().splitlines()[-1] if str(e).strip() else e}", file=sys.stderr)
+    found.sort(key=lambda s: (-s["ready"], s["repo"], s["number"]))
+    if a.json:
+        print(json.dumps(found, indent=2))
+        return
+    if not found:
+        print("no open epics — an epic is an open issue with sub-issues or the `epic` label; `wave plan` creates one")
+        return
+    print(f"{len(found)} open epic(s) across {len({s['repo'] for s in found})} repo(s), readiest first")
+    for s in found:
+        print(f"  {s['epic']}  {s['title']} — ready {s['ready']} · blocked {s['blocked']} · in progress {s['in_progress']}"
+              f" · leaves {s['closed']}/{s['leaves']} closed · last status {s['last_status'] or 'never'}"
+              f" — {s['command']}")
 
 
 def cmd_dispatch(default: Repo | None, a):
@@ -2559,6 +2620,7 @@ GUARANTEES = [
     ("doctor from outside any repo reports the registry and the search paths, not just a refusal", "cmd_doctor's default=None branch", "'the registry (…) lists …; search paths: …'", True),
     ("per-repo gh account token, global login untouched", "Repo._env", "GH_TOKEN per call", True),
     ("an epic follows sub-issues and blockers into other repos; plan --slug creates there", "tree + candidates, cmd_plan", "keys owner/name#N, gh -R owner/name", True),
+    ("wave epics lists every open epic root across the registry's repos, readiest first, one line ending in the exact command to continue", "cmd_epics -> epics_of, epic_stats", "an epic is open, has sub-issues or the `epic` label, and is nobody's sub-issue; a closed epic never appears; --json feeds the SKILL's step 0", True),
     ("every run is logged", "log_run", "~/.config/setwave/log.jsonl", False),
     ("the script never force-pushes, resets, stashes, or deletes", "by absence", "grep the source for 'force', 'reset --hard', 'stash', 'rm -rf': zero hits", True),
     ("the e2e run writes only to a sandbox: never the plugin's own repo, a name without -sandbox only with --any-repo", "scripts/e2e.py check_target", "e2e refused: ...", True),
@@ -2846,6 +2908,7 @@ def main(argv=None):
     x.add_argument("action", choices=["list", "add", "scan"]); x.add_argument("path", nargs="?"); x.add_argument("--slug"); x.add_argument("--account"); x.add_argument("--base"); x.add_argument("--worktree-prefix", help="where worktrees go, e.g. ~/kyte-worktrees/demeter-  (default ../<repo>-)"); x.add_argument("--gate", nargs="*"); x.add_argument("--protected", nargs="*")
     x = s.add_parser("facts", help="what was discovered about repos"); x.add_argument("slugs", nargs="*")
     x = s.add_parser("next", help="leaf issues ready to dispatch"); x.add_argument("epic"); x.add_argument("--batch", type=int, default=4); x.add_argument("--json", action="store_true")
+    x = s.add_parser("epics", help="every open epic across the registry's repos (--slug / --repo for one), readiest first: leaves, closed, ready, blocked, in progress, last status comment"); x.add_argument("--slug", help="owner/name: scan that repo instead of the whole registry"); x.add_argument("--repo", default=argparse.SUPPRESS, help="path inside a repo: scan that repo instead of the whole registry"); x.add_argument("--json", action="store_true", help="one object per epic, for the SKILL's step 0")
     x = s.add_parser("dispatch", help="create worktrees + prompt files (runs doctor and refuses issues that are not READY)"); x.add_argument("issues", nargs="+"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--force", action="store_true"); x.add_argument("--warm", action="store_true", help="Rust: `cargo fetch` in the main checkout first, so parallel builds only extract"); x.add_argument("--respawn", action="store_true", help="this dispatch returns with a new strategy after the same failure twice: the stamp counts a respawn, not a plain resume")
     x = s.add_parser("why", help="the premises behind READY / NOT READY for an issue, with evidence"); x.add_argument("refs", nargs="+")
     x = s.add_parser("doctor", help="preflight: gh, git, clean checkout, gate, protected paths, dead agents, retry ceiling, leftover worktrees, cargo cache, disk, batch size"); x.add_argument("--batch", type=int, default=4); x.add_argument("--fix-cache", action="store_true", help="move each half-extracted crate to ~/.config/setwave/quarantine/ (never deletes)"); x.add_argument("--epic", help="also run the state sweep of this epic as a soft check")
@@ -2880,7 +2943,7 @@ def main(argv=None):
         default = None
     t0 = time.time(); exit_code = 0
     try:
-        {"repos": cmd_repos, "facts": cmd_facts, "next": cmd_next, "dispatch": cmd_dispatch, "prompt": cmd_prompt,
+        {"repos": cmd_repos, "facts": cmd_facts, "next": cmd_next, "epics": cmd_epics, "dispatch": cmd_dispatch, "prompt": cmd_prompt,
      "verify": cmd_verify, "judge": cmd_judge, "order": cmd_order, "merge": cmd_merge, "resolve": cmd_resolve, "close-parents": cmd_close_parents,
              "cleanup": cmd_cleanup, "status": cmd_status, "lint": cmd_lint, "plan": cmd_plan, "adopt": cmd_adopt, "why": cmd_why, "doctor": cmd_doctor,
              "agents": cmd_agents, "tick": cmd_tick, "sweep": cmd_sweep, "hooks": cmd_hooks,
