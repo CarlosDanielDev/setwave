@@ -1,1 +1,11 @@
-[]
+[
+  {
+    "number": 70,
+    "title": "Leaf with an open PR",
+    "headRefName": "feat/7-second-leaf",
+    "baseRefName": "main",
+    "body": "Closes #7\n\n## Done when\n\n- [x] seven\n",
+    "mergeable": "MERGEABLE",
+    "url": "https://github.com/b/two/pull/70"
+  }
+]

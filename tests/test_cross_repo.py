@@ -12,30 +12,14 @@ import subprocess
 import sys
 import unittest
 
-from helpers import TMP, WAVE, git, gh_env_calls, run_wave, sandbox
+from helpers import TMP, WAVE, cross_repos, gh_env_calls, run_wave, sandbox
 
 ONE, TWO = TMP / "one", TMP / "two"
 ACCOUNTS = {"a/one": "a", "b/two": "b"}
 
 
 def setUpModule():
-    sandbox()
-    if TWO.exists():
-        return
-    reg_file = TMP / "config" / "repos.json"
-    reg = json.loads(reg_file.read_text())
-    for slug, clone in (("a/one", ONE), ("b/two", TWO)):
-        bare = TMP / "remote" / f"{slug}.git"
-        bare.parent.mkdir(parents=True, exist_ok=True)
-        git("init", "-q", "--bare", str(bare), cwd=TMP)
-        git("clone", "-q", str(bare), str(clone), cwd=TMP)
-        (clone / ".wave.json").write_text(json.dumps({"base": "main"}))
-        git("add", ".", cwd=clone)
-        git("commit", "-q", "-m", "base", cwd=clone)
-        git("push", "-q", "origin", "main", cwd=clone)
-        reg["repos"][slug] = {"path": str(clone), "account": ACCOUNTS[slug]}
-    reg_file.write_text(json.dumps(reg))
-    (TMP / "two-5").mkdir()
+    cross_repos()
 
 
 def calls_of(run) -> dict[str, list[dict]]:

@@ -5,7 +5,7 @@
   gh pr list -R a/one --state open ...                          -> pr_list_open_a_one.json, else pr_list_open.json
   gh pr checks 20 ...                                           -> pr_checks_20.json
   gh pr view 20 ...                                             -> pr_view_20.json
-  gh issue list -R a/one ...                                    -> issue_list_a_one.json, else issue_list.json
+  gh issue list -R a/one --state open ...                       -> issue_list_open_a_one.json, else issue_list_a_one.json, else issue_list.json
   gh auth token --user X                                        -> prints tok-X (an obvious fake, never a real token)
   gh repo view ...                                              -> repo_view.json
 
@@ -38,13 +38,20 @@ def answer(name: str, slurp: bool = False) -> int:
     return 0
 
 
-def per_repo(args: list[str], stem: str) -> str:
-    """`<stem>_<owner>_<name>.json` for the repo after -R when that fixture exists, else `<stem>.json`."""
+def per_repo(args: list[str], stems: str | list[str]) -> str:
+    """`<stem>_<owner>_<name>.json` for the repo after -R, first stem that has that fixture, else the
+    bare `<stem>.json` (same fallback order); the last stem doubles as the miss name."""
+    stems = [stems] if isinstance(stems, str) else stems
     if "-R" in args:
-        name = f"{stem}_{args[args.index('-R') + 1].replace('/', '_')}.json"
-        if (FIXTURES / name).exists():
-            return name
-    return f"{stem}.json"
+        repo = args[args.index('-R') + 1].replace('/', '_')
+        for stem in stems:
+            name = f"{stem}_{repo}.json"
+            if (FIXTURES / name).exists():
+                return name
+    for stem in stems:
+        if (FIXTURES / f"{stem}.json").exists():
+            return f"{stem}.json"
+    return f"{stems[-1]}.json"
 
 
 def main(args: list[str]) -> int:
@@ -95,7 +102,8 @@ def main(args: list[str]) -> int:
     if args[:2] in (["pr", "checks"], ["pr", "view"]):
         return answer(f"pr_{args[1]}_{args[2]}.json")
     if args[:2] == ["issue", "list"]:
-        return answer(per_repo(args, "issue_list"))
+        state = args[args.index("--state") + 1] if "--state" in args else "open"
+        return answer(per_repo(args, [f"issue_list_{state}", "issue_list"]))
     if args[:2] == ["repo", "view"]:
         return answer("repo_view.json")
     print(f"fake gh: refusing {' '.join(args)}", file=sys.stderr)

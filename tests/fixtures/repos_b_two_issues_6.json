@@ -1,0 +1,10 @@
+{
+  "id": 4006,
+  "number": 6,
+  "title": "Epic: second",
+  "state": "open",
+  "body": "## Done when\n\n- [ ] both leaves land\n",
+  "labels": [{"name": "epic"}],
+  "html_url": "https://github.com/b/two/issues/6",
+  "repository_url": "https://api.github.com/repos/b/two"
+}

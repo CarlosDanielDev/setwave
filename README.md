@@ -68,7 +68,7 @@ wave why 82       # the premises behind one answer
 wave status 77    # the whole tree; --post leaves it on the epic
 ```
 
-The last status comment on the epic is the paper trail. A single view across all your epics and repos is [#10](https://github.com/CarlosDanielDev/setwave/issues/10).
+The last status comment on the epic is the paper trail. `wave epics` is the single view across all your epics and repos, readiest first.
 
 ## What it does
 
@@ -78,6 +78,7 @@ The last status comment on the epic is the paper trail. A single view across all
 | watch agents | `wave agents` — every issue worktree: minutes since dispatch, minutes since the newest change, open PR, and a verdict (`working`, `quiet`, `likely dead`, `done`); `doctor` names the likely dead with their recovery | files and git, never processes |
 | discover | `wave facts` — remote, base branch, gate from CI or manifest, protected paths | the repo |
 | find the wave | `wave next <epic> --batch 4` — every open leaf in exactly one state: blocked, in progress, done-unclosed, worktree, ready | GitHub |
+| find the epic | `wave epics` — every open epic across the registry's repos (`--slug` / `--repo` for one), readiest first, one line each ending in the exact command to continue; `--json` is what `/setwave:wave` reads when invoked with no epic | GitHub |
 | explain | `wave why <issue>` — the premises behind READY / NOT READY, with evidence | the script |
 | dispatch | `wave dispatch <issues>` — worktrees from `origin/<base>`, CodeGraph index, one prompt file per issue | Claude spawns one agent per file |
 | verify | `wave verify <PR> --epic <epic>` — no AI attribution, protected paths untouched, CI green, worktree clean and pushed, no contradictions (branch number ≠ closed issue, PR closing a parent or a still-blocked issue), a `## Done when` ledger that matches the issue; names sibling issues that cite files the PR touched | the script |
