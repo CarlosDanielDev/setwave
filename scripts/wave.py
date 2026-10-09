@@ -49,6 +49,9 @@ REGISTRY = CONFIG_DIR / "repos.json"
 
 ATTRIBUTION = re.compile(r"co-authored-by:\s*claude|generated with \[?claude code|noreply@anthropic\.com", re.I)
 CLOSES = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?::\s*|\s+)(?:([\w.-]+/[\w.-]+))?#(\d+)\b", re.I)
+# textual dependencies `wave adopt` wires as real blocked_by: a verb, then a ref — a bare #N is this repo's
+# issue, owner/name#N another repo's. A ref with no verb in front of it is a mention, not a dependency.
+DEPENDS = re.compile(r"\b(?:depends on|blocked by|needs|after)\s+((?:[\w.-]+/[\w.-]+)?)#(\d+)", re.I)
 BRANCH_IN_BODY = re.compile(r"git worktree add -b\s+(\S+)")
 CODEGRAPH_IN_BODY = re.compile(r'codegraph explore "([^"]+)"')
 REF = re.compile(r"^(?:(?P<slug>[\w.-]+/[\w.-]+))?#?(?P<n>\d+)$")
@@ -129,18 +132,61 @@ def save_registry(reg: dict) -> None:
     REGISTRY.write_text(json.dumps(reg, indent=2, sort_keys=True) + "\n")
 
 
-def scan_for_slug(reg: dict, slug: str) -> Path | None:
+def find_checkouts(reg: dict, slug: str) -> list[Path]:
+    """Every checkout under the search paths whose origin is slug, sorted: [0] is the one the registry takes."""
+    found = []
     for base in reg["search_paths"]:
         root = Path(base).expanduser()
         if not root.exists():
             continue
         for d in sorted(root.iterdir()):
-            if not (d / ".git").exists():
+            if not (d / ".git").is_dir():
                 continue
             ok, url = sh_ok(["git", "remote", "get-url", "origin"], cwd=d)
-            if ok and slug_of_url(url) == slug and (d / ".git").is_dir():
-                return d.resolve()
-    return None
+            if ok and slug_of_url(url) == slug:
+                found.append(d.resolve())
+    return found
+
+
+def clone_repo(reg: dict, slug: str) -> Path:
+    """The missing checkout goes into the first search path: size-checked first, never shallow.
+
+    `gh repo clone` copies the whole history (no --depth is ever passed: worktrees, `merge-tree` and
+    `--merged` read it); above `clone_ask_over_mb` (registry, default 500) the tool stops and hands
+    the command back — cloning is safe but not free, and where big things go is the user's call.
+    """
+    if "/" not in slug:
+        raise SystemExit(f"{slug}: not an owner/name slug — refs are owner/name#N")
+    if not reg.get("search_paths"):
+        raise SystemExit(f"no search paths in {REGISTRY}: set \"search_paths\" there — the first is where a clone goes")
+    dest = Path(reg["search_paths"][0]).expanduser() / slug.split("/")[1]
+    env = dict(os.environ)
+    account = reg["repos"].get(slug, {}).get("account")
+    if account:
+        ok, tok = sh_ok(["gh", "auth", "token", "--user", account])
+        if not ok:
+            raise SystemExit(f"{slug}: account {account} is not logged in to gh (`gh auth login`)\n{tok}")
+        env["GH_TOKEN"] = tok.strip()
+    ok, out = sh_ok(["gh", "repo", "view", slug, "--json", "diskUsage"], env=env)
+    if not ok:
+        raise SystemExit(f"{slug}: cannot read its size (`gh repo view {slug} --json diskUsage`)\n{out}")
+    mb = json.loads(out).get("diskUsage", 0) / 1024
+    print(f"{slug} is {mb:.1f} MB on GitHub", file=sys.stderr)  # progress is never stdout: `--json` consumers parse stdout
+    ask_over = reg.get("clone_ask_over_mb", 500)
+    if mb > ask_over:
+        raise SystemExit(f"{slug} is over the {ask_over} MB this tool clones without asking — cloning is safe but not free, "
+                         f"and where big things go is your call:\n  gh repo clone {slug} {dest}\n"
+                         f"then `wave.py repos add {dest} --slug {slug}`")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    ok, out = sh_ok(["gh", "repo", "clone", slug, str(dest)], env=env)
+    if not ok:
+        raise SystemExit(f"`gh repo clone {slug} {dest}` failed:\n{out}")
+    ok, shallow = sh_ok(["git", "rev-parse", "--is-shallow-repository"], cwd=dest)
+    if ok and shallow.strip() == "true":
+        raise SystemExit(f"{dest} is a shallow clone: worktrees, `merge-tree` and `--merged` need history — "
+                         "remove it and clone again without --depth")
+    print(f"cloned {slug} into {dest}", file=sys.stderr)
+    return dest
 
 
 # ---------------------------------------------------------------- repo
@@ -155,10 +201,14 @@ class Repo:
             reg = load_registry()
             entry = reg["repos"].get(slug, {})
             if "path" not in entry or not Path(entry["path"]).exists():
-                found = scan_for_slug(reg, slug)
-                if not found:
-                    raise SystemExit(f"no local checkout for {slug}: add it with `wave.py repos add <path> --slug {slug}` or extend search_paths in {REGISTRY}")
-                entry["path"] = str(found)
+                found = find_checkouts(reg, slug)
+                if found:
+                    entry["path"] = str(found[0])
+                    if len(found) > 1:
+                        print(f"{slug}: {len(found)} checkouts — using {found[0]}, also at "
+                              f"{', '.join(map(str, found[1:]))}; the registry keeps this one")
+                else:
+                    entry["path"] = str(clone_repo(reg, slug))
                 reg["repos"][slug] = entry
                 save_registry(reg)
             cls._cache[slug] = cls(slug, entry)
@@ -321,10 +371,25 @@ class Repo:
             return ["go vet ./...", "go test ./..."]
         if (r / "Package.swift").exists():
             return ["swift build", "swift test"]
+        make = [f"make {t}" for t in GATE_TARGETS if t in makefile_targets(r)]
+        if make:
+            return make
         return ["<no gate found: read the repo, decide, and write it to .wave.json>"]
 
     def has_codegraph(self) -> bool:
         return (self.root / ".codegraph").exists()
+
+    def profile(self) -> dict:
+        """The repo's own orchestration: detect_profile's phases plus the gate and the worktree location,
+        which read the config and CI that only this class sees."""
+        p = detect_profile(self.root, self.cfg)
+        gate = [(c, s) for c, s in self.gate_sources() if not c.startswith("<")]
+        p["phases"]["gate"] = {"provider": [c for c, _ in gate],
+                               "source": {"config": "declared"}.get(gate[0][1], "detected") if gate else "default"}
+        prefix = self.cfg.get("worktree_prefix")
+        p["phases"]["worktree"] = ({"provider": prefix, "source": "declared"} if prefix
+                                   else {"provider": "../<repo>-<N>", "source": "default"})
+        return p
 
     def fetch(self) -> None:
         self.git(["fetch", "-q", "--prune", "origin"])
@@ -345,6 +410,13 @@ class Repo:
         if not ok:
             return []
         return self.api(f"repos/{self.slug}/issues/{n}/dependencies/blocked_by?per_page=100", paginate=True) or []
+
+    def parent(self, n: int) -> dict | None:
+        """The issue's parent (the sub-issue API's read end), or None when it has none — or the server has no such endpoint."""
+        ok, _ = self.gh_ok(["api", f"repos/{self.slug}/issues/{n}/parent"])
+        if not ok:
+            return None
+        return self.api(f"repos/{self.slug}/issues/{n}/parent")
 
     def open_prs(self) -> list[dict]:
         if self._prs is None:
@@ -368,6 +440,253 @@ class Repo:
             if len(parts) >= 2:
                 res[parts[0]] = parts[1]
         return res
+
+
+# ---------------------------------------------------------------- profile
+
+GATE_TARGETS = ("test", "check", "lint", "ci")  # Makefile targets offered as gate candidates, in this order
+RULE_FILES = ("CLAUDE.md", "AGENTS.md", "CONTRIBUTING.md")
+KNOWN_INTERPRETERS = {"python3", "python", "bash", "sh", "zsh", "node", "ruby", "perl"}
+SKILLS_OF_A_PHASE = {"define", "kickoff", "issue-handoff"}  # named by their own phase, not by the skills line
+# gate-shaped commands, the same family `ci_gate` reads from workflow `run:` lines (plus `ruff`): what the
+# docs may promise. Anything else in a CLAUDE.md is prose, not a gate candidate.
+DOC_GATE_CMD = re.compile(r"((?:cargo|npm|pnpm|yarn|bun|pytest|python3? -m|uv run|go |make|mix|gradle|\./gradlew|"
+                          r"swift|xcodebuild|dotnet|flutter|dart|ruff)\b.*)$")
+
+
+def makefile_targets(root: Path) -> list[str]:
+    """Every runnable target the root Makefile defines (a `name:` line at column 0), in file order."""
+    mk = root / "Makefile"
+    if not mk.exists():
+        return []
+    out = []
+    for line in mk.read_text(errors="replace").splitlines():
+        m = re.match(r"([^\s:=][^:=]*?)\s*:{1,2}(?:\s|$)", line)
+        for t in m.group(1).split() if m else []:
+            if not t.startswith((".", "%", "$")) and t not in out:
+                out.append(t)
+    return out
+
+
+def _stems(d: Path) -> list[str]:
+    """Names of the files in d, extension dropped, sorted — the `.claude/commands`, `agents` and
+    `issue-templates` convention is one definition per file."""
+    return sorted(p.stem for p in d.iterdir() if p.is_file() and not p.name.startswith(".")) if d.is_dir() else []
+
+
+def _skill_names(root: Path) -> list[str]:
+    """Skill names under `.claude/skills/`: a directory is one skill, so is a bare `.md` file."""
+    d = root / ".claude" / "skills"
+    if not d.is_dir():
+        return []
+    return sorted(p.name if p.is_dir() else p.stem for p in d.iterdir() if not p.name.startswith("."))
+
+
+def _src(declared: bool, detected: bool) -> str:
+    return " + ".join(label for label, on in (("declared", declared), ("detected", detected)) if on) or "default"
+
+
+def hook_health(root: Path) -> list[dict]:
+    """Every hook the repo declares — files under `.claude/hooks/` and the commands `.claude/settings.json`
+    registers — with whether it can run. A hook that is not executable, or whose interpreter is missing,
+    fails silently for every agent meant to trip on it. A file a settings command runs through an
+    interpreter (`python3 x.py`) needs no executable bit."""
+    wired: set[str] = set()
+    commands: list[tuple[str, str | None, str | None, str | None]] = []
+    data, _ = load_settings(root / ".claude" / "settings.json")
+    if isinstance(data, dict):
+        for blocks in (data.get("hooks") or {}).values():
+            for b in blocks if isinstance(blocks, list) else []:
+                if not isinstance(b, dict):
+                    continue
+                for h in b.get("hooks") or []:
+                    cmd = h.get("command") if isinstance(h, dict) else None
+                    if cmd is not None and not isinstance(cmd, str):
+                        commands.append((str(cmd), None, None, "command is not a string"))
+                        continue
+                    if not cmd:
+                        continue
+                    try:
+                        toks = shlex.split(cmd)
+                    except ValueError as e:
+                        commands.append((cmd, None, None, f"cannot parse the command ({e})"))
+                        continue
+                    interp = Path(toks[0]).name if toks and Path(toks[0]).name in KNOWN_INTERPRETERS else None
+                    script = next((t for t in (toks[1:] if interp else toks)
+                                   if "/" in t or t.endswith((".py", ".sh", ".js", ".ts"))), None)
+                    commands.append((cmd, interp, script, None))
+                    if interp and script:
+                        p = Path(script)
+                        wired.add((p if p.is_absolute() else root / p).resolve().as_posix())
+    out = []
+    d = root / ".claude" / "hooks"
+    if d.is_dir():
+        for f in sorted(p for p in d.iterdir() if p.is_file()):
+            why = None
+            interp = None
+            first = f.read_text(errors="replace").splitlines()[:1]
+            if first and first[0].startswith("#!"):
+                toks = first[0][2:].split()
+                tok = toks[1] if toks and toks[0].endswith("env") and len(toks) > 1 else (toks[0] if toks else None)
+                interp = Path(tok).name if tok else None
+            if f.resolve().as_posix() not in wired and not os.access(f, os.X_OK):
+                why = "not executable (chmod +x)"
+            elif interp and shutil.which(interp) is None:
+                why = f"interpreter `{interp}` is not on PATH"
+            out.append({"path": f.relative_to(root).as_posix(), "interpreter": interp, "ok": why is None, "why": why})
+    for cmd, interp, script, broken in commands:
+        why = broken
+        if interp and shutil.which(interp) is None:
+            why = f"interpreter `{interp}` is not on PATH"
+        elif script:
+            sp = Path(script)
+            if not sp.is_absolute():
+                sp = root / sp
+            if not sp.exists():
+                why = f"names `{script}`, which does not exist"
+        out.append({"path": script or cmd, "command": cmd, "interpreter": interp, "ok": why is None, "why": why})
+    return out
+
+
+def doc_commands(root: Path) -> list[tuple[str, str]]:
+    """(command, where): the gate-shaped commands the repo's own docs tell people to run — the Makefile's
+    gate targets and the fenced command lines of the rule files. `doctor` warns when the gate does not
+    contain one: the docs promise it, the gate never runs it."""
+    out = [(f"make {t}", "Makefile") for t in GATE_TARGETS if t in makefile_targets(root)]
+    for doc in [f for f in RULE_FILES if (root / f).exists()]:
+        fence = False
+        try:
+            lines = (root / doc).read_text(errors="replace").splitlines()
+        except OSError:
+            continue  # a rule file that is a directory or unreadable: doctor has enough to say already
+        for line in lines:
+            if line.strip().startswith("```"):
+                fence = not fence
+            elif fence:
+                m = DOC_GATE_CMD.match(line.strip().lstrip("$ ").strip())
+                if m and m.group(1).strip() not in [c for c, _ in out]:
+                    out.append((m.group(1).strip(), doc))
+    return out
+
+
+def detect_profile(root: Path, cfg: dict) -> dict:
+    """The repo's own orchestration, by name and location, per phase: what `.wave.json` `phases` declares
+    is `declared`, a known name on disk is `detected`, what remains is the plugin's `default`. Detection
+    reads the checkout's working tree; the gate and the worktree location are added by `Repo.profile`."""
+    declared = cfg.get("phases")
+    if declared is None:
+        declared = {}
+    elif not isinstance(declared, dict):
+        raise SystemExit(f"{root}/.wave.json: `phases` must be an object with one key per phase "
+                         f"(define, handoff, kickoff, sync, rules, agent_skills, review, enforcement), "
+                         f"got {type(declared).__name__}")
+    for key in ("rules", "agent_skills"):
+        if key in declared and not isinstance(declared[key], list):
+            raise SystemExit(f"{root}/.wave.json: `phases.{key}` must be a list of names, got {type(declared[key]).__name__}")
+
+    def phase(name: str, detected=None, default=None):
+        if declared.get(name):
+            return {"provider": declared[name], "source": "declared"}
+        if detected:
+            return {"provider": detected, "source": "detected"}
+        return {"provider": default if default is not None else [], "source": "default"}
+
+    skills = _skill_names(root)
+    commands = _stems(root / ".claude" / "commands")
+    agents = _stems(root / ".claude" / "agents")
+    templates = _stems(root / ".claude" / "issue-templates")
+    targets = makefile_targets(root)
+    hooks = hook_health(root)
+    handoff = next((p for p in (root / ".claude" / "skills" / "issue-handoff" / "SKILL.md",
+                                root / ".claude" / "skills" / "issue-handoff.md") if p.exists()), None)
+    declared_rules = [r for r in declared.get("rules", []) if isinstance(r, str)] \
+        if isinstance(declared.get("rules"), list) else []
+    found_rules = [f for f in RULE_FILES if (root / f).exists()]
+    declared_skills = [s for s in declared.get("agent_skills", []) if isinstance(s, str)] \
+        if isinstance(declared.get("agent_skills"), list) else []
+    extra_skills = declared_skills + [s for s in skills if s not in SKILLS_OF_A_PHASE and s not in declared_skills]
+    kick = None
+    if not declared.get("kickoff"):
+        kick = "kickoff" if "kickoff" in skills else next((c for c in commands if c.startswith("start-")), None)
+    phases = {
+        "define": phase("define",
+                        detected="define" if "define" in skills else ("issue-templates" if templates else None),
+                        default="templates/issue-contract.md + `wave plan`"),
+        "handoff": phase("handoff", detected="issue-handoff" if handoff else None, default="`wave prepare` (#14)"),
+        "kickoff": phase("kickoff", detected=kick, default="the agent prompt's step 0"),
+        "sync": phase("sync",
+                      detected="make sync" if "sync" in targets else ("sync-main" if "sync-main" in commands else None),
+                      default="git fetch --prune"),
+        "rules": {"provider": declared_rules + [f for f in found_rules if f not in declared_rules],
+                  "source": _src(bool(declared_rules), bool(found_rules))},
+        "agent_skills": {"provider": extra_skills,
+                         "source": _src(bool(declared_skills), bool([s for s in skills if s not in SKILLS_OF_A_PHASE]))},
+        "review": phase("review", detected=[a for a in agents if fnmatch(a, "*review*") or fnmatch(a, "*-qa*")] or None,
+                        default="poka-yoke re-audit before the PR"),
+        "enforcement": phase("enforcement", detected=list(dict.fromkeys(h["path"] for h in hooks)) or None,
+                             default="none (the gate is the enforcement)"),
+    }
+    if handoff and phases["handoff"]["source"] == "detected":
+        phases["handoff"]["text"] = handoff.relative_to(root).as_posix()
+    return {"phases": phases, "skills": skills, "commands": commands, "agents": agents,
+            "hooks": hooks, "issue_templates": templates, "makefile_targets": targets}
+
+
+def profile_prompt(p: dict) -> str:
+    """The `{{PROFILE}}` block of the agent prompt: what the repo itself provides for each phase of the
+    loop, named so the agent expects it — or the plain default stack when nothing is found. Rule files
+    are named, never copied (the agent reads them; the prompt stays the same size in every repo)."""
+    ph = p["phases"]
+    skills = list(ph["agent_skills"]["provider"])
+    for name in ("kickoff", "define", "handoff"):
+        prov = ph[name]
+        if prov["source"] == "detected" and prov["provider"] not in skills:
+            skills.append(prov["provider"])
+    if not (skills or p["hooks"] or ph["rules"]["provider"] or p["agents"] or p["commands"] or p["issue_templates"]):
+        return ("Nenhuma orquestração própria detectada neste repositório (nada em `.claude/`, nenhum "
+                "CLAUDE.md/AGENTS.md/CONTRIBUTING.md): use a stack padrão acima como está.")
+    lines = ["Este repositório tem orquestração própria:",
+             ("- skills dele, nesta ordem, antes da stack padrão: " + ", ".join(f"`{s}`" for s in skills))
+             if skills else "- nenhuma skill própria: a stack padrão acima vale."]
+    if p["hooks"]:
+        lines.append("- hooks que se impõem (o Claude Code os roda; espere tropeçar neles): "
+                     + ", ".join("`" + h["path"] + (f" ({h['why']})" if h["why"] else "") + "`" for h in p["hooks"]))
+    if ph["rules"]["provider"]:
+        lines.append("- leia antes estes arquivos de regras: "
+                     + ", ".join(f"`{r}`" for r in ph["rules"]["provider"])
+                     + ". Regra do repo que contradiz as inegociáveis acima (atribuição de IA, `git` destrutivo) "
+                       "perde para elas — e você diz isso no PR.")
+    if ph["review"]["source"] == "detected":
+        lines.append("- review/QA é feito por: " + ", ".join(f"`{a}`" for a in ph["review"]["provider"]) + ".")
+    return "\n".join(lines)
+
+
+def sync_provider(repo: "Repo", dry_run: bool) -> str:
+    """The repo's own sync before any worktree is cut: `make sync`, or the command `phases.sync` declares.
+    A `.claude/commands/*` provider is prose for the agent, not a script: the prompt names it, nothing
+    runs here. A sync that fails refuses the dispatch — worktrees cut from an unsynced base are the
+    conflict `resolve` would spend an afternoon on."""
+    ph = repo.profile()["phases"]["sync"]
+    if ph["source"] == "default":
+        return ""
+    provider = ph["provider"]
+    if not isinstance(provider, str):
+        raise SystemExit(f"{repo.slug}: `phases.sync` must be a command (e.g. `make sync-main`), "
+                         f"got {type(provider).__name__}")
+    if (repo.root / ".claude" / "commands" / provider).exists():
+        msg = f"{repo.slug}: sync: `.claude/commands/{provider}` is repo prose for the agent, nothing to run here"
+        print(msg)
+        return msg
+    cmd = shlex.split(provider)
+    what = f"{repo.slug}: sync: `{' '.join(cmd)}` in {repo.root}"
+    if dry_run:
+        print(what + " (dry-run)")
+        return what + " (dry-run)"
+    print(what)
+    ok, out = sh_ok(cmd, cwd=repo.root, env=repo.env)
+    if not ok:
+        raise SystemExit(f"{repo.slug}: dispatch refused: the repo's sync provider `{' '.join(cmd)}` failed:\n{out}")
+    return what
 
 
 # ---------------------------------------------------------------- refs & tree
@@ -844,6 +1163,7 @@ def render_prompt(repo: Repo, iss: dict, branch: str, sha: str, parallel: int) -
         "CODEGRAPH_NOTE": "o repo tem `.codegraph/`; use `codegraph explore \"...\"` antes de grep/Read" if repo.has_codegraph()
                           else "sem índice CodeGraph aqui; se `codegraph` existir no PATH, rode `codegraph init .` na worktree primeiro",
         "ACCOUNT": f"conta gh `{repo.account}` (use `GH_TOKEN=$(gh auth token --user {repo.account})` nos comandos gh)" if repo.account else "conta gh ativa",
+        "PROFILE": profile_prompt(repo.profile()),
         "PARALLEL": str(max(parallel - 1, 0)),
     }
     for k, v in fields.items():
@@ -875,15 +1195,29 @@ def cmd_repos(default: Repo | None, a):
         return
     if a.action == "scan":
         added = 0
+        also: dict[str, list[Path]] = {}
         for base in reg["search_paths"]:
             for d in sorted(Path(base).expanduser().glob("*")):
-                if (d / ".git").is_dir():
-                    ok, url = sh_ok(["git", "remote", "get-url", "origin"], cwd=d)
-                    slug = slug_of_url(url) if ok else None
-                    if slug and slug not in reg["repos"]:
-                        reg["repos"][slug] = {"path": str(d.resolve())}
-                        added += 1
+                if not (d / ".git").is_dir():
+                    continue
+                ok, url = sh_ok(["git", "remote", "get-url", "origin"], cwd=d)
+                slug = slug_of_url(url) if ok else None
+                if not slug:
+                    continue
+                entry = reg["repos"].get(slug)
+                here = d.resolve()
+                if entry is None or "path" not in entry or not Path(entry["path"]).exists():
+                    # a new repo, or a registered one whose path is gone — the same repair Repo.get makes
+                    if entry is None:
+                        reg["repos"][slug] = {"path": str(here)}
+                    else:
+                        entry["path"] = str(here)
+                    added += 1
+                elif Path(entry["path"]).resolve() != here:
+                    also.setdefault(slug, []).append(here)  # the registry wins; a second checkout is reported, not chosen
         save_registry(reg)
+        for slug, paths in sorted(also.items()):
+            print(f"{slug}: another checkout at {', '.join(map(str, paths))} — the registry keeps {reg['repos'][slug]['path']}")
         print(f"scanned {reg['search_paths']}: {added} new, {len(reg['repos'])} total")
 
 
@@ -892,6 +1226,7 @@ def cmd_facts(default: Repo | None, a):
     for r in repos:
         print(json.dumps({"slug": r.slug, "root": str(r.root), "account": r.account or "(active)", "base": r.base,
                           "config_source": r.cfg_source, "gate": r.gate(), "gate_sources": dict(r.gate_sources()), "protected": r.protected, "codegraph": r.has_codegraph(),
+                          "profile": r.profile(),
                           "worktree_example": str(r.worktree(1)), "handoffs": str(r.handoffs)}, indent=2))
 
 
@@ -984,6 +1319,7 @@ def cmd_dispatch(default: Repo | None, a):
                 raise SystemExit(f"dispatch refused: {key(repo, n)} is not ready — {'; '.join(bad)}. `wave why {key(repo, n)}`")
     for repo in {r for r, _ in targets}:
         repo.fetch()
+        sync_provider(repo, a.dry_run)
         repo.handoffs.mkdir(exist_ok=True)
         if a.warm:  # archives downloaded once, here, so the worktrees' parallel builds only extract
             if not (repo.root / "Cargo.toml").exists():
@@ -1999,7 +2335,11 @@ def cmd_doctor(default: Repo | None, a) -> None:
                        "eleven parallel agents once hit the rate limit (3 of 11 killed) and one killed mid-build left a crate "
                        "half-extracted in the shared cargo cache — batch 4, and `wave dispatch --warm` to download once", False))
     if default is None:
-        checks.append(("inside a registered repo", False, "run from a checkout, or pass --repo", True))
+        reg = load_registry()
+        checks.append(("inside a registered repo", False,
+                       f"the registry ({REGISTRY}) lists {len(reg['repos'])} repo(s): {', '.join(sorted(reg['repos'])) or 'none'}; "
+                       f"search paths: {', '.join(reg['search_paths'])} — run from a checkout or pass --repo; "
+                       "an owner/name#N ref to a repo you do not have is cloned into the first search path", True))
     else:
         r = default
         dirty = r.git(["status", "--porcelain", "--untracked-files=no"]).strip()
@@ -2019,6 +2359,16 @@ def cmd_doctor(default: Repo | None, a) -> None:
         checks.append(("gate is declared and real", bool(gate) and not gate[0].startswith("<"), " && ".join(gate), True))
         for action in r.ci_gate()[1]:
             checks.append((f"CI runs `{action}` and the gate does not", False, "if it is a gate step, declare its command in `.wave.json`; then add it to `ignore_actions`", False))
+        for cmd, where in doc_commands(r.root):
+            if cmd not in gate:
+                checks.append((f"`{where}` names `{cmd}` and the gate does not", False,
+                               "if it is a gate step, declare it in `.wave.json`'s gate", False))
+        hooks = r.profile()["hooks"]
+        if hooks:
+            broken = [h for h in hooks if not h["ok"]]
+            checks.append((f"the repo's own hooks can run ({len(hooks)})", not broken,
+                           "; ".join(f"{h['path']}: {h['why']}" for h in broken)
+                           or ", ".join(h["path"] for h in hooks), False))
         checks.append(("protected paths declared", bool(r.protected), ", ".join(r.protected) or "none: verify cannot guard anything — `repos add . --protected <paths>`", False))
         hdata, hwhy = load_settings(r.root / ".claude" / "settings.json")
         hhave = installed_guards(hdata) if hdata is not None else set()
@@ -2208,6 +2558,13 @@ GUARANTEES = [
     ("base CI red after a merge stops the queue", "cmd_merge --wait-base-ci", "exit 4 with the semantic-conflict note", False),
     (".wave.json is read from origin/<base> after the fetch, not from a main checkout left behind; doctor names a stale copy", "Repo._load_cfg <- Repo.fetch, cmd_doctor", "facts config_source: origin/main:.wave.json; ! main checkout's `.wave.json` matches origin/main's: differs in gate", True),
     ("doctor names every CI action the gate does not cover", "cmd_doctor -> Repo.ci_gate", "! CI runs `x/y@v1` and the gate does not", True),
+    ("the repo's own orchestration is detected per phase, by name and location, and `.wave.json` phases overrides it", "Repo.profile -> detect_profile", "facts profile.phases: provider + detected | declared | default", True),
+    ("the agent prompt carries the profile: repo skills in order before the default stack, hooks enforced, rule files first; nothing found says so", "render_prompt -> profile_prompt", "the {{PROFILE}} block of templates/agent.md", True),
+    ("dispatch runs the repo's sync provider before creating worktrees", "cmd_dispatch -> sync_provider", "make sync in <root>; a failure refuses, a `.claude/commands/*` provider is only named", True),
+    ("Makefile targets test/check/lint/ci are gate candidates when the manifest falls through", "Repo._manifest_gate -> makefile_targets", "gate_sources: (make test, manifest)", True),
+    ("doctor warns when the Makefile or the rule files name a command the gate lacks", "cmd_doctor -> doc_commands", "! `CLAUDE.md` names `make ci` and the gate does not", True),
+    ("doctor lists the repo's hooks and warns when one cannot run", "cmd_doctor -> hook_health", "! the repo's own hooks can run (3): <path>: not executable (chmod +x)", True),
+    ("plan refuses a body missing the repo's issue-template sections", "cmd_plan -> template_problems", "plan refused: one lacks the repo template's ## Handoff", True),
     ("doctor tells an agent at work from a likely dead one, and names the recovery", "cmd_doctor -> liveness", "! no agent likely dead: <worktrees> — SendMessage or `wave dispatch --force N`", True),
     ("a likely dead worktree stays `worktree` in next, never `in progress`", "candidates -> liveness", "worktree exists (likely dead, nothing changed for N min)", True),
     ("doctor fails on a crate cargo marked extracted but left half-written", "cmd_doctor -> broken_crates", "✗ cargo cache ...: <crate> is missing N of M files", True),
@@ -2219,6 +2576,9 @@ GUARANTEES = [
     ("an existing worktree is kept, never recreated", "cmd_dispatch", "prints 'worktree exists'", False),
     ("cleanup removes only worktrees that are clean, pushed and merged", "cmd_cleanup", "KEEP lines with the reason", False),
     ("plan refuses to run twice on the same directory or titles", "cmd_plan", "numbers.json / duplicate titles refusal", False),
+    ("adopt turns a milestone, a label or explicit refs into an epic: sub-issues attached, textual dependencies (depends on / blocked by / after / needs, cross-repo) wired as blocked_by; an issue that already has a parent is reported, not moved", "cmd_adopt -> textual_deps, Repo.parent", "adopt report: attached / blocked by / already has a parent — reported, not moved", True),
+    ("adopt reads before it writes: a second run attaches nothing twice, wires nothing twice, comments nothing twice", "cmd_adopt (sub_issues, blocked_by and comments read before every write)", "already a sub-issue / already blocked by; the second run makes no write call", True),
+    ("adopt never edits a body: a missing `## Done when` gets a comment asking for observable criteria, and the lint output rides the adopt report", "cmd_adopt -> lint_body", "commented: no `## Done when`; lint: ...", True),
     ("every open leaf is in exactly one state", "candidates (assert)", "blocked | in-progress | done-unclosed | agent-exhausted | worktree | ready", True),
     ("an open issue whose every Done-when item is ticked or struck is never dispatched", "candidates + premises_for", "done-unclosed: ... close it or add an item", True),
     ("verify flags AI attribution in body or commits", "verify_one", "AI-ATTRIBUTION", True),
@@ -2253,6 +2613,11 @@ GUARANTEES = [
     ("an exhausted worktree is its own exclusive state, never ready", "candidates -> liveness", "agent-exhausted: N resumes without a new commit — dispatch refuses", True),
     ("doctor reports the retry ceiling, and with --epic the state sweep, both soft", "cmd_doctor -> sweep_retries, sweep_epic", "! no agent past the retry ceiling (3 no-progress dispatches ...) / ! state sweep of <epic>", True),
     ("a command run inside a worktree never re-points the registry: it names the main checkout", "Repo.from_cwd (--git-common-dir)", "repos.json path stays the main checkout; a worktree or missing path is repaired to it", True),
+    ("a ref to a repo with no checkout is size-checked, cloned into the first search path, registered, and the command continues", "Repo.get -> clone_repo", "the size on GitHub, then 'cloned owner/name into …'; repos.json gains the path", True),
+    ("a clone is never shallow: worktrees, merge-tree and --merged need history", "clone_repo (no --depth, is-shallow-repository refused)", "a shallow result exits with 'need history' and registers nothing", True),
+    ("cloning asks above clone_ask_over_mb (registry, default 500 MB): the command is printed instead", "clone_repo's diskUsage gate", "'over the 500 MB … gh repo clone owner/name …', nothing cloned or registered", True),
+    ("scan and Repo.get agree on the checkout: the registry wins, a second checkout is reported, a dead path is repaired", "find_checkouts + cmd_repos scan", "'another checkout at … — the registry keeps …'", True),
+    ("doctor from outside any repo reports the registry and the search paths, not just a refusal", "cmd_doctor's default=None branch", "'the registry (…) lists …; search paths: …'", True),
     ("per-repo gh account token, global login untouched", "Repo._env", "GH_TOKEN per call", True),
     ("an epic follows sub-issues and blockers into other repos; plan --slug creates there", "tree + candidates, cmd_plan", "keys owner/name#N, gh -R owner/name", True),
     ("wave epics lists every open epic root across the registry's repos, readiest first, one line ending in the exact command to continue", "cmd_epics -> epics_of, epic_stats", "an epic is open, has sub-issues or the `epic` label, and is nobody's sub-issue; a closed epic never appears; --json feeds the SKILL's step 0", True),
@@ -2300,6 +2665,28 @@ def fill_refs(body: str, numbers: dict[str, int]) -> str:
     return body
 
 
+def template_problems(repo: "Repo", d: Path, rows: list[list[str]]) -> list[tuple[str, list[str]]]:
+    """(key, missing headings) for each body that lacks a `## ` section the repo's own issue template
+    requires: `.claude/issue-templates/<label>.md` for the row's first labelled type, else `default.md`.
+    No template, no charge — the plugin's contract stays the one `wave lint` charges on GitHub."""
+    tdir = repo.root / ".claude" / "issue-templates"
+    if not tdir.is_dir():
+        return []
+    out = []
+    for k, _, labels, _ in rows:
+        tpl = next((tdir / f"{l.strip()}.md" for l in labels.split(",") if (tdir / f"{l.strip()}.md").exists()), None)
+        if tpl is None and (tdir / "default.md").exists():
+            tpl = tdir / "default.md"
+        if tpl is None:
+            continue
+        need = [l.strip() for l in tpl.read_text().splitlines() if l.startswith("## ")]
+        body = (d / f"{k}.md").read_text().splitlines()
+        missing = [h for h in need if not any(l.strip() == h for l in body)]
+        if missing:
+            out.append((k, missing))
+    return out
+
+
 def cmd_plan(default: Repo | None, a):
     """Create an epic's issues from a directory: <dir>/index.tsv, <dir>/deps.tsv, <dir>/<key>.md.
 
@@ -2319,6 +2706,10 @@ def cmd_plan(default: Repo | None, a):
             raise SystemExit(f"index.tsv row needs 4 tab-separated fields: {r}")
         if not (d / f"{r[0]}.md").exists():
             raise SystemExit(f"missing body {d / (r[0] + '.md')}")
+    problems = template_problems(repo, d, rows)
+    if problems and not a.force:
+        raise SystemExit("plan refused: " + "; ".join(f"{k} lacks the repo template's {', '.join(m)}"
+                                                      for k, m in problems) + " (`--force` creates anyway)")
     if a.dry_run:
         for k, title, labels, parent in rows:
             print(f"{k:<6} parent={parent:<6} [{labels}] {title}")
@@ -2362,6 +2753,150 @@ def cmd_plan(default: Repo | None, a):
     print(f"\n{len(rows)} issues created; key->number map in {d / 'numbers.json'}")
 
 
+# ---------------------------------------------------------------- adopt
+
+ADOPT_NOTE_TAG = "`wave adopt`"
+ADOPT_NOTE = (ADOPT_NOTE_TAG + ": this issue has no `## Done when` list, so `next` cannot tell done from to-do "
+              "and a PR cannot carry its ledger. Add one — every item an observable criterion: a test that "
+              "passes, a command that prints what it should.")
+
+
+def textual_deps(text: str, slug: str) -> set[tuple[str, int]]:
+    """The (owner/name, n) of every textual dependency in `text`: a verb (`depends on`, `blocked by`, `after`,
+    `needs`) followed by a ref — a bare #N is this repo's issue, `owner/name#N` another repo's."""
+    return {(m.group(1) or slug, int(m.group(2))) for m in DEPENDS.finditer(text)}
+
+
+def pick_by_selector(issues: list[dict], milestone: str | None, label: str | None) -> list[dict]:
+    """The issues that carry the milestone title or the label, in `gh issue list` order."""
+    if milestone:
+        return [i for i in issues if (i.get("milestone") or {}).get("title") == milestone]
+    return [i for i in issues if label in {l["name"] for l in i["labels"]}]
+
+
+def cmd_adopt(default: Repo | None, a):
+    """Turn an existing milestone, label or explicit issue list into an epic the plugin can run: `--epic N`
+    designates the epic, or one is created titled after the milestone/label with the `epic` label. Every
+    selected open issue is attached as a sub-issue — one that already has a parent is reported, not moved —
+    and the textual dependencies written in bodies and comments become real `blocked_by`. A body without a
+    `## Done when` gets a comment asking for observable criteria, never an edit, and the `wave lint` output
+    rides the report. Every read happens before any write, so a second run adds nothing twice."""
+    repo = Repo.get(a.slug) if a.slug else default
+    if repo is None:
+        raise SystemExit("run inside the repo or pass --slug owner/name")
+    if bool(a.milestone) + bool(a.label) + bool(a.issues) != 1:
+        raise SystemExit('select the issues one way: --milestone "<title>", --label <name>, or issue refs')
+    if a.issues and not a.epic:
+        raise SystemExit("explicit refs need an epic to join: --epic N")
+    issues = json.loads(repo.gh(["issue", "list", "-R", repo.slug, "--state", "open", "--limit", "500",
+                                 "--json", "number,id,title,body,state,labels,milestone"]))
+    if a.issues:
+        picked = []
+        for ref in a.issues:
+            r, n = parse_ref(ref, repo)
+            if r.slug != repo.slug:
+                raise SystemExit(f"{key(r, n)}: adopt adopts one repo's issues at a time; run it again for {r.slug}")
+            iss = r.issue(n)
+            if iss["state"] != "open":
+                print(f"{key(r, n)}: closed, not adopted")
+                continue
+            picked.append(iss)
+    else:
+        picked = pick_by_selector(issues, a.milestone, a.label)
+    if not picked:
+        sel = f'milestone "{a.milestone}"' if a.milestone else f'label "{a.label}"' if a.label else "the refs given"
+        raise SystemExit(f"no open issue selected: nothing in {repo.slug} carries {sel}")
+
+    epic_repo, epic_n, created = repo, None, False
+    if a.epic:
+        epic_repo, epic_n = parse_ref(a.epic, repo)
+    else:  # read before create: a second adopt finds the epic the first one made and reuses it
+        title = a.milestone or a.label
+        hit = next((i for i in issues if i["title"] == title), None)
+        epic_n = hit["number"] if hit else None
+    where = f'milestone "{a.milestone}"' if a.milestone else f'label "{a.label}"' if a.label else "explicit refs"
+    print(f"adopt {repo.slug}: {where} — {len(picked)} open issue(s)")
+
+    attached = set()
+    if epic_n is not None:
+        attached = {(slug_of_api(s["repository_url"]), s["number"]) for s in epic_repo.sub_issues(epic_n)}
+
+    # reads: parent, existing blockers, comments — per issue, before any write below
+    entries, unreadable = [], []
+    for iss in sorted(picked, key=lambda i: i["number"]):
+        n, body = iss["number"], iss.get("body") or ""
+        bodies = [c.get("body") or "" for c in repo.api(f"repos/{repo.slug}/issues/{n}/comments")]
+        body_deps = textual_deps(body, repo.slug)
+        comment_deps = textual_deps("\n".join(bodies), repo.slug) - body_deps
+        blockers, unread = [], []
+        for slug, dn in sorted((body_deps | comment_deps) - {(repo.slug, n)}):
+            try:
+                blockers.append((slug, dn, Repo.get(slug).issue(dn)["id"]))
+            except SystemExit:
+                unread.append((slug, dn, n))
+        unreadable += unread
+        entries.append({"n": n, "id": iss["id"], "title": iss["title"], "parent": repo.parent(n),
+                        "comment_deps": comment_deps, "blockers": blockers,
+                        "wired": {(slug_of_api(b["repository_url"]), b["number"]) for b in repo.blocked_by(n)},
+                        "attach": epic_n is None or (repo.slug, n) not in attached,
+                        "epic_itself": epic_n is not None and (epic_repo.slug, epic_n) == (repo.slug, n),
+                        "nudge": done_when(body) is None
+                                 and not any(ADOPT_NOTE_TAG in t and "## Done when" in t for t in bodies),
+                        "lint": lint_body(body, n, issue_type(iss))})
+
+    if epic_n is None and not a.dry_run:
+        name = a.milestone or a.label
+        url = repo.gh(["issue", "create", "-R", repo.slug, "--title", name, "--label", "epic", "--body",
+                       f"`wave adopt` gathered the open issues of {repo.slug} that carried the "
+                       f"{'milestone' if a.milestone else 'label'} \"{name}\" under this issue and wired "
+                       f"their textual dependencies as blocked_by."])
+        epic_n, created = int(url.strip().rstrip("/").split("/")[-1]), True
+    if epic_n is None:  # a dry run with no epic to reuse: only the promise of one
+        print(f'epic: would create one titled "{a.milestone or a.label}" with the `epic` label')
+    else:
+        print(f"epic: {key(epic_repo, epic_n)} (" + (f"created from {where}, label `epic`)" if created else "existing)"))
+
+    counts = {"attached": 0, "wired": 0, "commented": 0}
+    for e in entries:
+        n, notes = e["n"], []
+        if e["parent"] is not None:
+            notes.append("already has a parent: " + key(Repo.get(slug_of_api(e["parent"]["repository_url"])),
+                                                        e["parent"]["number"]) + " — reported, not moved")
+        elif e["epic_itself"]:
+            notes.append("is the epic")
+        elif not e["attach"]:
+            notes.append("already a sub-issue")
+        elif a.dry_run:
+            notes.append("would attach as a sub-issue")
+        else:
+            epic_repo.api(f"repos/{epic_repo.slug}/issues/{epic_n}/sub_issues", "POST", {"sub_issue_id": e["id"]})
+            counts["attached"] += 1
+            notes.append("attached")
+        for slug, dn, bid in e["blockers"]:
+            if (slug, dn) in e["wired"]:
+                notes.append(f"already blocked by {slug}#{dn}")
+            elif a.dry_run:
+                notes.append(f"would wire blocked by {slug}#{dn}")
+            else:
+                repo.api(f"repos/{repo.slug}/issues/{n}/dependencies/blocked_by", "POST", {"issue_id": bid})
+                counts["wired"] += 1
+                notes.append(f"blocked by {slug}#{dn}" + (" (from a comment)" if (slug, dn) in e["comment_deps"] else ""))
+        if e["nudge"]:
+            if a.dry_run:
+                notes.append("would comment: no `## Done when`")
+            else:
+                repo.gh(["issue", "comment", str(n), "-R", repo.slug, "--body", ADOPT_NOTE])
+                counts["commented"] += 1
+                notes.append("commented: no `## Done when` (asked for observable criteria)")
+        print(f"  #{n} {e['title'][:50]} — " + ("; ".join(notes) if notes else "nothing to do"))
+        for m in e["lint"]:
+            print(f"      lint: {m}")
+    if unreadable:
+        print("could not read: " + ", ".join(f"{slug}#{dn} (wanted by #{n})" for slug, dn, n in unreadable))
+    print(f"{counts['attached']} sub-issue(s) attached, {counts['wired']} blocked_by wired, "
+          f"{counts['commented']} Done-when ask(s) commented" + (" — nothing written (--dry-run)" if a.dry_run else ""))
+
+
 # ---------------------------------------------------------------- main
 
 def main(argv=None):
@@ -2391,6 +2926,7 @@ def main(argv=None):
     x = s.add_parser("lint", help="check issues carry what /wave needs"); x.add_argument("issues", nargs="+")
     x = s.add_parser("tick", help="tick (--done) or strike (--strike + --why) items of an issue's `## Done when`, by index or text; what merge does with a PR's ledger"); x.add_argument("issue"); x.add_argument("--done", action="append", metavar="ITEM"); x.add_argument("--strike", action="append", metavar="ITEM"); x.add_argument("--why", action="append", metavar="REASON", help="one per --strike, in the same order"); x.add_argument("--dry-run", action="store_true", help="print the lines that would change, write nothing")
     x = s.add_parser("plan", help="create an epic's issues from <dir>/index.tsv + deps.tsv + <key>.md, wiring sub-issues and blocked_by"); x.add_argument("dir"); x.add_argument("--slug"); x.add_argument("--milestone"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--force", action="store_true")
+    x = s.add_parser("adopt", help="turn an existing milestone or label (or explicit refs) into an epic: attaches sub-issues, wires textual dependencies as blocked_by, comments what is missing"); x.add_argument("issues", nargs="*"); x.add_argument("--milestone"); x.add_argument("--label"); x.add_argument("--epic", help="an existing issue to designate as the epic; without it one is created titled after the milestone/label, with the `epic` label"); x.add_argument("--slug"); x.add_argument("--dry-run", action="store_true", help="print what would be wired and what could not be read; write nothing")
 
     x = s.add_parser("hooks", help="guard hooks: install [--dry-run] writes them into the project's .claude/settings.json (idempotent, backed up); status: active | missing | broken")
     x.add_argument("action", choices=["install", "status"]); x.add_argument("--dry-run", action="store_true")
@@ -2409,7 +2945,7 @@ def main(argv=None):
     try:
         {"repos": cmd_repos, "facts": cmd_facts, "next": cmd_next, "epics": cmd_epics, "dispatch": cmd_dispatch, "prompt": cmd_prompt,
      "verify": cmd_verify, "judge": cmd_judge, "order": cmd_order, "merge": cmd_merge, "resolve": cmd_resolve, "close-parents": cmd_close_parents,
-             "cleanup": cmd_cleanup, "status": cmd_status, "lint": cmd_lint, "plan": cmd_plan, "why": cmd_why, "doctor": cmd_doctor,
+             "cleanup": cmd_cleanup, "status": cmd_status, "lint": cmd_lint, "plan": cmd_plan, "adopt": cmd_adopt, "why": cmd_why, "doctor": cmd_doctor,
              "agents": cmd_agents, "tick": cmd_tick, "sweep": cmd_sweep, "hooks": cmd_hooks,
          "guarantees": cmd_guarantees}[a.cmd](default, a)
     except SystemExit as e:

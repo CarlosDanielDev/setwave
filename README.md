@@ -50,7 +50,7 @@ wave plan ./my-epic --milestone "v2"             # create, link, wire
 
 It creates the issues in order, links sub-issues, wires `blocked_by`, fills cross-references, and refuses to run twice. `/setwave:define` is the session that authors those bodies ([Planning an epic](#planning-an-epic)); `wave lint` checks them.
 
-*An existing project* (a milestone or label full of flat issues, "depends on #14" written in the text): the plugin reads only real sub-issues and real `blocked_by`, so wire them by hand today — `gh api repos/o/r/issues/<epic>/sub_issues -F sub_issue_id=<id>` and `…/issues/<n>/dependencies/blocked_by -F issue_id=<id>` — or wait for `wave adopt` ([#11](https://github.com/CarlosDanielDev/setwave/issues/11)), which does exactly that from a milestone or label.
+*An existing project* (a milestone or label full of flat issues, "depends on #14" written in the text): `wave adopt` turns it into an epic the plugin can run — see [Adopting an existing project](#adopting-an-existing-project).
 
 **3. Run the wave.** In Claude Code:
 
@@ -76,7 +76,7 @@ The last status comment on the epic is the paper trail. `wave epics` is the sing
 | --- | --- | --- |
 | preflight | `wave doctor` — gh, git ≥ 2.38, clean checkout, real gate, protected paths, dead-agent and leftover worktrees, half-extracted crates in the cargo cache (`--fix-cache` moves them aside), disk and size of the batch; `dispatch` refuses on ✗, `dispatch --warm` runs `cargo fetch` once first | the script |
 | watch agents | `wave agents` — every issue worktree: minutes since dispatch, minutes since the newest change, open PR, and a verdict (`working`, `quiet`, `likely dead`, `done`); `doctor` names the likely dead with their recovery | files and git, never processes |
-| discover | `wave facts` — remote, base branch, gate from CI or manifest, protected paths | the repo |
+| discover | `wave facts` — remote, base branch, gate from CI or manifest, protected paths, and the repo's profile: its own orchestration, one provider per phase of the loop | the repo |
 | find the wave | `wave next <epic> --batch 4` — every open leaf in exactly one state: blocked, in progress, done-unclosed, worktree, ready | GitHub |
 | find the epic | `wave epics` — every open epic across the registry's repos (`--slug` / `--repo` for one), readiest first, one line each ending in the exact command to continue; `--json` is what `/setwave:wave` reads when invoked with no epic | GitHub |
 | explain | `wave why <issue>` — the premises behind READY / NOT READY, with evidence | the script |
@@ -88,6 +88,7 @@ The last status comment on the epic is the paper trail. `wave epics` is the sing
 | resolve | `wave resolve <PR>` — merges the base into the PR's branch in its worktree, gates the commit, plain push, PR comment; a conflict stops with files and line ranges, `--continue` after you fix it | the script; **you** resolve the conflict |
 | close out | `wave close-parents`, `wave cleanup`, `wave status --post` | the script |
 | plan an epic | `wave plan <dir>` — issues from bodies + `index.tsv` + `deps.tsv`; links, wires, fills references; refuses to run twice | the `/setwave:define` session writes the bodies |
+| adopt an epic | `wave adopt --milestone "v2" --dry-run` / `--label backend` / explicit refs — attaches the open issues as sub-issues, wires the dependencies written in the text as `blocked_by`, comments what is missing; an issue that already has a parent is reported, not moved | the script (the epic is the only issue it creates) |
 | measure | `wave stats` — every run logged to `~/.config/setwave/log.jsonl` | the log |
 
 Conflicts are resolved by merging the base branch *into* the PR's branch and pushing normally. Never a force push. Never `--auto`. `wave resolve <PR>` does that in the PR's worktree: a clean merge is gated and pushed, and the PR gets a comment naming the base SHA; a conflicting one is left in place with each file's line ranges, for you to resolve and hand back with `wave resolve <PR> --continue`, which refuses leftover conflict markers. A dirty worktree is refused, never stashed.
@@ -95,7 +96,7 @@ Conflicts are resolved by merging the base branch *into* the PR's branch and pus
 ## Any repo, any account, any stack
 
 - Epics can span repositories: sub-issues and blockers are followed by `repository_url`. Refs are `owner/name#N`; a bare `N` means the repo of the current directory.
-- `~/.config/setwave/repos.json` maps repositories to local checkouts, `gh` accounts, base branches, gate commands, protected and serial paths. Unknown repos are found by scanning `~/projects`. Per-repo calls use that repo's account token (`gh auth token --user`); your global `gh` login is never switched.
+- `~/.config/setwave/repos.json` maps repositories to local checkouts, `gh` accounts, base branches, gate commands, protected and serial paths. Unknown repos are found by scanning the search paths; a ref to a repo that is nowhere local is cloned into the first of them — size-checked first (`clone_ask_over_mb`, default 500 MB, above it the clone command is printed instead), never shallow, and registered. Per-repo calls use that repo's account token (`gh auth token --user`); your global `gh` login is never switched.
 - Two accounts, one registry — a personal repo and a work repo, each under its own `gh` login (`gh auth login` once per account; `gh auth status` lists both):
 
 ```json
@@ -122,7 +123,23 @@ Conflicts are resolved by merging the base branch *into* the PR's branch and pus
 
 `protected`: paths a PR must not touch (`verify` fails if it does). `serial`: paths where two PRs cannot land in one batch — a migrations list, a generated index, a version file — because a textual merge cannot see an index collision; `order` flags them to land one after the other in `blocked_by` order.
 
-- The gate is read from the CI workflow (`run:` lines), or from the manifest (`Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`, `Package.swift`). Steps that are GitHub *actions* are not seen yet ([#3](https://github.com/CarlosDanielDev/setwave/issues/3)); declare those.
+- The gate is read from the CI workflow (`run:` lines), or from the manifest (`Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`, `Package.swift`, or a `Makefile` with `test`/`check`/`lint`/`ci` targets). Steps that are GitHub *actions* are not seen yet ([#3](https://github.com/CarlosDanielDev/setwave/issues/3)); declare those.
+
+## Profiles — the repo's own orchestration
+
+A repository often carries its own way of working: skills, commands, agent definitions, hooks, issue templates, a Makefile, rule files. The plugin reads that orchestration the way it reads the gate — by name and location, deterministic — and renders it into every agent prompt as a **profile**: one provider per phase of the loop (define an issue, prepare a handoff, start work, sync before dispatch, agent rules, review, enforcement, gate, worktree location). `wave facts` prints it, each phase with its provider and where it came from — `detected` (a known name on disk), `declared` (a `phases` key in `.wave.json`), or `default` (the plugin's stack, the one proven on the first epic).
+
+Detection is by convention: `.claude/skills/define` is the define phase; `.claude/skills/issue-handoff` the handoff; `.claude/skills/kickoff` or `.claude/commands/start-*` the kickoff; a `Makefile` `sync` target or `.claude/commands/sync-main` the sync; `CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md` the rule files; `.claude/agents/*review*` and `*-qa*` the review; `.claude/hooks/*` and `.claude/settings.json` hooks the enforcement. A `CLAUDE.md`-only repo gets its rules named and the default stack for everything else; a hooks-only repo gets its hooks named; a repo with nothing gets the plain default stack, and the prompt says so.
+
+What convention cannot know, `.wave.json` declares — `phases` overrides any phase, and `agent_skills` and `rules` add to what was found:
+
+```json
+{"phases": {"define": "define", "handoff": "issue-handoff", "kickoff": "kickoff",
+            "sync": "make sync-main", "agent_skills": ["git-workflow", "work-tracking"],
+            "rules": ["docs/CONVENTIONS.md"]}}
+```
+
+`facts` shows what was detected and what was not, so the line to add is obvious. The agent prompt names the repo's skills in order, before the default stack; the hooks it will trip on; and the rule files to read first — never their contents, so the prompt stays the same size in every repo. A repo rule that contradicts a non-negotiable (no AI attribution, no destructive git) loses, and the agent says so in its PR. `dispatch` runs the sync provider before creating any worktree (`make sync`, or the command `phases.sync` declares; a `.claude/commands/*` file is prose for the agent, only named). `doctor` lists the repo's hooks and warns when one cannot run (not executable, or its interpreter missing — the dispatch-contract hook would otherwise fail silently for every agent), and warns when the `Makefile` or a rule file names a command the gate does not contain.
 
 ## What an issue needs
 
@@ -135,6 +152,18 @@ Agents read the issue **and its comments**: when a PR changes a symbol another o
 The bodies `/setwave:wave` executes are authored by **`/setwave:define`** — [`skills/define/SKILL.md`](skills/define/SKILL.md), the refinement session that only leaves an issue when an implementer would start it without asking a single question. It loads the issue, its parent and its comments, and never re-asks what the parent decided; it interviews the owner in rounds, every question numbered and each carrying a recommended answer; environment facts go to a read-only subagent, not to the owner; and five escalation sensors watch for uncertainty the session cannot resolve — any one firing, it suggests promoting the work to an epic instead of forcing it into one issue. The output is a plan directory (`index.tsv` + one body per issue, the input `wave plan` takes), linted with the same rules `wave lint` runs on GitHub before anything exists — and the only door to GitHub is `wave plan`, behind `--dry-run` and an explicit OK. What the session cannot close becomes a `## Pendências (bloqueiam o Ready)` list in the drafted body, each line with an owner.
 
 Every PR body carries a **Done-when ledger**: a `## Done when` section (that exact heading) with the issue's list copied in order, each item `- [x]` done, `- [ ] item — not done: why`, or `- [ ] ~~item~~ — dropped: reason`. `verify` refuses a PR without one (`LEDGER-MISSING`), with items that differ from the issue's after whitespace normalisation (`LEDGER-MISMATCH`), or for an issue with no `## Done when` to compare with (`ISSUE-NO-DONE-WHEN`). After the merge, `merge` applies it to the issue with `wave tick` — only the open lines it names change — and leaves one comment, "ledger applied from PR #N: 5 done, 1 dropped"; while an item is still open the issue is reopened, so the next prompt's **Remaining** section lists only that item. An open issue whose every item is ticked or struck is `done-unclosed` in `next`: never dispatched. `status` counts the boxes per leaf and sums them on the epic line.
+
+## Adopting an existing project
+
+A milestone or a label full of flat issues becomes an epic the plugin can run, without rewriting anything:
+
+```bash
+wave adopt --milestone "v2" --dry-run   # look: what would be attached, wired, commented, unread
+wave adopt --milestone "v2"             # the epic is created for it, with the `epic` label
+wave adopt --label backend --epic 30    # or the issues join an epic that already exists
+```
+
+Every open issue carrying the milestone — or the label, or the refs named explicitly — is attached as a sub-issue, and the dependencies written in the text become real `blocked_by`: `depends on #14`, `blocked by #9`, `after #3`, `needs #21`, cross-repo `owner/name#7`, in bodies and in comments. A ref with no verb in front of it stays a mention. An issue that already has a parent is reported, not moved. A body without a `## Done when` list gets a comment asking for observable criteria — the body is never edited — and the `wave lint` output rides the adopt report. Everything is read before it is written, so running adopt twice adds nothing twice, and `--dry-run` names the refs it could not read.
 
 ## Mistake-proofing
 
