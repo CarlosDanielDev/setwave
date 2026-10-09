@@ -1,0 +1,7 @@
+# ADR 007 — init proposes, the SKILL asks, and the answer is written once
+
+2026-10-09 · issue #17
+
+The fork the issue names: the script prompts on stdin, or the script prints the proposal and the SKILL asks. Chosen: the script proposes into a file, the SKILL turns it into one `AskUserQuestion`, and the script writes only on `--yes` or on the edited proposal file (`--from`) — a stdin prompt dies under an agent, and a proposal file (`init-proposal.json`) is the same artifact in every host, readable and editable before anything is written. The accepted answer is written twice on purpose: the registry entry first (the machine-local truth, marked `confirmed_at` so it is never re-proposed), and a `.wave.json` at the repo root when the repo has none — untracked, ready for the small PR that shares the answer, because detection keeps reading the repo and must never be forced to guess what a config file could have said.
+
+Never-ask-twice is one predicate (`unconfirmed`): a repo with a `.wave.json` anywhere is never asked anything, a registry entry marked `confirmed_at` or carrying keys typed by hand (`repos add --gate ...`) is an answered repo, and `wave init --again` is the only way to reopen. The wizard runs where the refusal would be: `doctor` (and `dispatch` through it) prints the proposal on a first run, and when no gate is found the gate check's refusal carries the proposal itself instead of the old `<no gate found: read the repo>` pointer — the same block, whether or not anyone is there to answer it.
