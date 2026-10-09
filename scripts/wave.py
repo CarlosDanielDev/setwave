@@ -102,6 +102,21 @@ def sh_ok(cmd: list[str], cwd: Path | None = None, env: dict | None = None) -> t
     return rc == 0, out + err
 
 
+def token_of(slug: str, account: str) -> str:
+    """The account's token, from `gh auth token` stdout only: gh writes update notices and keyring
+    warnings to stderr, and one of those concatenated into GH_TOKEN silently 401s every later gh
+    call for the repo (#27). A failing command keeps stderr for its message — never stdout, which
+    may hold a token; a stdout that is not exactly one non-empty line is refused, never stored."""
+    rc, out, err = run(["gh", "auth", "token", "--user", account])
+    if rc != 0:
+        raise SystemExit(f"{slug}: account {account} is not logged in to gh (`gh auth login`)\n{err.strip() or '(gh printed nothing to stderr)'}")
+    lines = out.splitlines()
+    if len(lines) != 1 or not lines[0].strip():
+        raise SystemExit(f"{slug}: `gh auth token --user {account}` printed something that is not a token "
+                         f"({len(lines)} line(s)) — nothing stored; check the account name and `gh auth status`")
+    return lines[0].strip()
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -163,10 +178,7 @@ def clone_repo(reg: dict, slug: str) -> Path:
     env = dict(os.environ)
     account = reg["repos"].get(slug, {}).get("account")
     if account:
-        ok, tok = sh_ok(["gh", "auth", "token", "--user", account])
-        if not ok:
-            raise SystemExit(f"{slug}: account {account} is not logged in to gh (`gh auth login`)\n{tok}")
-        env["GH_TOKEN"] = tok.strip()
+        env["GH_TOKEN"] = token_of(slug, account)
     ok, out = sh_ok(["gh", "repo", "view", slug, "--json", "diskUsage"], env=env)
     if not ok:
         raise SystemExit(f"{slug}: cannot read its size (`gh repo view {slug} --json diskUsage`)\n{out}")
@@ -269,10 +281,7 @@ class Repo:
         env = dict(os.environ)
         if self.account:
             if self.account not in Repo._tokens:
-                ok, tok = sh_ok(["gh", "auth", "token", "--user", self.account])
-                if not ok:
-                    raise SystemExit(f"{self.slug}: account {self.account} is not logged in to gh (`gh auth login`)\n{tok}")
-                Repo._tokens[self.account] = tok.strip()
+                Repo._tokens[self.account] = token_of(self.slug, self.account)
             env["GH_TOKEN"] = Repo._tokens[self.account]
         return env
 
@@ -2619,6 +2628,7 @@ GUARANTEES = [
     ("scan and Repo.get agree on the checkout: the registry wins, a second checkout is reported, a dead path is repaired", "find_checkouts + cmd_repos scan", "'another checkout at … — the registry keeps …'", True),
     ("doctor from outside any repo reports the registry and the search paths, not just a refusal", "cmd_doctor's default=None branch", "'the registry (…) lists …; search paths: …'", True),
     ("per-repo gh account token, global login untouched", "Repo._env", "GH_TOKEN per call", True),
+    ("the per-account token is read from gh's stdout only: a stderr notice never reaches GH_TOKEN, and a stdout that is not one non-empty line is refused with the account named", "token_of <- Repo._env, clone_repo", "GH_TOKEN stays exactly tok-w under a stderr warning; `printed something that is not a token` names --user w", True),
     ("an epic follows sub-issues and blockers into other repos; plan --slug creates there", "tree + candidates, cmd_plan", "keys owner/name#N, gh -R owner/name", True),
     ("wave epics lists every open epic root across the registry's repos, readiest first, one line ending in the exact command to continue", "cmd_epics -> epics_of, epic_stats", "an epic is open, has sub-issues or the `epic` label, and is nobody's sub-issue; a closed epic never appears; --json feeds the SKILL's step 0", True),
     ("every run is logged", "log_run", "~/.config/setwave/log.jsonl", False),
