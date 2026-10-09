@@ -118,7 +118,16 @@ def main(args: list[str]) -> int:
             return 97
         return answer(path.split("?")[0].strip("/").replace("/", "_") + ".json", slurp="--slurp" in args)
     if args[:2] == ["pr", "list"]:
-        return answer(per_repo(args, f"pr_list_{args[args.index('--state') + 1]}"))
+        name = per_repo(args, f"pr_list_{args[args.index('--state') + 1]}")
+        if "--head" in args:  # `--head b` is GitHub's own filter: only that branch's PRs come back
+            f = FIXTURES / name
+            if not f.exists():
+                print(f"fake gh: no fixture {name} (HTTP 404)", file=sys.stderr)
+                return 1
+            head = args[args.index("--head") + 1]
+            print(json.dumps([p for p in json.loads(f.read_text()) if p.get("headRefName") == head]))
+            return 0
+        return answer(name)
     if args[:2] in (["pr", "checks"], ["pr", "view"]):
         return answer(f"pr_{args[1]}_{args[2]}.json")
     if args[:2] == ["issue", "list"]:

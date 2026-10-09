@@ -1,0 +1,6 @@
+[
+  {"number": 40, "state": "MERGED", "headRefName": "feat/6-merged"},
+  {"number": 41, "state": "CLOSED", "headRefName": "feat/7-closed"},
+  {"number": 42, "state": "OPEN", "headRefName": "feat/8-open"},
+  {"number": 43, "state": "MERGED", "headRefName": "feat/14-gone"}
+]
