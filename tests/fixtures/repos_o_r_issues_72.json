@@ -1,0 +1,10 @@
+{
+  "id": 1072,
+  "number": 72,
+  "title": "Leaf with a handoff and no Done when",
+  "state": "open",
+  "body": "Parent: #1\n\nThe fix lives in `scripts/wave.py`, in `parse_ref`.\n\n## Handoff\n\n```bash\ngit worktree add -b feat/72-old ../r-72 origin/main\n```\n",
+  "labels": [],
+  "html_url": "https://github.com/o/r/issues/72",
+  "repository_url": "https://api.github.com/repos/o/r"
+}
