@@ -95,7 +95,7 @@ Conflicts are resolved by merging the base branch *into* the PR's branch and pus
 ## Any repo, any account, any stack
 
 - Epics can span repositories: sub-issues and blockers are followed by `repository_url`. Refs are `owner/name#N`; a bare `N` means the repo of the current directory.
-- `~/.config/setwave/repos.json` maps repositories to local checkouts, `gh` accounts, base branches, gate commands, protected and serial paths. Unknown repos are found by scanning `~/projects`. Per-repo calls use that repo's account token (`gh auth token --user`); your global `gh` login is never switched.
+- `~/.config/setwave/repos.json` maps repositories to local checkouts, `gh` accounts, base branches, gate commands, protected and serial paths. Unknown repos are found by scanning the search paths; a ref to a repo that is nowhere local is cloned into the first of them — size-checked first (`clone_ask_over_mb`, default 500 MB, above it the clone command is printed instead), never shallow, and registered. Per-repo calls use that repo's account token (`gh auth token --user`); your global `gh` login is never switched.
 - Two accounts, one registry — a personal repo and a work repo, each under its own `gh` login (`gh auth login` once per account; `gh auth status` lists both):
 
 ```json
