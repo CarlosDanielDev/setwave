@@ -50,7 +50,7 @@ wave plan ./my-epic --milestone "v2"             # create, link, wire
 
 It creates the issues in order, links sub-issues, wires `blocked_by`, fills cross-references, and refuses to run twice. `/setwave:define` is the session that authors those bodies ([Planning an epic](#planning-an-epic)); `wave lint` checks them.
 
-*An existing project* (a milestone or label full of flat issues, "depends on #14" written in the text): the plugin reads only real sub-issues and real `blocked_by`, so wire them by hand today — `gh api repos/o/r/issues/<epic>/sub_issues -F sub_issue_id=<id>` and `…/issues/<n>/dependencies/blocked_by -F issue_id=<id>` — or wait for `wave adopt` ([#11](https://github.com/CarlosDanielDev/setwave/issues/11)), which does exactly that from a milestone or label.
+*An existing project* (a milestone or label full of flat issues, "depends on #14" written in the text): `wave adopt` turns it into an epic the plugin can run — see [Adopting an existing project](#adopting-an-existing-project).
 
 **3. Run the wave.** In Claude Code:
 
@@ -87,6 +87,7 @@ The last status comment on the epic is the paper trail. A single view across all
 | resolve | `wave resolve <PR>` — merges the base into the PR's branch in its worktree, gates the commit, plain push, PR comment; a conflict stops with files and line ranges, `--continue` after you fix it | the script; **you** resolve the conflict |
 | close out | `wave close-parents`, `wave cleanup`, `wave status --post` | the script |
 | plan an epic | `wave plan <dir>` — issues from bodies + `index.tsv` + `deps.tsv`; links, wires, fills references; refuses to run twice | the `/setwave:define` session writes the bodies |
+| adopt an epic | `wave adopt --milestone "v2" --dry-run` / `--label backend` / explicit refs — attaches the open issues as sub-issues, wires the dependencies written in the text as `blocked_by`, comments what is missing; an issue that already has a parent is reported, not moved | the script (the epic is the only issue it creates) |
 | measure | `wave stats` — every run logged to `~/.config/setwave/log.jsonl` | the log |
 
 Conflicts are resolved by merging the base branch *into* the PR's branch and pushing normally. Never a force push. Never `--auto`. `wave resolve <PR>` does that in the PR's worktree: a clean merge is gated and pushed, and the PR gets a comment naming the base SHA; a conflicting one is left in place with each file's line ranges, for you to resolve and hand back with `wave resolve <PR> --continue`, which refuses leftover conflict markers. A dirty worktree is refused, never stashed.
@@ -150,6 +151,18 @@ Agents read the issue **and its comments**: when a PR changes a symbol another o
 The bodies `/setwave:wave` executes are authored by **`/setwave:define`** — [`skills/define/SKILL.md`](skills/define/SKILL.md), the refinement session that only leaves an issue when an implementer would start it without asking a single question. It loads the issue, its parent and its comments, and never re-asks what the parent decided; it interviews the owner in rounds, every question numbered and each carrying a recommended answer; environment facts go to a read-only subagent, not to the owner; and five escalation sensors watch for uncertainty the session cannot resolve — any one firing, it suggests promoting the work to an epic instead of forcing it into one issue. The output is a plan directory (`index.tsv` + one body per issue, the input `wave plan` takes), linted with the same rules `wave lint` runs on GitHub before anything exists — and the only door to GitHub is `wave plan`, behind `--dry-run` and an explicit OK. What the session cannot close becomes a `## Pendências (bloqueiam o Ready)` list in the drafted body, each line with an owner.
 
 Every PR body carries a **Done-when ledger**: a `## Done when` section (that exact heading) with the issue's list copied in order, each item `- [x]` done, `- [ ] item — not done: why`, or `- [ ] ~~item~~ — dropped: reason`. `verify` refuses a PR without one (`LEDGER-MISSING`), with items that differ from the issue's after whitespace normalisation (`LEDGER-MISMATCH`), or for an issue with no `## Done when` to compare with (`ISSUE-NO-DONE-WHEN`). After the merge, `merge` applies it to the issue with `wave tick` — only the open lines it names change — and leaves one comment, "ledger applied from PR #N: 5 done, 1 dropped"; while an item is still open the issue is reopened, so the next prompt's **Remaining** section lists only that item. An open issue whose every item is ticked or struck is `done-unclosed` in `next`: never dispatched. `status` counts the boxes per leaf and sums them on the epic line.
+
+## Adopting an existing project
+
+A milestone or a label full of flat issues becomes an epic the plugin can run, without rewriting anything:
+
+```bash
+wave adopt --milestone "v2" --dry-run   # look: what would be attached, wired, commented, unread
+wave adopt --milestone "v2"             # the epic is created for it, with the `epic` label
+wave adopt --label backend --epic 30    # or the issues join an epic that already exists
+```
+
+Every open issue carrying the milestone — or the label, or the refs named explicitly — is attached as a sub-issue, and the dependencies written in the text become real `blocked_by`: `depends on #14`, `blocked by #9`, `after #3`, `needs #21`, cross-repo `owner/name#7`, in bodies and in comments. A ref with no verb in front of it stays a mention. An issue that already has a parent is reported, not moved. A body without a `## Done when` list gets a comment asking for observable criteria — the body is never edited — and the `wave lint` output rides the adopt report. Everything is read before it is written, so running adopt twice adds nothing twice, and `--dry-run` names the refs it could not read.
 
 ## Mistake-proofing
 
