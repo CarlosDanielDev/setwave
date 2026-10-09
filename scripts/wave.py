@@ -18,7 +18,8 @@ Registry: ~/.config/setwave/repos.json
                               "worktree_prefix": "../name-"}}}
 A repo not in the registry is found by scanning search_paths for a checkout
 whose origin matches, then cached. A `.wave.json` at a repo root supplies the
-same per-repo keys (gate, protected, base, worktree_prefix).
+same per-repo keys (gate, protected, base, worktree_prefix). `wave init` proposes
+those keys on a repo's first run and marks the accepted answer `confirmed_at`.
 
 Refs: issues and PRs are `owner/name#N`; a bare `#N`/`N` means the repo of the
 current directory. Stdlib only. Needs `gh` (logged in), `git` >= 2.38, optional `codegraph`.
@@ -387,6 +388,41 @@ class Repo:
             return make
         return ["<no gate found: read the repo, decide, and write it to .wave.json>"]
 
+    def gate_proposal(self) -> tuple[list[str] | None, str, str]:
+        """The gate candidates in the order init offers them — CI `run:`/`uses:` (#3), then the Makefile's
+        test/check/lint/ci targets, then the manifest scripts, and last the commands the rule files' code
+        blocks name — with how the winner was read: detected (a file says so) or guessed (convention).
+        Detection reads; it never runs a candidate to see whether it works."""
+        ci = self.ci_gate()[0]
+        if ci:
+            return [c for c, _ in ci], "detected", ".github/workflows `run:`/`uses:`"
+        mk = [f"make {t}" for t in GATE_TARGETS if t in makefile_targets(self.root)]
+        if mk:
+            return mk, "detected", "Makefile targets test/check/lint/ci"
+        r = self.root
+        if (r / "package.json").exists():
+            try:
+                scripts = json.loads((r / "package.json").read_text()).get("scripts", {})
+            except ValueError:
+                scripts = {}
+            pm = "pnpm" if (r / "pnpm-lock.yaml").exists() else "yarn" if (r / "yarn.lock").exists() else "bun" if (r / "bun.lockb").exists() else "npm"
+            picked = [f"{pm} run {s}" for s in ("lint", "typecheck", "test", "build") if s in scripts]
+            if picked:
+                return picked, "detected", "package.json scripts"
+            return [f"{pm} test"], "guessed", "package.json names no scripts: the runner's default test"
+        if (r / "Cargo.toml").exists():
+            return ["cargo fmt --check", "cargo clippy --all-targets -- -D warnings", "cargo test"], "guessed", "Cargo.toml: the Rust convention, nothing read"
+        if (r / "pyproject.toml").exists():
+            return ["ruff check .", "pytest"], "guessed", "pyproject.toml: the Python convention, nothing read"
+        if (r / "go.mod").exists():
+            return ["go vet ./...", "go test ./..."], "guessed", "go.mod: the Go convention, nothing read"
+        if (r / "Package.swift").exists():
+            return ["swift build", "swift test"], "guessed", "Package.swift: the Swift convention, nothing read"
+        docs = [(c, w) for c, w in doc_commands(self.root) if w != "Makefile"]
+        if docs:
+            return [c for c, _ in docs], "detected", "the code blocks of " + ", ".join(sorted({w for _, w in docs}))
+        return None, "guessed", "no gate found anywhere — a gate is never guessed, only named"
+
     def has_codegraph(self) -> bool:
         return (self.root / ".codegraph").exists()
 
@@ -712,6 +748,182 @@ def sync_provider(repo: "Repo", dry_run: bool) -> str:
     if not ok:
         raise SystemExit(f"{repo.slug}: dispatch refused: the repo's sync provider `{' '.join(cmd)}` failed:\n{out}")
     return what
+
+
+# ---------------------------------------------------------------- init (first run)
+
+INIT_KEYS = ("gate", "base", "worktree_prefix", "protected", "serial")
+PROTECTED_NAMES = {"safety", "security", "migrations", "auth"}
+VERSION_FILES = ("VERSION", "version.txt", "Cargo.toml", "package.json", "pyproject.toml", "go.mod", "Package.swift", "Mix.exs")
+WALK_SKIP = {".git", "node_modules", "target", "dist", "build", "vendor", "Pods", "DerivedData",
+             ".venv", "venv", "__pycache__", ".build", ".codegraph", ".claude", ".github"}
+
+
+def find_named_dirs(root: Path, names: set[str]) -> list[str]:
+    """Repo-relative paths (trailing `/`) of the directories named in `names`: depth 3, heavy and hidden
+    trees pruned, at most 20 hits — detection reads a repo, it never crawls one."""
+    out: list[str] = []
+
+    def walk(d: Path, rel: str, depth: int) -> None:
+        if depth > 3 or len(out) >= 20:
+            return
+        for child in sorted(d.iterdir()):
+            if not child.is_dir() or child.name in WALK_SKIP or child.name.startswith("."):
+                continue
+            r = f"{rel}/{child.name}" if rel else child.name
+            if child.name in names:
+                out.append(r + "/")
+            walk(child, r, depth + 1)
+
+    if root.is_dir():
+        try:
+            walk(root, "", 1)
+        except OSError:
+            pass
+    return out
+
+
+def detect_worktree_prefix(root: Path, homes: list[Path] | None = None) -> tuple[str | None, str]:
+    """(prefix, evidence) from the convention sibling directories show: `<repo>-<digits>` next to the
+    checkout, or in a common parent such as `~/*-worktrees/`. (None, why) when nothing is on disk."""
+    name = root.name
+    try:
+        sibs = sorted(d.name for d in root.parent.iterdir()
+                      if d.is_dir() and re.fullmatch(re.escape(name) + r"-\d+", d.name))
+    except OSError:
+        sibs = []
+    if sibs:
+        return f"../{name}-", f"siblings {', '.join(sibs)} in {root.parent}"
+    for home in [Path.home()] if homes is None else homes:
+        for base in sorted(p for p in home.glob("*-worktrees") if p.is_dir()):
+            try:
+                hits = sorted(d.name for d in base.iterdir()
+                              if d.is_dir() and re.fullmatch(re.escape(name) + r"-\d+", d.name))
+            except OSError:
+                continue
+            if hits:
+                where = f"~/{base.relative_to(home).as_posix()}"
+                return f"{where}/{name}-", f"{', '.join(hits)} in {where}/"
+    return None, "no <repo>-<digits> sibling next to the checkout or in a ~/*-worktrees/ parent"
+
+
+def init_proposal(repo: "Repo") -> dict:
+    """The entry `wave init` proposes, one row per key: {key: {"value", "source", "why"}} — source is
+    `detected` when a file in the repo says so, `guessed` when only convention does. The guessed rows
+    are the only thing init may ask about; nothing here is answered by running anything."""
+    gate, gsrc, gwhy = repo.gate_proposal()
+    prefix, wwhy = detect_worktree_prefix(repo.root)
+    named = find_named_dirs(repo.root, PROTECTED_NAMES)
+    serial = [p for p in named if p.rstrip("/").rsplit("/", 1)[-1] == "migrations"] \
+        + [f for f in VERSION_FILES if (repo.root / f).exists()]
+    return {
+        "gate": {"value": gate, "source": gsrc, "why": gwhy},
+        "base": {"value": repo.base, "source": "detected", "why": "GitHub default branch"},
+        "worktree_prefix": {"value": prefix, "source": "detected" if prefix else "guessed",
+                            "why": wwhy if prefix else wwhy + ": the built-in default ../<repo>-<N> assumed"},
+        "protected": {"value": named, "source": "detected",
+                      "why": "directories named safety/security/migrations/auth" if named
+                             else "none of safety/security/migrations/auth found"},
+        "serial": {"value": serial, "source": "detected",
+                   "why": "migrations directories, version files" if serial
+                          else "no migrations directory, no version file"},
+    }
+
+
+def render_proposal(repo: "Repo", prop: dict) -> str:
+    """The one proposal block: the `.wave.json`/registry entry init would write, every line marked,
+    plus the profile (#15) — gathered for the human, never written (detection keeps reading the repo)."""
+    lines = [f"wave init {repo.slug} — proposal, the entry it would write (each line detected or guessed):", ""]
+    for k, row in prop.items():
+        lines.append(f'  "{k}": {json.dumps(row["value"], ensure_ascii=False)}  # {row["source"]} — {row["why"]}')
+    ph = repo.profile()["phases"]
+    lines += ["", "profile (gathered, never written):"]
+    for name in ("define", "handoff", "kickoff", "sync", "rules", "agent_skills", "review", "enforcement"):
+        prov = ph[name]["provider"]
+        if prov:
+            text = prov if isinstance(prov, str) else ", ".join(str(x) for x in prov)
+            lines.append(f"  {name}: {text} ({ph[name]['source']})")
+    return "\n".join(lines)
+
+
+def unconfirmed(repo: "Repo") -> bool:
+    """Whether the repo still owes init its one answer: no `.wave.json` anywhere (a repo that has one is
+    never asked anything), no `confirmed_at` on its registry entry (an answer is never re-proposed), and
+    no key typed by hand — `repos add --gate ...` is an answer too."""
+    if repo.local_cfg is not None or repo.remote_cfg is not None:
+        return False
+    if repo.entry.get("confirmed_at"):
+        return False
+    return not any(k in repo.entry for k in INIT_KEYS)
+
+
+def write_proposal_file(repo: "Repo", prop: dict) -> Path:
+    """The proposal as a file the SKILL reads and edits before `--from` writes it back: no stdin — a
+    proposal file is the same artifact in every host."""
+    repo.handoffs.mkdir(parents=True, exist_ok=True)
+    path = repo.handoffs / "init-proposal.json"
+    path.write_text(json.dumps({k: row["value"] for k, row in prop.items() if row["value"] is not None}, indent=2) + "\n")
+    return path
+
+
+def accept_proposal(repo: "Repo", values: dict) -> dict:
+    """Write the answer: the registry entry with `confirmed_at`, and — unless the repo already has one —
+    a `.wave.json` at the root, untracked, ready for the small PR that shares it. Empty values never write."""
+    reg = load_registry()
+    entry = reg["repos"].setdefault(repo.slug, {})
+    for k, v in values.items():
+        if v:
+            entry[k] = v
+    entry["confirmed_at"] = now_iso()
+    save_registry(reg)
+    local = repo.root / ".wave.json"
+    if local.exists():
+        note = f"; {local} already exists, not overwritten — the registry entry carries the accepted values"
+    else:
+        shareable = {k: v for k, v in values.items() if v}
+        note = f"; {local} written (untracked) — a small PR adding it gives the next person the answer for free" if shareable else ""
+        if shareable:
+            local.write_text(json.dumps(shareable, indent=2) + "\n")
+    print(f"{repo.slug}: accepted — registry entry confirmed at {entry['confirmed_at']}{note}")
+    return entry
+
+
+def cmd_init(default: Repo | None, a):
+    """First run in a repo: gather everything detectable, print one proposal (each line detected or
+    guessed), and write only an accepted answer — `--yes`, or `--from <file>` with the SKILL's edit.
+    A repo with a `.wave.json` or a `confirmed_at` entry is never asked again; `--again` reopens."""
+    repo = Repo.get(a.slug) if a.slug else default
+    if repo is None:
+        raise SystemExit("run inside the repo, pass --repo, or name owner/name")
+    if a.from_file is None and not a.again and not unconfirmed(repo):
+        when = load_registry()["repos"].get(repo.slug, {}).get("confirmed_at")
+        print(f"{repo.slug}: answered already" + (f" (confirmed_at {when})" if when else " (it carries a `.wave.json` or a declared entry)")
+              + " — nothing is asked twice; `wave init --again` reopens")
+        return
+    prop = init_proposal(repo)
+    print(render_proposal(repo, prop))
+    if a.yes or a.from_file is not None:
+        if a.from_file is not None:
+            try:
+                values = json.loads(Path(a.from_file).read_text())
+            except (OSError, ValueError) as e:
+                raise SystemExit(f"init refused: cannot read the proposal {a.from_file} ({e})")
+            if not isinstance(values, dict):
+                raise SystemExit(f"init refused: {a.from_file} must be a JSON object of the proposal's keys")
+        else:
+            values = {k: row["value"] for k, row in prop.items()}
+        bad = [k for k in values if k not in INIT_KEYS]
+        if bad:
+            raise SystemExit(f"init refused: {', '.join(bad)} — only {', '.join(INIT_KEYS)} are init's to write")
+        accept_proposal(repo, values)
+        return
+    pf = write_proposal_file(repo, prop)
+    guessed = [k for k, row in prop.items() if row["source"] == "guessed"]
+    if guessed:
+        print(f"{len(guessed)} guessed line(s) ({', '.join(guessed)}) — the one question this tool may ask: "
+              f"accept, or edit a line in {pf} and run `wave init --from {pf}`; skip, and nothing is written")
+    else:
+        print(f"nothing guessed: every line was read from the repo — `wave init --yes` accepts; the proposal file is {pf}")
 
 
 # ---------------------------------------------------------------- refs & tree
@@ -2614,8 +2826,25 @@ def cmd_doctor(default: Repo | None, a) -> None:
             checks.append((f"main checkout's `.wave.json` matches origin/{r.base}'s", not differs,
                            (f"differs in {', '.join(differs)} — the main checkout is behind; prompts use origin/{r.base}'s" if r.local_cfg is not None
                             else f"the main checkout has none; prompts use origin/{r.base}'s") if differs else "same", False))
+        first_run = unconfirmed(r)
+        if first_run:  # the wizard, run automatically on a repo seen for the first time: the proposal is
+            prop = init_proposal(r)  # printed, the answer stays the owner's — the script never asks
+            print(render_proposal(r, prop))
+            pf = r.handoffs / "init-proposal.json"
+            if not pf.exists():  # a proposal the SKILL may have edited is never clobbered by an auto-run
+                pf = write_proposal_file(r, prop)
+            print(f"  (first run in this repo: the proposal above is the one question — `wave init --yes` accepts it, "
+                  f"or edit {pf} and `wave init --from {pf}`; answered once, never asked again)")
         gate = r.gate()
-        checks.append(("gate is declared and real", bool(gate) and not gate[0].startswith("<"), " && ".join(gate), True))
+        if gate and not gate[0].startswith("<"):
+            checks.append(("gate is declared and real", True, " && ".join(gate), True))
+        else:
+            checks.append(("gate is declared and real", False,
+                           "the proposal above is what `wave init --yes` would write for it — answer it first" if first_run else
+                           "no gate found; the repo answered init without one — `wave init --again` re-proposes, "
+                           "`wave repos add . --gate ...` declares one", True))
+        if first_run:
+            checks.append(("first run confirmed (init)", False, "nothing accepted yet — the proposal above", False))
         for action in r.ci_gate()[1]:
             checks.append((f"CI runs `{action}` and the gate does not", False, "if it is a gate step, declare its command in `.wave.json`; then add it to `ignore_actions`", False))
         for cmd, where in doc_commands(r.root):
@@ -2884,6 +3113,9 @@ GUARANTEES = [
     ("a clone is never shallow: worktrees, merge-tree and --merged need history", "clone_repo (no --depth, is-shallow-repository refused)", "a shallow result exits with 'need history' and registers nothing", True),
     ("cloning asks above clone_ask_over_mb (registry, default 500 MB): the command is printed instead", "clone_repo's diskUsage gate", "'over the 500 MB … gh repo clone owner/name …', nothing cloned or registered", True),
     ("scan and Repo.get agree on the checkout: the registry wins, a second checkout is reported, a dead path is repaired", "find_checkouts + cmd_repos scan", "'another checkout at … — the registry keeps …'", True),
+    ("first run in a repo is a wizard: everything detectable is gathered into one proposal, every line marked detected (a file says so) or guessed (convention), and nothing is executed to test a candidate", "cmd_doctor/cmd_dispatch -> unconfirmed -> init_proposal", "doctor prints `wave init <slug> — proposal …` for a repo with no `.wave.json` and no confirmed entry", True),
+    ("an answer is written once and never asked again: a `.wave.json`, a `confirmed_at` entry or keys typed by hand silence the proposal; `wave init --yes` / `--from <file>` write it, `--again` is the only reopen", "cmd_init -> accept_proposal + unconfirmed", "`wave init` on an answered repo: `answered already — nothing is asked twice`", True),
+    ("with no gate found and no answer, dispatch still refuses and the refusal is the proposal itself, not a pointer to documentation", "cmd_doctor's gate check <- init_proposal", "✗ gate is declared and real: the proposal above is what `wave init --yes` would write for it", True),
     ("doctor from outside any repo reports the registry and the search paths, not just a refusal", "cmd_doctor's default=None branch", "'the registry (…) lists …; search paths: …'", True),
     ("per-repo gh account token, global login untouched", "Repo._env", "GH_TOKEN per call", True),
     ("the per-account token is read from gh's stdout only: a stderr notice never reaches GH_TOKEN, and a stdout that is not one non-empty line is refused with the account named", "token_of <- Repo._env, clone_repo", "GH_TOKEN stays exactly tok-w under a stderr warning; `printed something that is not a token` names --user w", True),
@@ -3175,6 +3407,11 @@ def main(argv=None):
     x = s.add_parser("repos", help="registry: list | add <path> [--slug] [--account] [--base] [--gate ...] [--protected ...] | scan")
     x.add_argument("action", choices=["list", "add", "scan"]); x.add_argument("path", nargs="?"); x.add_argument("--slug"); x.add_argument("--account"); x.add_argument("--base"); x.add_argument("--worktree-prefix", help="where worktrees go, e.g. ~/kyte-worktrees/demeter-  (default ../<repo>-)"); x.add_argument("--gate", nargs="*"); x.add_argument("--protected", nargs="*")
     x = s.add_parser("facts", help="what was discovered about repos"); x.add_argument("slugs", nargs="*")
+    x = s.add_parser("init", help="first run in a repo: print the one proposal (every line detected or guessed); --yes accepts it, --from <file> writes an edited proposal file, --again reopens a repo already answered")
+    x.add_argument("slug", nargs="?", help="owner/name, when not running inside the repo")
+    x.add_argument("--yes", action="store_true", help="accept the whole proposal, guessed lines included")
+    x.add_argument("--from", dest="from_file", metavar="FILE", help="write an edited init-proposal.json as the answer")
+    x.add_argument("--again", action="store_true", help="re-propose for a repo already answered (a `.wave.json` or a confirmed entry)")
     x = s.add_parser("next", help="leaf issues ready to dispatch"); x.add_argument("epic"); x.add_argument("--batch", type=int, default=4); x.add_argument("--json", action="store_true")
     x = s.add_parser("epics", help="every open epic across the registry's repos (--slug / --repo for one), readiest first: leaves, closed, ready, blocked, in progress, last status comment"); x.add_argument("--slug", help="owner/name: scan that repo instead of the whole registry"); x.add_argument("--repo", default=argparse.SUPPRESS, help="path inside a repo: scan that repo instead of the whole registry"); x.add_argument("--json", action="store_true", help="one object per epic, for the SKILL's step 0")
     x = s.add_parser("dispatch", help="create worktrees + prompt files (runs doctor and refuses issues that are not READY)"); x.add_argument("issues", nargs="+"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--force", action="store_true"); x.add_argument("--warm", action="store_true", help="Rust: `cargo fetch` in the main checkout first, so parallel builds only extract"); x.add_argument("--respawn", action="store_true", help="this dispatch returns with a new strategy after the same failure twice: the stamp counts a respawn, not a plain resume"); x.add_argument("--no-prepare", action="store_true", help="do not run `wave prepare` on an issue whose body has no `## Handoff`")
@@ -3213,7 +3450,7 @@ def main(argv=None):
         default = None
     t0 = time.time(); exit_code = 0
     try:
-        {"repos": cmd_repos, "facts": cmd_facts, "next": cmd_next, "epics": cmd_epics, "dispatch": cmd_dispatch, "prompt": cmd_prompt,
+        {"repos": cmd_repos, "facts": cmd_facts, "init": cmd_init, "next": cmd_next, "epics": cmd_epics, "dispatch": cmd_dispatch, "prompt": cmd_prompt,
      "verify": cmd_verify, "judge": cmd_judge, "order": cmd_order, "merge": cmd_merge, "resolve": cmd_resolve, "close-parents": cmd_close_parents,
              "cleanup": cmd_cleanup, "status": cmd_status, "lint": cmd_lint, "plan": cmd_plan, "adopt": cmd_adopt, "why": cmd_why, "doctor": cmd_doctor,
              "agents": cmd_agents, "tick": cmd_tick, "prepare": cmd_prepare, "amend": cmd_amend, "sweep": cmd_sweep, "hooks": cmd_hooks,

@@ -31,13 +31,13 @@ From inside a checkout of the repo you want to work on. `wave` below means `pyth
 wave doctor
 ```
 
-Every ✗ is something a wave would trip on: `gh` not logged in, tracked changes in your main checkout (the plugin never works there), no real gate. `wave facts` shows what was discovered — remote, base branch, gate commands read from your CI, protected paths. `facts` names where each command came from (`run:`, `uses:`, manifest, or config); a CI step that is an action the plugin does not know is a `!` in `doctor` until you list it under `ignore_actions` in `.wave.json`. If the gate is incomplete, declare it once:
+Every ✗ is something a wave would trip on: `gh` not logged in, tracked changes in your main checkout (the plugin never works there), no real gate. On a repo seen for the first time (no `.wave.json`, nothing in the registry), `doctor` — and `dispatch` through it — prints **one proposal**: the `.wave.json`/registry entry it would write, every line marked `detected` (read from your CI workflow, `Makefile` targets, manifest scripts, or the command blocks in `CLAUDE.md`/`AGENTS.md`) or `guessed` (the ecosystem's convention — the only lines it will ask about). Answer the one question the first time and it is never asked again:
 
 ```bash
-wave repos add . --gate "cargo fmt --check" "cargo test" --protected src/safety
+wave init --yes     # accept the whole proposal (in Claude Code, the skill asks it as one question)
 ```
 
-or commit a `.wave.json` at the repo root so everyone who clones gets it (see [Any repo](#any-repo-any-account-any-stack)).
+That writes the registry entry (marked `confirmed_at`) and a `.wave.json` at the repo root; open a small PR committing that file so everyone who clones gets the same answer for free (see [Any repo](#any-repo-any-account-any-stack)). `wave init --again` reopens a repo that was already answered; a repo that carries a `.wave.json` is never asked anything. If a CI step is an action the plugin does not know, it is still a `!` in `doctor` until you list it under `ignore_actions` in `.wave.json`; the manual way (`wave repos add . --gate ... --protected ...`) keeps working.
 
 **2. Have an epic the plugin can run.** Two cases.
 
