@@ -129,18 +129,61 @@ def save_registry(reg: dict) -> None:
     REGISTRY.write_text(json.dumps(reg, indent=2, sort_keys=True) + "\n")
 
 
-def scan_for_slug(reg: dict, slug: str) -> Path | None:
+def find_checkouts(reg: dict, slug: str) -> list[Path]:
+    """Every checkout under the search paths whose origin is slug, sorted: [0] is the one the registry takes."""
+    found = []
     for base in reg["search_paths"]:
         root = Path(base).expanduser()
         if not root.exists():
             continue
         for d in sorted(root.iterdir()):
-            if not (d / ".git").exists():
+            if not (d / ".git").is_dir():
                 continue
             ok, url = sh_ok(["git", "remote", "get-url", "origin"], cwd=d)
-            if ok and slug_of_url(url) == slug and (d / ".git").is_dir():
-                return d.resolve()
-    return None
+            if ok and slug_of_url(url) == slug:
+                found.append(d.resolve())
+    return found
+
+
+def clone_repo(reg: dict, slug: str) -> Path:
+    """The missing checkout goes into the first search path: size-checked first, never shallow.
+
+    `gh repo clone` copies the whole history (no --depth is ever passed: worktrees, `merge-tree` and
+    `--merged` read it); above `clone_ask_over_mb` (registry, default 500) the tool stops and hands
+    the command back — cloning is safe but not free, and where big things go is the user's call.
+    """
+    if "/" not in slug:
+        raise SystemExit(f"{slug}: not an owner/name slug — refs are owner/name#N")
+    if not reg.get("search_paths"):
+        raise SystemExit(f"no search paths in {REGISTRY}: set \"search_paths\" there — the first is where a clone goes")
+    dest = Path(reg["search_paths"][0]).expanduser() / slug.split("/")[1]
+    env = dict(os.environ)
+    account = reg["repos"].get(slug, {}).get("account")
+    if account:
+        ok, tok = sh_ok(["gh", "auth", "token", "--user", account])
+        if not ok:
+            raise SystemExit(f"{slug}: account {account} is not logged in to gh (`gh auth login`)\n{tok}")
+        env["GH_TOKEN"] = tok.strip()
+    ok, out = sh_ok(["gh", "repo", "view", slug, "--json", "diskUsage"], env=env)
+    if not ok:
+        raise SystemExit(f"{slug}: cannot read its size (`gh repo view {slug} --json diskUsage`)\n{out}")
+    mb = json.loads(out).get("diskUsage", 0) / 1024
+    print(f"{slug} is {mb:.1f} MB on GitHub")
+    ask_over = reg.get("clone_ask_over_mb", 500)
+    if mb > ask_over:
+        raise SystemExit(f"{slug} is over the {ask_over} MB this tool clones without asking — cloning is safe but not free, "
+                         f"and where big things go is your call:\n  gh repo clone {slug} {dest}\n"
+                         f"then `wave.py repos add {dest} --slug {slug}`")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    ok, out = sh_ok(["gh", "repo", "clone", slug, str(dest)], env=env)
+    if not ok:
+        raise SystemExit(f"`gh repo clone {slug} {dest}` failed:\n{out}")
+    ok, shallow = sh_ok(["git", "rev-parse", "--is-shallow-repository"], cwd=dest)
+    if ok and shallow.strip() == "true":
+        raise SystemExit(f"{dest} is a shallow clone: worktrees, `merge-tree` and `--merged` need history — "
+                         "remove it and clone again without --depth")
+    print(f"cloned {slug} into {dest}")
+    return dest
 
 
 # ---------------------------------------------------------------- repo
@@ -155,10 +198,14 @@ class Repo:
             reg = load_registry()
             entry = reg["repos"].get(slug, {})
             if "path" not in entry or not Path(entry["path"]).exists():
-                found = scan_for_slug(reg, slug)
-                if not found:
-                    raise SystemExit(f"no local checkout for {slug}: add it with `wave.py repos add <path> --slug {slug}` or extend search_paths in {REGISTRY}")
-                entry["path"] = str(found)
+                found = find_checkouts(reg, slug)
+                if found:
+                    entry["path"] = str(found[0])
+                    if len(found) > 1:
+                        print(f"{slug}: {len(found)} checkouts — using {found[0]}, also at "
+                              f"{', '.join(map(str, found[1:]))}; the registry keeps this one")
+                else:
+                    entry["path"] = str(clone_repo(reg, slug))
                 reg["repos"][slug] = entry
                 save_registry(reg)
             cls._cache[slug] = cls(slug, entry)
@@ -875,15 +922,29 @@ def cmd_repos(default: Repo | None, a):
         return
     if a.action == "scan":
         added = 0
+        also: dict[str, list[Path]] = {}
         for base in reg["search_paths"]:
             for d in sorted(Path(base).expanduser().glob("*")):
-                if (d / ".git").is_dir():
-                    ok, url = sh_ok(["git", "remote", "get-url", "origin"], cwd=d)
-                    slug = slug_of_url(url) if ok else None
-                    if slug and slug not in reg["repos"]:
-                        reg["repos"][slug] = {"path": str(d.resolve())}
-                        added += 1
+                if not (d / ".git").is_dir():
+                    continue
+                ok, url = sh_ok(["git", "remote", "get-url", "origin"], cwd=d)
+                slug = slug_of_url(url) if ok else None
+                if not slug:
+                    continue
+                entry = reg["repos"].get(slug)
+                here = d.resolve()
+                if entry is None or "path" not in entry or not Path(entry["path"]).exists():
+                    # a new repo, or a registered one whose path is gone — the same repair Repo.get makes
+                    if entry is None:
+                        reg["repos"][slug] = {"path": str(here)}
+                    else:
+                        entry["path"] = str(here)
+                    added += 1
+                elif Path(entry["path"]).resolve() != here:
+                    also.setdefault(slug, []).append(here)  # the registry wins; a second checkout is reported, not chosen
         save_registry(reg)
+        for slug, paths in sorted(also.items()):
+            print(f"{slug}: another checkout at {', '.join(map(str, paths))} — the registry keeps {reg['repos'][slug]['path']}")
         print(f"scanned {reg['search_paths']}: {added} new, {len(reg['repos'])} total")
 
 
@@ -1938,7 +1999,11 @@ def cmd_doctor(default: Repo | None, a) -> None:
                        "eleven parallel agents once hit the rate limit (3 of 11 killed) and one killed mid-build left a crate "
                        "half-extracted in the shared cargo cache — batch 4, and `wave dispatch --warm` to download once", False))
     if default is None:
-        checks.append(("inside a registered repo", False, "run from a checkout, or pass --repo", True))
+        reg = load_registry()
+        checks.append(("inside a registered repo", False,
+                       f"the registry ({REGISTRY}) lists {len(reg['repos'])} repo(s): {', '.join(sorted(reg['repos'])) or 'none'}; "
+                       f"search paths: {', '.join(reg['search_paths'])} — run from a checkout or pass --repo; "
+                       "an owner/name#N ref to a repo you do not have is cloned into the first search path", True))
     else:
         r = default
         dirty = r.git(["status", "--porcelain", "--untracked-files=no"]).strip()
@@ -2192,6 +2257,11 @@ GUARANTEES = [
     ("an exhausted worktree is its own exclusive state, never ready", "candidates -> liveness", "agent-exhausted: N resumes without a new commit — dispatch refuses", True),
     ("doctor reports the retry ceiling, and with --epic the state sweep, both soft", "cmd_doctor -> sweep_retries, sweep_epic", "! no agent past the retry ceiling (3 no-progress dispatches ...) / ! state sweep of <epic>", True),
     ("a command run inside a worktree never re-points the registry: it names the main checkout", "Repo.from_cwd (--git-common-dir)", "repos.json path stays the main checkout; a worktree or missing path is repaired to it", True),
+    ("a ref to a repo with no checkout is size-checked, cloned into the first search path, registered, and the command continues", "Repo.get -> clone_repo", "the size on GitHub, then 'cloned owner/name into …'; repos.json gains the path", True),
+    ("a clone is never shallow: worktrees, merge-tree and --merged need history", "clone_repo (no --depth, is-shallow-repository refused)", "a shallow result exits with 'need history' and registers nothing", True),
+    ("cloning asks above clone_ask_over_mb (registry, default 500 MB): the command is printed instead", "clone_repo's diskUsage gate", "'over the 500 MB … gh repo clone owner/name …', nothing cloned or registered", True),
+    ("scan and Repo.get agree on the checkout: the registry wins, a second checkout is reported, a dead path is repaired", "find_checkouts + cmd_repos scan", "'another checkout at … — the registry keeps …'", True),
+    ("doctor from outside any repo reports the registry and the search paths, not just a refusal", "cmd_doctor's default=None branch", "'the registry (…) lists …; search paths: …'", True),
     ("per-repo gh account token, global login untouched", "Repo._env", "GH_TOKEN per call", True),
     ("an epic follows sub-issues and blockers into other repos; plan --slug creates there", "tree + candidates, cmd_plan", "keys owner/name#N, gh -R owner/name", True),
     ("every run is logged", "log_run", "~/.config/setwave/log.jsonl", False),

@@ -96,7 +96,23 @@ def main(args: list[str]) -> int:
         return answer(f"pr_{args[1]}_{args[2]}.json")
     if args[:2] == ["issue", "list"]:
         return answer(per_repo(args, "issue_list"))
+    if args[:2] == ["repo", "clone"]:
+        # FAKE_GH_CLONE=1: the destination becomes a bare fixture (a whole-history clone; with
+        # FAKE_GH_SHALLOW=1 it carries a shallow file, which `git rev-parse --is-shallow-repository` reads)
+        if not os.environ.get("FAKE_GH_CLONE"):
+            print("fake gh: refusing repo clone (set FAKE_GH_CLONE=1)", file=sys.stderr)
+            return 97
+        import subprocess
+        slug, dest = args[2], args[3]
+        subprocess.run(["git", "init", "-q", "--bare", dest], check=True)
+        subprocess.run(["git", "-C", dest, "remote", "add", "origin", f"https://github.com/{slug}.git"], check=True)
+        if os.environ.get("FAKE_GH_SHALLOW"):
+            (Path(dest) / "shallow").write_text("")
+            print(f"fake gh: cloned {slug} (shallow, on purpose)")
+        return 0
     if args[:2] == ["repo", "view"]:
+        if "diskUsage" in args:
+            return answer(f"repo_view_disk_usage_{args[2].replace('/', '_')}.json")
         return answer("repo_view.json")
     print(f"fake gh: refusing {' '.join(args)}", file=sys.stderr)
     return 97
