@@ -104,6 +104,21 @@ def sh_ok(cmd: list[str], cwd: Path | None = None, env: dict | None = None) -> t
     return rc == 0, out + err
 
 
+def token_of(slug: str, account: str) -> str:
+    """The account's token, from `gh auth token` stdout only: gh writes update notices and keyring
+    warnings to stderr, and one of those concatenated into GH_TOKEN silently 401s every later gh
+    call for the repo (#27). A failing command keeps stderr for its message — never stdout, which
+    may hold a token; a stdout that is not exactly one non-empty line is refused, never stored."""
+    rc, out, err = run(["gh", "auth", "token", "--user", account])
+    if rc != 0:
+        raise SystemExit(f"{slug}: account {account} is not logged in to gh (`gh auth login`)\n{err.strip() or '(gh printed nothing to stderr)'}")
+    lines = out.splitlines()
+    if len(lines) != 1 or not lines[0].strip():
+        raise SystemExit(f"{slug}: `gh auth token --user {account}` printed something that is not a token "
+                         f"({len(lines)} line(s)) — nothing stored; check the account name and `gh auth status`")
+    return lines[0].strip()
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -165,10 +180,7 @@ def clone_repo(reg: dict, slug: str) -> Path:
     env = dict(os.environ)
     account = reg["repos"].get(slug, {}).get("account")
     if account:
-        ok, tok = sh_ok(["gh", "auth", "token", "--user", account])
-        if not ok:
-            raise SystemExit(f"{slug}: account {account} is not logged in to gh (`gh auth login`)\n{tok}")
-        env["GH_TOKEN"] = tok.strip()
+        env["GH_TOKEN"] = token_of(slug, account)
     ok, out = sh_ok(["gh", "repo", "view", slug, "--json", "diskUsage"], env=env)
     if not ok:
         raise SystemExit(f"{slug}: cannot read its size (`gh repo view {slug} --json diskUsage`)\n{out}")
@@ -271,10 +283,7 @@ class Repo:
         env = dict(os.environ)
         if self.account:
             if self.account not in Repo._tokens:
-                ok, tok = sh_ok(["gh", "auth", "token", "--user", self.account])
-                if not ok:
-                    raise SystemExit(f"{self.slug}: account {self.account} is not logged in to gh (`gh auth login`)\n{tok}")
-                Repo._tokens[self.account] = tok.strip()
+                Repo._tokens[self.account] = token_of(self.slug, self.account)
             env["GH_TOKEN"] = Repo._tokens[self.account]
         return env
 
@@ -429,6 +438,12 @@ class Repo:
     def merged_prs(self, search: str) -> list[dict]:
         return json.loads(self.gh(["pr", "list", "-R", self.slug, "--state", "merged", "--limit", "100", "--search", search,
                                    "--json", "number,body,headRefName"]))
+
+    def prs_for_head(self, branch: str) -> list[dict]:
+        """Every PR whose head is this branch, any state. GitHub is the truth here: a squash merge and a
+        remote branch deleted after the merge are both invisible to `git branch --merged`."""
+        return json.loads(self.gh(["pr", "list", "-R", self.slug, "--state", "all", "--head", branch,
+                                   "--limit", "200", "--json", "number,state,headRefName"]))
 
     def pr_checks(self, n: int) -> dict[str, str]:
         """name -> bucket: pass | fail | pending | skipping | cancel (gh's own normalisation)."""
@@ -2125,31 +2140,74 @@ def cmd_close_parents(default: Repo | None, a):
                 print(f"closed {k}")
 
 
+def du_kb(path: Path) -> int:
+    """The size of a directory in KB (`du -sk`), 0 when it cannot be read."""
+    ok, out = sh_ok(["du", "-sk", str(path)])
+    parts = out.split() if ok else []
+    return int(parts[0]) if parts else 0
+
+
+def fmt_kb(kb: int) -> str:
+    return f"{kb / 1024:.1f} MB" if kb >= 1024 else f"{kb} KB"
+
+
 def cmd_cleanup(default: Repo | None, a):
+    """Worktrees whose work lives somewhere else go, with the disk they held: a merged PR's (the truth for
+    a squash merge and a deleted remote, which `--merged` never sees), a closed one with --include-closed,
+    an empty seat. An open PR (another epic's issue at work), a dispatch stamp, dirt or an unpushed head
+    always keep it. Branches stay: a branch is cheap, a worktree is not."""
     repos = [Repo.get(s) for s in a.slugs] if a.slugs else [default] if default else []
+    if a.stale_days is not None and a.stale_days < 0:
+        raise SystemExit(f"--stale-days wants N >= 0 days, got {a.stale_days}")
+    if a.yes and a.stale_days is None:
+        raise SystemExit("--yes only matters with --stale-days: it removes the stale worktrees")
+    total_kb, removed_n = 0, 0
     for repo in repos:
         repo.fetch()
-        merged = {l.strip().replace("origin/", "") for l in repo.git(["branch", "-r", "--merged", f"origin/{repo.base}"]).splitlines()}
-        for block in repo.git(["worktree", "list", "--porcelain"]).split("\n\n"):
-            m = re.search(r"^worktree (.+)$", block, re.M)
-            b = re.search(r"^branch refs/heads/(.+)$", block, re.M)
-            if not m or not b:
-                continue
-            wt = Path(m.group(1))
-            if wt == repo.root or not re.match(rf"{re.escape(repo.worktree(0).name[:-1])}\d+$", wt.name):
-                continue
-            branch = b.group(1)
-            dirty = bool(repo.git(["status", "--porcelain"], cwd=wt).strip())
-            ok, unpushed = repo.git_ok(["log", "--oneline", "@{u}.."], cwd=wt)
-            if dirty or (ok and unpushed.strip()) or branch not in merged:
-                print(f"KEEP {wt.name}: dirty={dirty} unpushed={bool(unpushed.strip()) if ok else '?'} merged={branch in merged}")
-                continue
-            if a.dry_run:
-                print(f"would remove {wt}")
-            else:
+        for wt, branch, _n in issue_worktrees(repo):
+            def remove(why: str) -> None:
+                nonlocal total_kb, removed_n
+                kb = du_kb(wt)
+                if a.dry_run:
+                    print(f"would remove {wt.name}: {why}, {fmt_kb(kb)}")
+                    return
                 repo.git(["worktree", "remove", str(wt)])
-                print(f"removed {wt.name} (branch {branch} kept)")
+                total_kb, removed_n = total_kb + kb, removed_n + 1
+                print(f"removed {wt.name}: {why}, reclaimed {fmt_kb(kb)} (branch {branch} kept)")
+            if repo.git(["status", "--porcelain"], cwd=wt).strip():
+                print(f"KEEP {wt.name}: dirty")
+                continue
+            ok, remote = repo.git_ok(["rev-parse", "--verify", "--quiet", f"origin/{branch}"])
+            if ok and remote.strip() != repo.git(["rev-parse", "HEAD"], cwd=wt).strip():
+                print(f"KEEP {wt.name}: unpushed (origin/{branch} is behind)")
+                continue
+            pr = next(iter(repo.prs_for_head(branch)), None)
+            state, num = (pr or {}).get("state"), (pr or {}).get("number")
+            if state == "MERGED":
+                remove(f"PR #{num} merged")
+            elif state == "CLOSED":
+                if a.include_closed:
+                    remove(f"PR #{num} closed without merge (--include-closed)")
+                else:
+                    print(f"KEEP {wt.name}: closed without merge: `--include-closed` to remove")
+            elif state == "OPEN":
+                print(f"KEEP {wt.name}: PR #{num} open (in progress)")
+            elif int(repo.git_ok(["rev-list", "--count", f"origin/{repo.base}..HEAD"], cwd=wt)[1] or 0):
+                days = round((time.time() - last_activity(repo, wt, _epoch(stamp_of(wt).get("dispatched_at")))) / 86400)
+                if a.stale_days is not None and days >= a.stale_days:
+                    if a.yes:
+                        remove(f"stale: nothing changed for {days} days and no PR")
+                    else:
+                        print(f"STALE {wt.name}: no PR, newest change {days} days ago, {fmt_kb(du_kb(wt))} — `--yes` to remove")
+                else:
+                    print(f"KEEP {wt.name}: no PR, newest change {days} days ago")
+            elif stamp_of(wt):
+                print(f"KEEP {wt.name}: dispatched, no commit yet")
+            else:
+                remove("empty: no PR, no commits")
         repo.git(["worktree", "prune"])
+    if removed_n:
+        print(f"reclaimed {fmt_kb(total_kb)} from {removed_n} worktree(s)")
 
 
 # ---------------------------------------------------------------- sweep
@@ -2589,7 +2647,7 @@ def cmd_doctor(default: Repo | None, a) -> None:
             untouched = (not r.git_ok(["rev-parse", "--verify", f"origin/{branch}"])[0] and not r.git(["log", "--oneline", f"origin/{r.base}..HEAD"], cwd=wt).strip()
                          and not (wt / STAMP).exists() and not r.git(["status", "--porcelain"], cwd=wt).strip())
             if branch in merged or untouched:
-                stale.append(wt.name)          # merged, or never dispatched, pushed, committed or edited: leftovers, `wave cleanup`
+                stale.append((wt.name, du_kb(wt)))  # merged, or never dispatched, pushed, committed or edited: leftovers, `wave cleanup`
             elif no_progress(stamp_of(wt)) >= RETRY_CEILING:
                 exhausted.append((wt, n))      # past the retry ceiling: dispatch refuses it, the sweep escalates
             elif not pr_for_issue(r, n):       # unmerged work with no PR: an agent at work, or one that died
@@ -2611,7 +2669,8 @@ def cmd_doctor(default: Repo | None, a) -> None:
             found = sweep_epic(tree(er, en))
             checks.append((f"state sweep of {key(er, en)} (claimed done and closed leaves, against merged PRs)", not found,
                            "; ".join(f"{f['key']} {f['kind']}" for f in found) or "clean", False))
-        checks.append(("no leftover worktrees (merged or empty)", not stale, (", ".join(stale) + " — `wave cleanup`") if stale else "none", False))
+        checks.append(("no leftover worktrees (merged or empty)", not stale,
+                       (", ".join(nm for nm, _ in stale) + f" — {fmt_kb(sum(kb for _, kb in stale))} total — `wave cleanup`") if stale else "none", False))
         gate_left = [w for w in re.findall(r"^worktree (.+)$", r.git(["worktree", "list", "--porcelain"]), re.M) if Path(w).name.startswith(CHAIN_GATE_PREFIX)]
         checks.append(("no leftover chain-gate worktree (an interrupted `order --run-gate`)", not gate_left,
                        "; ".join(f"leftover {w} — `git worktree remove --force {w}` (`git worktree prune` if the directory is gone)" for w in gate_left) or "none", False))
@@ -2775,7 +2834,10 @@ GUARANTEES = [
     ("no dispatch when doctor finds a hard failure", "cmd_dispatch -> cmd_doctor", "dispatch refused", False),
     ("no dispatch of an issue that is not READY", "cmd_dispatch -> premises_for", "refusal lists the failed premises", False),
     ("an existing worktree is kept, never recreated", "cmd_dispatch", "prints 'worktree exists'", False),
-    ("cleanup removes only worktrees that are clean, pushed and merged", "cmd_cleanup", "KEEP lines with the reason", False),
+    ("cleanup removes only worktrees that are clean, pushed and merged", "cmd_cleanup", "KEEP lines with the reason", True),
+    ("cleanup decides by the PR, not by `--merged`: a merged PR's worktree goes (a squash merge and a deleted remote included), a closed-without-merge one stays until --include-closed, an open PR, a dispatch stamp, dirt or an unpushed head always stay; every removal prints the disk it reclaims and the total", "cmd_cleanup -> Repo.prs_for_head, du_kb", "removed k-6: PR #40 merged, reclaimed 12 KB (branch feat/6-merged kept); KEEP k-8: PR #42 open (in progress)", True),
+    ("cleanup --stale-days N lists kept worktrees with no open PR and nothing newer than N days, with their size, and removes them only with --yes", "cmd_cleanup --stale-days", "STALE k-9: no PR, newest change 40 days ago, 12 KB — `--yes` to remove", True),
+    ("doctor reports leftover worktrees with their total size", "cmd_doctor -> du_kb", "! no leftover worktrees (merged or empty): k-20 — 24 KB total — `wave cleanup`", True),
     ("plan refuses to run twice on the same directory or titles", "cmd_plan", "numbers.json / duplicate titles refusal", False),
     ("adopt turns a milestone, a label or explicit refs into an epic: sub-issues attached, textual dependencies (depends on / blocked by / after / needs, cross-repo) wired as blocked_by; an issue that already has a parent is reported, not moved", "cmd_adopt -> textual_deps, Repo.parent", "adopt report: attached / blocked by / already has a parent — reported, not moved", True),
     ("adopt reads before it writes: a second run attaches nothing twice, wires nothing twice, comments nothing twice", "cmd_adopt (sub_issues, blocked_by and comments read before every write)", "already a sub-issue / already blocked by; the second run makes no write call", True),
@@ -2824,6 +2886,7 @@ GUARANTEES = [
     ("scan and Repo.get agree on the checkout: the registry wins, a second checkout is reported, a dead path is repaired", "find_checkouts + cmd_repos scan", "'another checkout at … — the registry keeps …'", True),
     ("doctor from outside any repo reports the registry and the search paths, not just a refusal", "cmd_doctor's default=None branch", "'the registry (…) lists …; search paths: …'", True),
     ("per-repo gh account token, global login untouched", "Repo._env", "GH_TOKEN per call", True),
+    ("the per-account token is read from gh's stdout only: a stderr notice never reaches GH_TOKEN, and a stdout that is not one non-empty line is refused with the account named", "token_of <- Repo._env, clone_repo", "GH_TOKEN stays exactly tok-w under a stderr warning; `printed something that is not a token` names --user w", True),
     ("an epic follows sub-issues and blockers into other repos; plan --slug creates there", "tree + candidates, cmd_plan", "keys owner/name#N, gh -R owner/name", True),
     ("wave epics lists every open epic root across the registry's repos, readiest first, one line ending in the exact command to continue", "cmd_epics -> epics_of, epic_stats", "an epic is open, has sub-issues or the `epic` label, and is nobody's sub-issue; a closed epic never appears; --json feeds the SKILL's step 0", True),
     ("every run is logged", "log_run", "~/.config/setwave/log.jsonl", False),
@@ -3127,7 +3190,7 @@ def main(argv=None):
     x = s.add_parser("merge", help="merge PRs in order, one at a time, CI green before each"); x.add_argument("prs", nargs="*"); x.add_argument("--yes", action="store_true"); x.add_argument("--plan", help="plan file from `order --plan`: refuses if the base or any PR head moved since"); x.add_argument("--force", action="store_true"); x.add_argument("--squash", action="store_true"); x.add_argument("--ci-timeout", type=int, default=1200); x.add_argument("--wait-base-ci", action="store_true")
     x = s.add_parser("resolve", help="merge the base into a conflicting PR's branch in its worktree, gate, push (never --force), comment; a conflict is left for you, then --continue"); x.add_argument("pr"); x.add_argument("--continue", dest="cont", action="store_true")
     x = s.add_parser("close-parents", help="close parents whose sub-issues are all closed"); x.add_argument("epic"); x.add_argument("--include-epic", action="store_true"); x.add_argument("--dry-run", action="store_true")
-    x = s.add_parser("cleanup", help="remove worktrees that are clean, pushed and merged"); x.add_argument("slugs", nargs="*"); x.add_argument("--dry-run", action="store_true")
+    x = s.add_parser("cleanup", help="remove worktrees whose work lives elsewhere (a merged PR, an empty seat), printing the disk each removal reclaims; branches stay"); x.add_argument("slugs", nargs="*"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--include-closed", action="store_true", help="also remove worktrees whose PR closed without merging"); x.add_argument("--stale-days", type=int, metavar="N", help="also list kept worktrees with no open PR and nothing newer than N days, with their size; with --yes, remove those too"); x.add_argument("--yes", action="store_true", help="with --stale-days: remove the stale worktrees as well")
     x = s.add_parser("status", help="tree with states; --post comments it on the epic"); x.add_argument("epic"); x.add_argument("--post", action="store_true")
     x = s.add_parser("sweep", help="re-verify claimed done and closed leaves against merged PRs, and the retry ceiling; read-only unless --fix"); x.add_argument("epic"); x.add_argument("--fix", action="store_true", help="apply the state fixes (untick, reopen, apply the ledger) and comment the escalations")
     x = s.add_parser("lint", help="check issues carry what /wave needs"); x.add_argument("issues", nargs="+")
