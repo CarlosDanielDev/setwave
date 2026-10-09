@@ -77,6 +77,8 @@ STAMP = ".setwave.json"  # written by dispatch into each worktree, excluded from
 RETRY_CEILING = 3
 # more parallel agents than this once hit the API rate limit and left a half-extracted crate in the shared cargo cache
 MAX_BATCH = 6
+# the agent skills a handoff names when the repo declares and detects none (`phases.agent_skills` in .wave.json wins)
+DEFAULT_SKILLS = ["caveman (ultra)", "ponytail", "superpowers:test-driven-development"]
 # a registry package in Cargo.lock: name, version, then a registry or sparse-index source (git and path packages are not cached there)
 LOCK_PACKAGE = re.compile(r'\[\[package\]\]\s*\nname = "([^"]+)"\s*\nversion = "([^"]+)"\s*\nsource = "(?:registry|sparse)\+')
 # `order --run-gate` checks each simulated step out into a detached worktree named so; `doctor` reports any it finds
@@ -632,16 +634,24 @@ def detect_profile(root: Path, cfg: dict) -> dict:
             "hooks": hooks, "issue_templates": templates, "makefile_targets": targets}
 
 
-def profile_prompt(p: dict) -> str:
-    """The `{{PROFILE}}` block of the agent prompt: what the repo itself provides for each phase of the
-    loop, named so the agent expects it — or the plain default stack when nothing is found. Rule files
-    are named, never copied (the agent reads them; the prompt stays the same size in every repo)."""
+def profile_skills(p: dict) -> list[str]:
+    """The repo's own skills in the order the profile gives them: what `phases.agent_skills` declares and
+    the detection found, plus the kickoff/define/handoff providers when one is detected by name."""
     ph = p["phases"]
     skills = list(ph["agent_skills"]["provider"])
     for name in ("kickoff", "define", "handoff"):
         prov = ph[name]
         if prov["source"] == "detected" and prov["provider"] not in skills:
             skills.append(prov["provider"])
+    return skills
+
+
+def profile_prompt(p: dict) -> str:
+    """The `{{PROFILE}}` block of the agent prompt: what the repo itself provides for each phase of the
+    loop, named so the agent expects it — or the plain default stack when nothing is found. Rule files
+    are named, never copied (the agent reads them; the prompt stays the same size in every repo)."""
+    ph = p["phases"]
+    skills = profile_skills(p)
     if not (skills or p["hooks"] or ph["rules"]["provider"] or p["agents"] or p["commands"] or p["issue_templates"]):
         return ("Nenhuma orquestração própria detectada neste repositório (nada em `.claude/`, nenhum "
                 "CLAUDE.md/AGENTS.md/CONTRIBUTING.md): use a stack padrão acima como está.")
@@ -947,6 +957,48 @@ def tally(items: list[dict]) -> dict[str, int]:
     return {s: sum(1 for i in items if i["state"] == s) for s in ("done", "dropped", "open")}
 
 
+# ---------------------------------------------------------------- body surgery for prepare / amend
+
+HANDOFF = re.compile(r"^## Handoff[ \t]*$")
+PREPARE_MARK = "<!-- written by `wave prepare` -->"
+
+
+def insert_section(body: str, heading: re.Pattern, block: str) -> str:
+    """`body` with `block` (a full `## H` section, ending in one newline) replacing the first section
+    whose heading matches, in place, or appended after a blank line when there is none. Every byte
+    outside the section stays: an existing block is updated where it stands, never moved."""
+    if not body:
+        return block
+    lines = body.splitlines(keepends=True)
+    start = next((i for i, l in enumerate(lines) if heading.match(l.rstrip("\r\n"))), None)
+    if start is None:
+        return (body if body.endswith("\n") else body + "\n") + "\n" + block
+    end = next((i for i in range(start + 1, len(lines)) if HEADING.match(lines[i])), len(lines))
+    return "".join(lines[:start] + block.splitlines(keepends=True) + lines[end:])
+
+
+def insert_before(body: str, heading: re.Pattern, block: str) -> str:
+    """`body` with `block` inserted ahead of the first line whose heading matches — never replacing
+    anything — or appended after a blank line at the end when there is none. Every byte of `body`
+    keeps its place."""
+    if not body:
+        return block
+    lines = body.splitlines(keepends=True)
+    start = next((i for i, l in enumerate(lines) if heading.match(l.rstrip("\r\n"))), None)
+    if start is None:
+        return (body if body.endswith("\n") else body + "\n") + "\n" + block
+    return "".join(lines[:start] + block.splitlines(keepends=True) + lines[start:])
+
+
+def with_done_when(body: str, items: str) -> str:
+    """`body` with a `## Done when` section carrying `items`, written once — before the Handoff when
+    there is one, at the end when not. Raises ValueError when the body already has the section: the
+    owner answered once, and an answer is never overwritten by a second one."""
+    if done_when(body) is not None:
+        raise ValueError("the body already has a `## Done when` — amend writes it once, it never overwrites")
+    return insert_before(body, HANDOFF, "## Done when\n\n" + items.rstrip("\n") + "\n\n")
+
+
 def candidates(nodes: dict[str, dict]) -> list[dict]:
     out = []
     open_leaves = [nd for nd in sorted(leaves(nodes), key=lambda d: (d["repo"], d["number"])) if nd["issue"]["state"] == "open"]
@@ -1164,6 +1216,7 @@ def render_prompt(repo: Repo, iss: dict, branch: str, sha: str, parallel: int) -
                           else "sem índice CodeGraph aqui; se `codegraph` existir no PATH, rode `codegraph init .` na worktree primeiro",
         "ACCOUNT": f"conta gh `{repo.account}` (use `GH_TOKEN=$(gh auth token --user {repo.account})` nos comandos gh)" if repo.account else "conta gh ativa",
         "PROFILE": profile_prompt(repo.profile()),
+        "PREPARED": prepared_note(iss.get("body") or ""),
         "PARALLEL": str(max(parallel - 1, 0)),
     }
     for k, v in fields.items():
@@ -1334,6 +1387,15 @@ def cmd_dispatch(default: Repo | None, a):
             print(f"{repo.slug}: cargo fetch in {repo.root}: done")
     for repo, n in targets:
         iss = repo.issue(n)
+        if not a.no_prepare and not a.dry_run and "## Handoff" not in (iss.get("body") or ""):
+            try:
+                iss, _, _ = prepare_issue(repo, n)
+                print(f"{key(repo, n)}: no `## Handoff` in the body — prepare wrote it")
+            except SystemExit as e:  # the write is an upgrade, not a precondition: the prompt carries the same facts
+                print(f"{key(repo, n)}: no `## Handoff` in the body and prepare could not write it "
+                      f"({str(e).strip().splitlines()[-1] if str(e).strip() else e}) — dispatching anyway", file=sys.stderr)
+        elif a.dry_run and not a.no_prepare and "## Handoff" not in (iss.get("body") or ""):
+            print(f"{key(repo, n)}: dry run, nothing written; a real dispatch would run `wave prepare {n}` first")
         branch = branch_for(iss)
         wt = repo.worktree(n)
         sha = repo.origin_sha()
@@ -2253,6 +2315,15 @@ def cmd_status(default: Repo | None, a):
         print("\n(posted on the epic)")
 
 
+EVIDENCE_LINE = re.compile(r"\b[\w./-]+\.(rs|ts|tsx|js|py|go|swift|kt|rb|php|cs|java|yml|yaml|toml|json):\d+")
+EVIDENCE_SYMBOL = re.compile(r"`[\w./-]+\.(rs|ts|tsx|js|py|go|swift|kt|rb|php|cs|java)`[^\n]{0,80}`[A-Za-z_][\w.]*`")
+
+
+def has_evidence(body: str) -> bool:
+    """`file:line`, or a file named beside the symbol it defines: what lets an agent start without guessing."""
+    return bool(EVIDENCE_LINE.search(body) or EVIDENCE_SYMBOL.search(body))
+
+
 def lint_body(body: str, n: int, typ: str | None, *, depends_wired: bool = True, sub_issues: int = 0) -> list[str]:
     """Everything `wave lint` charges one body with: the common contract, plus the type's template when labeled.
     `depends_wired` mirrors the issue's blocked_by and `sub_issues` its count; both come from GitHub."""
@@ -2271,9 +2342,7 @@ def lint_body(body: str, n: int, typ: str | None, *, depends_wired: bool = True,
         missing.append(f"CONTRADICTION: body closes {closes} but this is #{n}")
     if sub_issues and "## Handoff" in body:
         missing.append("a parent with a Handoff block: parents are never dispatched; move the handoff to the leaves")
-    has_line = re.search(r"\b[\w./-]+\.(rs|ts|tsx|js|py|go|swift|kt|rb|php|cs|java|yml|yaml|toml|json):\d+", body)
-    has_symbol = re.search(r"`[\w./-]+\.(rs|ts|tsx|js|py|go|swift|kt|rb|php|cs|java)`[^\n]{0,80}`[A-Za-z_][\w.]*`", body)
-    if not (has_line or has_symbol):
+    if not has_evidence(body):
         missing.append("no evidence: neither `file:line` nor `file` + `symbol`")
     return missing + (lint_type(body, typ) if typ else [])
 
@@ -2293,6 +2362,138 @@ def cmd_lint(default: Repo | None, a):
         note = "" if typ else " (no type label — bug, story, chore, feature — its template was not charged)"
         print(f"{key(repo, n)}: {where} — " + ("ok" if not missing else "; ".join(missing)) + note)
     sys.exit(1 if problems else 0)
+
+
+# ---------------------------------------------------------------- prepare / amend
+
+PREPARE_COMMENT = "handoff added by `wave prepare`"
+
+
+def handoff_block(repo: Repo, iss: dict) -> str:
+    """The facts half of a handoff, everything from `facts` on the repo: branch, worktree, base and sha,
+    gate, skills (`.wave.json`'s `phases.agent_skills`, else the default stack), the non-negotiables and
+    `Closes #N`. The judgement — the Done when, the file:line, the ADR — is never written here."""
+    n = iss["number"]
+    gate, skills = repo.gate(), profile_skills(repo.profile()) or DEFAULT_SKILLS
+    return "\n".join([
+        "## Handoff",
+        PREPARE_MARK, "",
+        "```bash",
+        f"git worktree add -b {branch_for(iss)} {repo.worktree(n)} origin/{repo.base}",
+        f"cd {repo.worktree(n)}",
+        "```", "",
+        f"Base `origin/{repo.base}` at `{repo.origin_sha()}`. Gate:",
+        "", "```bash", *gate, "```", "",
+        "Skills: " + ", ".join(f"`{s}`" for s in skills), "",
+        "Non-negotiables: no AI attribution in commits or PRs; never `git gc --prune`, `git reflog expire`, "
+        "`git stash`, `git reset --hard`, `git clean -f`, `git push --force*`, `git branch -D`, `rm -rf`; "
+        "never merge — the owner merges; never touch the main checkout or a sibling worktree; "
+        "evidence before assertions.", "",
+        f"Closes #{n}", "",
+    ])
+
+
+def prepare_questions(body: str) -> list[tuple[str, str]]:
+    """The judgement `prepare` cannot write, each with the exact question the orchestrator asks: the SKILL
+    turns them into one AskUserQuestion per issue, the answer comes back through
+    `wave amend <issue> --done-when <file>`. The tool proposes nothing here — proposing is inventing."""
+    questions = []
+    if done_when(body) is None:
+        questions.append(("Done when",
+                          "What must be observably true when this issue is done? Name 3-6 checks a stranger "
+                          "can run, in the issue's own words (the answer is written with `wave amend`)."))
+    if not has_evidence(body):
+        questions.append(("evidence",
+                          "Where does this change land? Name the `file:line` (or the file and the symbol) in "
+                          "the current code you believe it touches."))
+    if section(body, "## ADR stub") is None:
+        questions.append(("ADR stub",
+                          "Which design fork does this issue settle? Name both options and the recommendation, "
+                          "so the PR can record the decision in three sentences."))
+    return questions
+
+
+def prepared_note(body: str) -> str:
+    """The agent prompt's note on the issue's completeness: which sections the tool wrote (the marker says
+    so) and which are missing, so the agent verifies its premises harder where the issue is thin."""
+    wrote, lack = [], [g for g, _ in prepare_questions(body)]
+    if PREPARE_MARK in body:
+        wrote.append("Handoff (branch, worktree, base, gate, skills — written by `wave prepare`)")
+    if not (wrote or lack):
+        return ""
+    out = []
+    if wrote:
+        out.append("Escrito pela ferramenta: " + "; ".join(wrote) + ".")
+    if lack:
+        out.append("Falta na issue, e o orquestrador já perguntou: " + ", ".join(lack)
+                   + " — onde a issue é fina, verifique cada premissa duas vezes antes de agir.")
+    return "\n".join(out)
+
+
+def prepare_issue(repo: Repo, n: int) -> tuple[dict, str, list[tuple[str, str]]]:
+    """The facts of a handoff written into the issue's body (`## Handoff` appended, or an existing one
+    replaced in place with every other byte kept), the judgement it cannot write returned as questions,
+    and — once, when judgement is missing — a comment naming the gap. Returns the refreshed issue, what
+    happened to the body (appended | updated | current) and the questions."""
+    repo.fetch()
+    iss = repo.issue(n)
+    body = iss.get("body") or ""
+    new = insert_section(body, HANDOFF, handoff_block(repo, iss))
+    what = ("appended" if not any(HANDOFF.match(l) for l in body.splitlines())
+            else "current" if new == body else "updated")
+    if new != body:
+        edit_issue_body(repo, n, body, new)
+    gaps = prepare_questions(new)
+    if gaps:
+        comments = repo.api(f"repos/{repo.slug}/issues/{n}/comments?per_page=100", paginate=True) or []
+        if not any(PREPARE_COMMENT in (c.get("body") or "") for c in comments):
+            repo.gh(["issue", "comment", str(n), "-R", repo.slug,
+                     "--body", f"{PREPARE_COMMENT}: the facts are in the body; still needing a human: "
+                               + ", ".join(g for g, _ in gaps) + "."])
+    iss["body"] = new
+    return iss, what, gaps
+
+
+def cmd_prepare(default: Repo | None, a):
+    for ref in a.issues:
+        repo, n = parse_ref(ref, default)
+        iss, what, gaps = prepare_issue(repo, n)
+        print(f"{key(repo, n)}: " + {"appended": "Handoff appended to the body",
+                                     "updated": "Handoff updated in place in the body",
+                                     "current": "Handoff already current — nothing written"}[what]
+              + f" (branch {branch_for(iss)}, worktree {repo.worktree(n)}, base {repo.base} @ {repo.origin_sha()})")
+        if not gaps:
+            print("  nothing to ask: the issue carries its own judgement")
+        else:
+            print(f"  {len(gaps)} thing(s) the tool cannot write — one question each, for the orchestrator to ask:")
+            for g, q in gaps:
+                print(f"    {g}: {q}")
+            print("  commented on the issue: the gap trail (once; the next run writes nothing)")
+
+
+def cmd_amend(default: Repo | None, a):
+    """Write the owner's answered criteria into the issue once: `wave amend <issue> --done-when <file>`."""
+    repo, n = parse_ref(a.issue, default)
+    try:
+        text = Path(a.done_when).read_text()
+    except OSError as e:
+        print(f"amend refused: cannot read {a.done_when}: {e.strerror or e}", file=sys.stderr)
+        sys.exit(2)
+    items = [l for l in text.splitlines() if l.strip()]
+    bad = [l for l in items if not ITEM.match(l)]
+    if not items or bad:
+        for l in bad[:3]:
+            print(f"  not an item: {l}", file=sys.stderr)
+        print(f"amend refused: every line of {a.done_when} must be a `- [ ] item`", file=sys.stderr)
+        sys.exit(2)
+    body = repo.issue(n).get("body") or ""
+    try:
+        new = with_done_when(body, "\n".join(items))
+    except ValueError as e:
+        print(f"amend refused: {key(repo, n)}: {e}", file=sys.stderr)
+        sys.exit(2)
+    edit_issue_body(repo, n, body, new)
+    print(f"{key(repo, n)}: Done-when written ({len(items)} item(s)); verify can now compare the PR's ledger")
 
 
 # ---------------------------------------------------------------- why / doctor
@@ -2588,6 +2789,10 @@ GUARANTEES = [
     ("verify refuses a PR whose own issue is closed only by a commit message", "verify_one (+ cmd_merge)", "NO-CLOSES-IN-BODY[#N ...]", True),
     ("verify refuses a PR without a `## Done when` ledger, or whose items differ from its issue's", "verify_one -> ledger_check (+ cmd_merge)", "LEDGER-MISSING[...] / LEDGER-MISMATCH[...] / ISSUE-NO-DONE-WHEN[...]", True),
     ("merge applies the PR's ledger to its issue after the merge, in one comment, and reopens it while an item is open", "cmd_merge -> apply_ledger -> tick_issue", "ledger applied from PR #N: X done, Y dropped, Z remain", True),
+    ("prepare writes only facts into the issue's `## Handoff` — appended, or an existing one replaced in place with every other byte kept — and asks, never answers, the judgement (Done when, evidence, ADR stub), one question per gap, commented once", "cmd_prepare -> prepare_issue, handoff_block, prepare_questions", "wave prepare <issue>: the block, the questions, one gap comment; the same facts twice write nothing", True),
+    ("amend writes the owner's answered Done-when once, before the Handoff, and never over one that exists; every line of the file must be an item", "cmd_amend -> with_done_when", "exit 2: amend refused: the body already has a `## Done when`", True),
+    ("dispatch prepares an issue whose body has no `## Handoff` itself, so a bare issue works end to end; --no-prepare opts out and a failed write dispatches anyway", "cmd_dispatch -> prepare_issue", "no `## Handoff` in the body — prepare wrote it", True),
+    ("the agent prompt names the sections the tool wrote and the ones the issue still lacks, so the agent verifies its premises harder where the issue is thin", "render_prompt -> prepared_note", "the {{PREPARED}} block of templates/agent.md", True),
     ("no merge of a PR the judge never judged: the producer is never the judge of its own PR", "cmd_merge -> judge_check (cmd_judge writes the patch)", "JUDGE-MISSING[no verdict at <handoffs>/judge-<PR>.json]", True),
     ("no merge of a PR the judge failed or held concerns on", "cmd_merge -> judge_check", "JUDGE-FAIL[verdict fail: <file:line, ...>]", True),
     ("no merge on a verdict whose head_sha is not the head being merged: any push invalidates the judgement", "cmd_merge -> judge_check", "JUDGE-STALE[the verdict is for abc1234, the head is def5678]", True),
@@ -2909,7 +3114,9 @@ def main(argv=None):
     x = s.add_parser("facts", help="what was discovered about repos"); x.add_argument("slugs", nargs="*")
     x = s.add_parser("next", help="leaf issues ready to dispatch"); x.add_argument("epic"); x.add_argument("--batch", type=int, default=4); x.add_argument("--json", action="store_true")
     x = s.add_parser("epics", help="every open epic across the registry's repos (--slug / --repo for one), readiest first: leaves, closed, ready, blocked, in progress, last status comment"); x.add_argument("--slug", help="owner/name: scan that repo instead of the whole registry"); x.add_argument("--repo", default=argparse.SUPPRESS, help="path inside a repo: scan that repo instead of the whole registry"); x.add_argument("--json", action="store_true", help="one object per epic, for the SKILL's step 0")
-    x = s.add_parser("dispatch", help="create worktrees + prompt files (runs doctor and refuses issues that are not READY)"); x.add_argument("issues", nargs="+"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--force", action="store_true"); x.add_argument("--warm", action="store_true", help="Rust: `cargo fetch` in the main checkout first, so parallel builds only extract"); x.add_argument("--respawn", action="store_true", help="this dispatch returns with a new strategy after the same failure twice: the stamp counts a respawn, not a plain resume")
+    x = s.add_parser("dispatch", help="create worktrees + prompt files (runs doctor and refuses issues that are not READY)"); x.add_argument("issues", nargs="+"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--force", action="store_true"); x.add_argument("--warm", action="store_true", help="Rust: `cargo fetch` in the main checkout first, so parallel builds only extract"); x.add_argument("--respawn", action="store_true", help="this dispatch returns with a new strategy after the same failure twice: the stamp counts a respawn, not a plain resume"); x.add_argument("--no-prepare", action="store_true", help="do not run `wave prepare` on an issue whose body has no `## Handoff`")
+    x = s.add_parser("prepare", help="write the facts of a handoff (branch, worktree, base, gate, skills, non-negotiables, Closes #N) into the issue's `## Handoff` — appended, or an existing one replaced in place — and print the judgement it cannot write, one question per gap, for the orchestrator to ask"); x.add_argument("issues", nargs="+")
+    x = s.add_parser("amend", help="write the owner's answered criteria into the issue once: --done-when <file>, one `- [ ] item` per line, written before the Handoff, never over one that exists"); x.add_argument("issue"); x.add_argument("--done-when", metavar="FILE", required=True)
     x = s.add_parser("why", help="the premises behind READY / NOT READY for an issue, with evidence"); x.add_argument("refs", nargs="+")
     x = s.add_parser("doctor", help="preflight: gh, git, clean checkout, gate, protected paths, dead agents, retry ceiling, leftover worktrees, cargo cache, disk, batch size"); x.add_argument("--batch", type=int, default=4); x.add_argument("--fix-cache", action="store_true", help="move each half-extracted crate to ~/.config/setwave/quarantine/ (never deletes)"); x.add_argument("--epic", help="also run the state sweep of this epic as a soft check")
     x = s.add_parser("agents", help="every issue worktree: age since dispatch, minutes since the newest change, PR, verdict (working | quiet | likely dead | done)")
@@ -2946,7 +3153,7 @@ def main(argv=None):
         {"repos": cmd_repos, "facts": cmd_facts, "next": cmd_next, "epics": cmd_epics, "dispatch": cmd_dispatch, "prompt": cmd_prompt,
      "verify": cmd_verify, "judge": cmd_judge, "order": cmd_order, "merge": cmd_merge, "resolve": cmd_resolve, "close-parents": cmd_close_parents,
              "cleanup": cmd_cleanup, "status": cmd_status, "lint": cmd_lint, "plan": cmd_plan, "adopt": cmd_adopt, "why": cmd_why, "doctor": cmd_doctor,
-             "agents": cmd_agents, "tick": cmd_tick, "sweep": cmd_sweep, "hooks": cmd_hooks,
+             "agents": cmd_agents, "tick": cmd_tick, "prepare": cmd_prepare, "amend": cmd_amend, "sweep": cmd_sweep, "hooks": cmd_hooks,
          "guarantees": cmd_guarantees}[a.cmd](default, a)
     except SystemExit as e:
         exit_code = e.code if isinstance(e.code, int) else 1

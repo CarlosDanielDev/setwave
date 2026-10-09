@@ -34,6 +34,8 @@ gh issue view {{N}} -R {{REPO}} --json comments -q '.comments[].body'
 ```
 Leia a issue inteira **e os comentários**: PRs anteriores deixam ali o que mudou desde que ela foi escrita (símbolos renomeados, APIs novas). Leia também o parent dela, se houver. Números de linha na issue são carimbos do dia em que foi escrita: confirme cada um. "Done when" com dono por item — você é o implementer; onde diz reviewer, confira e declare no PR. Só o que segue em **Remaining** é trabalho seu. "ADR stub": decida, três frases no PR. "Out of scope": não reabra. "Handoff": a worktree já existe, ignore o `git worktree add`.
 
+{{PREPARED}}
+
 ### Remaining
 
 {{REMAINING}}

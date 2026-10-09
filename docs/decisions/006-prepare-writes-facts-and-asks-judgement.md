@@ -1,0 +1,7 @@
+# ADR 006 — prepare writes facts into the body and asks, never answers, the judgement
+
+2026-10-09 · issue #14
+
+The fork the issue names: append the Handoff to the body, or post it as a comment and have `dispatch` read comments too. Chosen: the body — `lint`, `render_prompt` and every reader already look there, and a handoff that lives in a comment is a handoff nobody's tool reads — with the comment kept for the trail only, posted once, when judgement is missing. The split the issue draws is enforced by construction: `handoff_block` reads nothing but `facts` (branch, worktree, base, gate, skills, non-negotiables, `Closes #N`), and the three things a human must answer — the `## Done when`, the `file:line` evidence, the `## ADR stub` — come back as questions, one per gap, turned by the SKILL into a single `AskUserQuestion` per issue whose proposal is drafted from the body, never by the tool.
+
+The second fork: where the owner's answer lands. `wave amend <issue> --done-when <file>` writes it before the Handoff, once — a body that already carries a `## Done when` is refused, because a second writer over an owner's words is how invented criteria get in through the back door. Idempotence is byte-level (`insert_section` replaces the block where it stands and touches nothing else), so `prepare` can run on every wave; and when its write fails inside `dispatch`, the dispatch continues loudly — the prompt already carries the same facts, so the write is an upgrade, not a precondition.
