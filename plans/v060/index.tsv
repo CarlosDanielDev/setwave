@@ -1,0 +1,5 @@
+# key	title	labels	parent
+epic	v0.6.0 — o release atrasado e as guardas que a sessão dele produziu	epic	-
+release	Release 0.6.0: os manifests dizem a versão que existe	enhancement	epic
+prepare-parent	prepare recusa issue pai: parent nunca recebe handoff	enhancement,doctor	epic
+readopt	adopt recusa recriar épico de título que já existe	enhancement	epic
