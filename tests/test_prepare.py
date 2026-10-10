@@ -1,9 +1,9 @@
 """`wave prepare`: the facts of a handoff written by the tool, the judgement asked of a human.
 
 o/r#70 is bare (no Done when, no Handoff, no evidence, no ADR stub); o/r#71 carries a complete
-body with a hand-written Handoff; o/l#13 and o/l#14 are bare leaves dispatch can pick. Writes go
-through FAKE_GH_EDIT and their own call logs, so `NoWrites` in test_commands keeps reading a log
-with no write in it.
+body with a hand-written Handoff; o/l#13 and o/l#14 are bare leaves dispatch can pick; o/r#1 is
+the epic — seven sub-issues, and the one issue `prepare` refuses. Writes go through FAKE_GH_EDIT
+and their own call logs, so `NoWrites` in test_commands keeps reading a log with no write in it.
 """
 import json
 import os
@@ -60,6 +60,13 @@ class Prepare(unittest.TestCase):
         self.assertEqual(len(posted), 1, calls)
         self.assertIn("wave prepare", posted[0])
         self.assertIn("Done when", posted[0])
+
+    def test_a_parent_is_refused_before_any_write(self):
+        p, calls = writes_allowed("prepare", "1", log="prepare-1")
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("PREPARE-PARENT: o/r#1 is a parent (7 sub-issues); parents are never dispatched", p.stderr)
+        self.assertEqual([c for c in calls if c[:2] == ["issue", "edit"]], [], "a parent's body is never written")
+        self.assertEqual([c for c in calls if c[:2] == ["issue", "comment"]], [], "and no gap comment either")
 
     def test_prepare_is_idempotent_byte_for_byte(self):
         repo = wave.Repo.get("o/r")
