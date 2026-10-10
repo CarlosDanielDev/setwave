@@ -1,0 +1,9 @@
+# key	title	labels	parent
+epic	v0.5.0 — o superharness: os padrões provados, embedados	epic	-
+hooks	Guards de ambiente como hooks fail-open do plugin (attribution, git proibido, segredos, dispatch-contract)	enhancement	epic
+sweep	wave sweep: estado dito feito re-verificado no GitHub, teto de retry, escalação	enhancement	epic
+judge	wave judge: o produtor nunca é o juiz do próprio PR (veredito chaveado ao SHA)	enhancement	epic
+templates	Templates tipados de issue + lint por tipo	enhancement	epic
+define	/setwave:define: a sessão de refinamento que só sai de si com issue Ready	enhancement	epic
+advisor	Checkpoints de escalação: teste quebra 2× e auditoria pré-done	enhancement	epic
+gates	As camadas, validadas: skill-lint no CI, GUARANTEES por guarda, ADR por guarda	enhancement	epic
