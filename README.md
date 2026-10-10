@@ -1,8 +1,23 @@
+<div align="center">
+
 # setwave
 
-Drive a GitHub epic to merged pull requests, wave by wave, with Claude Code — one git worktree per issue, one agent per worktree, verification before anything is relayed, and a merge only when you say so.
+**Drive a GitHub epic to merged pull requests, wave by wave, with Claude Code.**
+
+One git worktree per issue · one agent per worktree · verification before anything is relayed · a merge only when you say so.
+
+[![CI](https://github.com/CarlosDanielDev/setwave/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/CarlosDanielDev/setwave/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/tag/CarlosDanielDev/setwave?sort=semver&label=release&color=blue)](https://github.com/CarlosDanielDev/setwave/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3-3776AB?logo=python&logoColor=white)](https://www.python.org)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Ubuntu-lightgrey)](.github/workflows/ci.yml)
+[![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2)](.claude-plugin/plugin.json)
 
 In surfing, a *set* is the group of waves that arrives together. That is what this does with issues.
+
+</div>
+
+---
 
 The state lives in **GitHub** (sub-issues, `blocked_by`, PRs) and in **git** (worktrees, branches). Never in a chat. So the prompt is one line, and it is the same line tomorrow, in the next repo, under another account:
 
