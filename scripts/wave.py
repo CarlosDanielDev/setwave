@@ -3071,6 +3071,7 @@ GUARANTEES = [
     ("adopt turns a milestone, a label or explicit refs into an epic: sub-issues attached, textual dependencies (depends on / blocked by / after / needs, cross-repo) wired as blocked_by; an issue that already has a parent is reported, not moved", "cmd_adopt -> textual_deps, Repo.parent", "adopt report: attached / blocked by / already has a parent — reported, not moved", True),
     ("adopt reads before it writes: a second run attaches nothing twice, wires nothing twice, comments nothing twice", "cmd_adopt (sub_issues, blocked_by and comments read before every write)", "already a sub-issue / already blocked by; the second run makes no write call", True),
     ("adopt never edits a body: a missing `## Done when` gets a comment asking for observable criteria, and the lint output rides the adopt report", "cmd_adopt -> lint_body", "commented: no `## Done when`; lint: ...", True),
+    ("adopt refuses to create an epic whose title an issue already carries: an open one is reused, a closed one refuses with ADOPT-TITLE-EXISTS and the ref (--epic N is the explicit door into it, reopening is the owner's call)", "cmd_adopt", 'ADOPT-TITLE-EXISTS: "M1" is o/r#30 (closed) — pass --epic 30 to adopt into it explicitly', True),
     ("every open leaf is in exactly one state", "candidates (assert)", "blocked | in-progress | done-unclosed | agent-exhausted | worktree | ready", True),
     ("an open issue whose every Done-when item is ticked or struck is never dispatched", "candidates + premises_for", "done-unclosed: ... close it or add an item", True),
     ("verify flags AI attribution in body or commits", "verify_one", "AI-ATTRIBUTION", True),
@@ -3276,7 +3277,9 @@ def pick_by_selector(issues: list[dict], milestone: str | None, label: str | Non
 
 def cmd_adopt(default: Repo | None, a):
     """Turn an existing milestone, label or explicit issue list into an epic the plugin can run: `--epic N`
-    designates the epic, or one is created titled after the milestone/label with the `epic` label. Every
+    designates the epic, or one is created titled after the milestone/label with the `epic` label — a title
+    an open issue already carries is reused, one a closed issue carries refuses with `ADOPT-TITLE-EXISTS`
+    (reopening is the owner's call, `--epic N` is the explicit door into it). Every
     selected open issue is attached as a sub-issue — one that already has a parent is reported, not moved —
     and the textual dependencies written in bodies and comments become real `blocked_by`. A body without a
     `## Done when` gets a comment asking for observable criteria, never an edit, and the `wave lint` output
@@ -3288,7 +3291,7 @@ def cmd_adopt(default: Repo | None, a):
         raise SystemExit('select the issues one way: --milestone "<title>", --label <name>, or issue refs')
     if a.issues and not a.epic:
         raise SystemExit("explicit refs need an epic to join: --epic N")
-    issues = json.loads(repo.gh(["issue", "list", "-R", repo.slug, "--state", "open", "--limit", "500",
+    issues = json.loads(repo.gh(["issue", "list", "-R", repo.slug, "--state", "all", "--limit", "500",
                                  "--json", "number,id,title,body,state,labels,milestone"]))
     if a.issues:
         picked = []
@@ -3302,7 +3305,7 @@ def cmd_adopt(default: Repo | None, a):
                 continue
             picked.append(iss)
     else:
-        picked = pick_by_selector(issues, a.milestone, a.label)
+        picked = [i for i in pick_by_selector(issues, a.milestone, a.label) if i["state"] == "open"]
     if not picked:
         sel = f'milestone "{a.milestone}"' if a.milestone else f'label "{a.label}"' if a.label else "the refs given"
         raise SystemExit(f"no open issue selected: nothing in {repo.slug} carries {sel}")
@@ -3312,7 +3315,11 @@ def cmd_adopt(default: Repo | None, a):
         epic_repo, epic_n = parse_ref(a.epic, repo)
     else:  # read before create: a second adopt finds the epic the first one made and reuses it
         title = a.milestone or a.label
-        hit = next((i for i in issues if i["title"] == title), None)
+        hit = next((i for i in issues if i["title"] == title and i["state"] == "open"), None)
+        closed = next((i for i in issues if i["title"] == title and i["state"] == "closed"), None)
+        if hit is None and closed is not None:  # a closed epic: refusing, never reopening one alone
+            raise SystemExit(f'ADOPT-TITLE-EXISTS: "{title}" is {key(repo, closed["number"])} (closed) '
+                             f'— pass --epic {closed["number"]} to adopt into it explicitly')
         epic_n = hit["number"] if hit else None
     where = f'milestone "{a.milestone}"' if a.milestone else f'label "{a.label}"' if a.label else "explicit refs"
     print(f"adopt {repo.slug}: {where} — {len(picked)} open issue(s)")

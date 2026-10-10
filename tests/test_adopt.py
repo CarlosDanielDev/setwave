@@ -190,6 +190,47 @@ class AdoptMilestone(unittest.TestCase):
         self.assertEqual(wired_by(calls), {"21": 2222, "22": 2323, "23": 7077, "25": 2121})
 
 
+CLOSED_EPIC = {"id": 3030, "number": 30, "title": "M1", "state": "closed",
+               "body": "`wave adopt` gathered the open issues of o/r that carried the milestone \"M1\".",
+               "labels": [{"name": "epic"}], "milestone": None,
+               "html_url": "https://github.com/o/r/issues/30",
+               "repository_url": "https://api.github.com/repos/o/r"}
+
+
+def all_issues(d: wave.Path, *extra: dict) -> wave.Path:
+    """The all-state list the epic search reads: the five open M1 leaves plus any closed issue."""
+    issues = json.loads((FIXTURES / "issue_list_o_r.json").read_text()) + list(extra)
+    (d / "issue_list_all_o_r.json").write_text(json.dumps(issues))
+    return d
+
+
+class AdoptTitleExists(unittest.TestCase):
+    def test_a_closed_epic_of_the_same_title_is_refused_with_its_ref(self):
+        p, calls = adopt(["--milestone", "M1"], all_issues(scenario("adopt-closed-11"), CLOSED_EPIC))
+        self.assertNotEqual(p.returncode, 0, p.stdout)
+        self.assertIn("ADOPT-TITLE-EXISTS", p.stderr)
+        self.assertIn('"M1" is o/r#30 (closed)', p.stderr)
+        self.assertIn("--epic 30", p.stderr, "the refusal names the explicit door into the existing epic")
+        self.assertFalse([c for c in calls if c[:2] == ["issue", "create"]], "nothing is created")
+        self.assertEqual(posts(calls, "sub_issues"), [])
+
+    def test_an_explicit_epic_attaches_even_when_closed(self):
+        p, calls = adopt(["--milestone", "M1", "--epic", "30"],
+                         all_issues(scenario("adopt-closed-epic-11"), CLOSED_EPIC))
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("epic: o/r#30 (existing)", p.stdout)
+        self.assertEqual({int(field(c, "sub_issue_id")) for c in posts(calls, "issues/30/sub_issues")},
+                         {2121, 2222, 2323, 2525})
+
+    def test_a_new_title_still_creates_the_epic_when_closed_issues_carry_the_milestone(self):
+        old = dict(CLOSED_EPIC, number=19, id=1919, title="old wave", milestone={"title": "M1"})
+        p, calls = adopt(["--milestone", "M1"], all_issues(scenario("adopt-fresh-11"), old))
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn('epic: o/r#30 (created from milestone "M1"', p.stdout)
+        self.assertEqual({int(field(c, "sub_issue_id")) for c in posts(calls, "issues/30/sub_issues")},
+                         {2121, 2222, 2323, 2525}, "the closed carrier of the milestone is not adopted")
+
+
 class AdoptRefusals(unittest.TestCase):
     def test_no_selector_and_two_selectors_are_refused(self):
         for args in ([], ["--milestone", "M1", "--label", "x"], ["--milestone", "M1", "21"]):
