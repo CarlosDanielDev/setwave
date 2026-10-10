@@ -5,7 +5,14 @@ Repo: `{{REPO}}`, base `{{BASE}}`, {{ACCOUNT}}.
 
 ## 0. Modo de trabalho — antes de ler código
 
-Invoque via Skill tool, nesta ordem, e siga pelo resto da sessão: `caveman` (nível ultra), `ponytail`, `graphify`, `architecture-designer`, `team-agent-orchestration`, `superpowers:test-driven-development` (test-first: escreva o teste, veja-o falhar pelo motivo certo, só então implemente). Antes de abrir o PR, `poka-yoke` re-auditando o fluxo tocado. Prosa comprimida; código, comentários, commits e PR em inglês normal, bem escrito, no tom dos arquivos vizinhos.
+Se estas skills existirem no teu host, invoque-as via Skill tool, nesta ordem, e siga-as pelo resto da sessão: `caveman` (nível ultra), `ponytail`, `graphify`, `architecture-designer`, `team-agent-orchestration`, `superpowers:test-driven-development`. Antes de abrir o PR, `poka-yoke`. **Skill ausente não bloqueia e não é citada de novo** — o comportamento de cada uma está embutido nas regras abaixo, que valem sempre:
+
+- Prosa comprimida; código, comentários, commits e PR em inglês normal, bem escrito, no tom dos arquivos vizinhos.
+- A solução mais preguiçosa que funciona: diff mínimo, sem abstração especulativa, sem dependência nova sem justificativa no PR; simplificação deliberada leva um comentário `ponytail:` nomeando o teto conhecido dela.
+- Test-first: escreva o teste, veja-o falhar pelo motivo certo, só então implemente.
+- Bifurcação de design real → ADR de três frases no PR (o `## ADR stub` da issue nomeia a bifurcação).
+- Nenhum critério de aceite sem dono — o `## Done when` da issue traz um por item; você é o implementer, onde diz reviewer você confira e declare no PR.
+- Antes de abrir o PR, re-audite o fluxo tocado procurando o erro que a mudança deixa passar: mutation-check em toda guarda nova, recusa em vez de aviso onde for possível.
 
 Regras inegociáveis:
 - NUNCA atribuição de IA em commit ou PR (nada de `Co-Authored-By: Claude`, nada de "Generated with Claude Code").
@@ -24,7 +31,7 @@ Worktree JÁ CRIADA: `{{WORKTREE}}`, branch `{{BRANCH}}`, nascida de `origin/{{B
 ```bash
 cd {{WORKTREE}} && git fetch origin && git status --porcelain && git rev-list --left-right --count origin/{{BASE}}...HEAD
 ```
-Atrás > 0 → `git rebase origin/{{BASE}}` só com árvore limpa; conflito → pare e relate. CodeGraph: {{CODEGRAPH_NOTE}}. Comece por `codegraph explore "{{CODEGRAPH_QUERY}}"`; quando o grafo discordar do disco, o disco ganha.
+Atrás > 0 → `git rebase origin/{{BASE}}` só com árvore limpa; conflito → pare e relate. CodeGraph: {{CODEGRAPH_NOTE}} — sem `codegraph` no host nada aqui depende dele: comece por Grep/Read. Com ele, comece por `codegraph explore "{{CODEGRAPH_QUERY}}"`; quando o grafo discordar do disco, o disco ganha.
 
 ## 2. A tarefa
 

@@ -2827,7 +2827,8 @@ def cmd_doctor(default: Repo | None, a) -> None:
     ok, out = sh_ok(["git", "--version"])
     v = re.search(r"(\d+)\.(\d+)", out)
     checks.append(("git >= 2.38 (merge-tree --write-tree)", bool(v) and (int(v.group(1)), int(v.group(2))) >= (2, 38), out.strip(), True))
-    checks.append(("codegraph on PATH (optional)", sh_ok(["which", "codegraph"])[0], "agents index their worktree with it", False))
+    checks.append(("codegraph on PATH (optional)", sh_ok(["which", "codegraph"])[0],
+                   "agents index their worktree with it — install with `npm install -g @colbymchenry/codegraph`; the prompt works without it (Grep/Read instead)", False))
     if a.batch > MAX_BATCH:
         checks.append((f"batch of {a.batch} is at most {MAX_BATCH}", False,
                        "eleven parallel agents once hit the rate limit (3 of 11 killed) and one killed mid-build left a crate "
