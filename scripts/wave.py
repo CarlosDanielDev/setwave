@@ -2703,10 +2703,15 @@ def prepared_note(body: str) -> str:
 def prepare_issue(repo: Repo, n: int) -> tuple[dict, str, list[tuple[str, str]]]:
     """The facts of a handoff written into the issue's body (`## Handoff` appended, or an existing one
     replaced in place with every other byte kept), the judgement it cannot write returned as questions,
-    and — once, when judgement is missing — a comment naming the gap. Returns the refreshed issue, what
-    happened to the body (appended | updated | current) and the questions."""
+    and — once, when judgement is missing — a comment naming the gap. A parent is refused at the door:
+    parents are never dispatched, so none ever receives a Handoff (`lint` stays as the second net).
+    Returns the refreshed issue, what happened to the body (appended | updated | current) and the questions."""
     repo.fetch()
     iss = repo.issue(n)
+    subs = repo.sub_issues(n)
+    if subs:
+        raise SystemExit(f"PREPARE-PARENT: {key(repo, n)} is a parent ({len(subs)} sub-issues); "
+                         "parents are never dispatched")
     body = iss.get("body") or ""
     new = insert_section(body, HANDOFF, handoff_block(repo, iss))
     what = ("appended" if not any(HANDOFF.match(l) for l in body.splitlines())
@@ -3081,6 +3086,7 @@ GUARANTEES = [
     ("verify refuses a PR without a `## Done when` ledger, or whose items differ from its issue's", "verify_one -> ledger_check (+ cmd_merge)", "LEDGER-MISSING[...] / LEDGER-MISMATCH[...] / ISSUE-NO-DONE-WHEN[...]", True),
     ("merge applies the PR's ledger to its issue after the merge, in one comment, and reopens it while an item is open", "cmd_merge -> apply_ledger -> tick_issue", "ledger applied from PR #N: X done, Y dropped, Z remain", True),
     ("prepare writes only facts into the issue's `## Handoff` — appended, or an existing one replaced in place with every other byte kept — and asks, never answers, the judgement (Done when, evidence, ADR stub), one question per gap, commented once", "cmd_prepare -> prepare_issue, handoff_block, prepare_questions", "wave prepare <issue>: the block, the questions, one gap comment; the same facts twice write nothing", True),
+    ("prepare refuses a parent: an issue with sub-issues never receives a Handoff (lint stays as the second net)", "prepare_issue <- cmd_prepare, cmd_dispatch", "exit 1: PREPARE-PARENT: owner/name#N is a parent (N sub-issues); parents are never dispatched", True),
     ("amend writes the owner's answered Done-when once, before the Handoff, and never over one that exists; every line of the file must be an item", "cmd_amend -> with_done_when", "exit 2: amend refused: the body already has a `## Done when`", True),
     ("dispatch prepares an issue whose body has no `## Handoff` itself, so a bare issue works end to end; --no-prepare opts out and a failed write dispatches anyway", "cmd_dispatch -> prepare_issue", "no `## Handoff` in the body — prepare wrote it", True),
     ("the agent prompt names the sections the tool wrote and the ones the issue still lacks, so the agent verifies its premises harder where the issue is thin", "render_prompt -> prepared_note", "the {{PREPARED}} block of templates/agent.md", True),
