@@ -174,6 +174,26 @@ class ClosingKeywords(unittest.TestCase):
 
 
 class EscalationPolicy(unittest.TestCase):
+    def test_the_prompt_is_self_sufficient_without_host_skills(self):
+        src = (wave.TEMPLATES / "agent.md").read_text()
+        self.assertIn("Skill ausente não bloqueia", src,
+                      "the prompt names host skills as accelerators, never as requirements")
+        self.assertNotIn("Invoque via Skill tool, nesta ordem", src,
+                         "the old unconditional invocation ordered skills a bare host does not have")
+        # each named skill's behavior is spelled out in the always-on rules
+        for fragment in ("Prosa comprimida",            # caveman
+                         "preguiçosa que funciona",      # ponytail
+                         "Test-first",                   # superpowers:test-driven-development
+                         "ADR de três frases",           # architecture-designer
+                         "Nenhum critério de aceite sem dono",  # team-agent-orchestration
+                         "re-audite o fluxo tocado",     # poka-yoke
+                         "nada aqui depende dele"):      # graphify/codegraph absence path
+            self.assertIn(fragment, src, f"the embedded rule survives without the skill: {fragment}")
+        iss = {"number": 2, "title": "t", "html_url": "https://github.com/o/r/issues/2"}
+        out = wave.render_prompt(repo(), iss, "feat/2-t", "0" * 40, 2)
+        for fragment in ("Skill ausente não bloqueia", "nada aqui depende dele"):
+            self.assertIn(fragment, out, f"`wave prompt` delivers it to every agent: {fragment}")
+
     def test_the_prompt_carries_the_pre_done_audit(self):
         src = (wave.TEMPLATES / "agent.md").read_text()
         self.assertIn("## 6. Antes de chamar de pronto", src, "the audit is its own section, before the report")
