@@ -50,6 +50,8 @@ REGISTRY = CONFIG_DIR / "repos.json"
 
 ATTRIBUTION = re.compile(r"co-authored-by:\s*claude|generated with \[?claude code|noreply@anthropic\.com", re.I)
 CLOSES = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?::\s*|\s+)(?:([\w.-]+/[\w.-]+))?#(\d+)\b", re.I)
+# the version line of the serial manifests: it only moves in a Release PR (#58)
+VERSION_LINE = re.compile(r'"version"\s*:')
 # textual dependencies `wave adopt` wires as real blocked_by: a verb, then a ref — a bare #N is this repo's
 # issue, owner/name#N another repo's. A ref with no verb in front of it is a mention, not a dependency.
 DEPENDS = re.compile(r"\b(?:depends on|blocked by|needs|after)\s+((?:[\w.-]+/[\w.-]+)?)#(\d+)", re.I)
@@ -1699,6 +1701,21 @@ def select_prs(default: Repo | None, refs: list[str], epic: str | None) -> list[
     return [(default, p) for p in default.open_prs()]
 
 
+def manifest_version_changes(repo: Repo, head: str) -> list[str]:
+    """The added `"version"` lines the PR's diff carries in `.claude-plugin/*.json`, as `path: line` —
+    the detail a non-Release refusal names. Only added lines count: a changed version is one change,
+    and the `-` side of the same hunk is that change seen from behind."""
+    out = []
+    path = None
+    diff = repo.git(["diff", f"origin/{repo.base}...origin/{head}", "--", ".claude-plugin/*.json"])
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            path = line.split(" b/")[-1]
+        elif path and line.startswith("+") and not line.startswith("+++") and VERSION_LINE.search(line):
+            out.append(f"{path}: {line[1:].strip()}")
+    return out
+
+
 def verify_one(repo: Repo, pr: dict, epic_nodes: dict | None = None) -> dict:
     head = pr["headRefName"]
     repo.git(["fetch", "-q", "origin", head])
@@ -1710,6 +1727,9 @@ def verify_one(repo: Repo, pr: dict, epic_nodes: dict | None = None) -> dict:
         diff = repo.git(["diff", "--name-only", f"origin/{repo.base}...origin/{head}", "--"] + repo.protected)
         touched = [l for l in diff.splitlines() if l.strip()]
     n_issue = next((int(num) for _, num in CLOSES.findall(body)), None)
+    # the version bump belongs to the owner's release ritual (a PR titled `Release ...`, as #49 was): any
+    # other PR that moves the manifest version line is refused, however correct the number it carries
+    version_bumps = [] if (pr.get("title") or "").startswith("Release") else manifest_version_changes(repo, head)
     checks = repo.pr_checks(pr["number"])
     bad = {k: v for k, v in checks.items() if v.lower() not in ("pass", "success", "skipping", "skipped", "neutral")}
     # sibling issues that cite a file this PR touched: the next wave inherits this change
@@ -1757,12 +1777,12 @@ def verify_one(repo: Repo, pr: dict, epic_nodes: dict | None = None) -> dict:
         wt_state = {"dirty": dirty, "unpushed": bool(unpushed.strip()) if ok else None}
     ok = (not attribution and not touched and not bad and pr.get("mergeable") != "CONFLICTING" and not contradictions
           and not (wt_state and (wt_state["dirty"] or wt_state["unpushed"])) and not closes_other and not closes_only_in_commit
-          and not ledger)
+          and not ledger and not version_bumps)
     return {"repo": repo.slug, "pr": pr["number"], "issue": n_issue, "head": head, "attribution": attribution,
             "protected_touched": touched, "checks_not_green": bad, "mergeable": pr.get("mergeable"),
             "worktree": wt_state, "notify_issues": siblings, "contradictions": contradictions,
             "closes_other": closes_other, "closes_only_in_commit": closes_only_in_commit, "ledger": ledger,
-            "ledger_issue": own, "ok": ok}
+            "version_bumps": version_bumps, "ledger_issue": own, "ok": ok}
 
 
 VERDICTS = ("pass", "fail", "concerns")
@@ -1878,6 +1898,8 @@ def cmd_verify(default: Repo | None, a):
             for c in r["contradictions"]: flags.append("CONTRADICTION[" + c + "]")
             for c in r["closes_other"]: flags.append(f"CLOSES-OTHER[{c['where']}: {c['text']}]")
             if r["closes_only_in_commit"]: flags.append(f"NO-CLOSES-IN-BODY[#{r['closes_only_in_commit']} is closed only by a commit: GitHub links it at merge, not before]")
+            if r["version_bumps"]: flags.append("VERSION-OUTSIDE-RELEASE[" + "; ".join(r["version_bumps"])
+                                                + " — the version moves only in a Release PR (a title starting with `Release`)]")
             if r["ledger"]: flags.append(f"{r['ledger']['flag']}[{r['ledger']['detail']}]")
             print(f"{r['repo']}#{r['pr']:<5} issue #{r['issue'] or '?':<5} {'OK    ' if r['ok'] else 'NOT OK'} {' '.join(flags)}")
             if r["closes_other"]:
@@ -2168,7 +2190,7 @@ def cmd_merge(default: Repo | None, a):
             print(f"{key(repo, n)}: not an open PR any more. Stopping."); sys.exit(2)
         v = verify_one(repo, pr)
         if not v["ok"] and not a.force:
-            print(f"{key(repo, n)}: verify says NOT OK — attribution={v['attribution']} protected={v['protected_touched']} ci={v['checks_not_green']} contradictions={v['contradictions']} closes_other={v['closes_other']} closes_only_in_commit={v['closes_only_in_commit']} ledger={v['ledger']} worktree={v['worktree']}. Not merging."
+            print(f"{key(repo, n)}: verify says NOT OK — attribution={v['attribution']} protected={v['protected_touched']} ci={v['checks_not_green']} contradictions={v['contradictions']} closes_other={v['closes_other']} closes_only_in_commit={v['closes_only_in_commit']} ledger={v['ledger']} version_bumps={v['version_bumps']} worktree={v['worktree']}. Not merging."
                   + (f" It conflicts with {repo.base}: run `wave resolve` on PR {key(repo, n)}, then rerun merge from here." if v["mergeable"] == "CONFLICTING" else ""))
             sys.exit(2)
 
@@ -3084,6 +3106,7 @@ GUARANTEES = [
     ("verify flags a PR closing a parent or a still-blocked issue", "verify_one", "CONTRADICTION[...]", True),
     ("verify refuses a PR whose body or any commit message closes an issue other than its own", "verify_one (+ cmd_merge)", "CLOSES-OTHER[<body or commit>: <the keyword and its ref>]", True),
     ("verify refuses a PR whose own issue is closed only by a commit message", "verify_one (+ cmd_merge)", "NO-CLOSES-IN-BODY[#N ...]", True),
+    ("verify refuses a PR that changes the version line of .claude-plugin/*.json whose title does not start with `Release` — the bump is the owner's release ritual, one PR of its own", "verify_one (+ cmd_merge)", "VERSION-OUTSIDE-RELEASE[.claude-plugin/plugin.json: \"version\": \"9.9.9\" — ...]", True),
     ("verify refuses a PR without a `## Done when` ledger, or whose items differ from its issue's", "verify_one -> ledger_check (+ cmd_merge)", "LEDGER-MISSING[...] / LEDGER-MISMATCH[...] / ISSUE-NO-DONE-WHEN[...]", True),
     ("merge applies the PR's ledger to its issue after the merge, in one comment, and reopens it while an item is open", "cmd_merge -> apply_ledger -> tick_issue", "ledger applied from PR #N: X done, Y dropped, Z remain", True),
     ("prepare writes only facts into the issue's `## Handoff` — appended, or an existing one replaced in place with every other byte kept — and asks, never answers, the judgement (Done when, evidence, ADR stub), one question per gap, commented once", "cmd_prepare -> prepare_issue, handoff_block, prepare_questions", "wave prepare <issue>: the block, the questions, one gap comment; the same facts twice write nothing", True),

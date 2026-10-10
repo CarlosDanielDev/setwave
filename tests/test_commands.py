@@ -107,6 +107,19 @@ class Verify(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertEqual(r["contradictions"], ["#1 is a parent, not a leaf: a PR must close a leaf"])
 
+    def test_a_version_bump_outside_a_release_pr_is_refused(self):
+        rc, r = self.verify(35)
+        self.assertEqual(rc, 1)
+        self.assertEqual(r["ok"], False)
+        self.assertEqual(r["version_bumps"], ['.claude-plugin/plugin.json: "version": "9.9.9"'])
+        p = run_wave("verify", "35")
+        self.assertIn("VERSION-OUTSIDE-RELEASE[.claude-plugin/plugin.json", p.stdout)
+
+    def test_a_release_pr_may_change_the_version(self):
+        self.assertIn("version_bumps", self.verify(35)[1], "the guard must exist before the release pass-through means anything")
+        rc, r = self.verify(36)
+        self.assertEqual((rc, r["ok"], r["version_bumps"]), (0, True, []), r)
+
 
 class ClosingKeywords(unittest.TestCase):
     """GitHub closes every issue a closing keyword names, in the PR body or in any commit message."""

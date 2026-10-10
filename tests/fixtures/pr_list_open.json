@@ -160,5 +160,23 @@
     "body": "Adds p53.txt.\n\nCloses #53\n\n## Done when\n\n- [x] p53.txt exists — owner: implementer\n- [ ] ~~docs updated — owner: implementer~~ — dropped: there are no docs yet\n- [ ] benchmarks — owner: implementer — not done: needs a quiet machine\n\n## Gate\n\nall green\n",
     "mergeable": "MERGEABLE",
     "url": "https://github.com/o/r/pull/34"
+  },
+  {
+    "number": 35,
+    "title": "PR 35",
+    "headRefName": "t/version",
+    "baseRefName": "main",
+    "body": "Bumps the manifest version outside a release.",
+    "mergeable": "MERGEABLE",
+    "url": "https://github.com/o/r/pull/35"
+  },
+  {
+    "number": 36,
+    "title": "Release 9.9.9: the same bump, as a release",
+    "headRefName": "t/version",
+    "baseRefName": "main",
+    "body": "The same branch, opened as a release PR.",
+    "mergeable": "MERGEABLE",
+    "url": "https://github.com/o/r/pull/36"
   }
 ]

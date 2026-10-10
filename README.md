@@ -272,7 +272,7 @@ gh api 'repos/OWNER/REPO/issues/42/sub_issues?per_page=100' > tests/fixtures/rep
 gh pr list -R OWNER/REPO --state open --json number,title,headRefName,baseRefName,body,mergeable,url > tests/fixtures/pr_list_open.json
 ```
 
-A guard is only as good as the test that fails without it: when you add one, remove it once, watch a test fail, restore it, and flip its row in `GUARANTEES` to tested. The version lives in both `.claude-plugin/*.json` (they are `serial`: one PR at a time). Releases are tags `vX.Y.Z` on `main` with notes.
+A guard is only as good as the test that fails without it: when you add one, remove it once, watch a test fail, restore it, and flip its row in `GUARANTEES` to tested. The version lives in both `.claude-plugin/*.json` (they are `serial`: one PR at a time), and it changes only in a Release PR — one titled starting with `Release`; `verify` refuses the bump anywhere else (`VERSION-OUTSIDE-RELEASE`). Releases are tags `vX.Y.Z` on `main` with notes.
 
 ## Lessons baked in
 

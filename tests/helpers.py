@@ -72,6 +72,8 @@ def sandbox() -> Path:
     git("clone", "-q", str(bare), str(CLONE), cwd=TMP)
     (CLONE / "f.txt").write_text("one\ntwo\n")
     (CLONE / ".wave.json").write_text(json.dumps({"base": "main", "serial": ["s/"], "protected": ["locked/"]}))
+    (CLONE / ".claude-plugin").mkdir()
+    (CLONE / ".claude-plugin" / "plugin.json").write_text('{\n  "name": "o",\n  "version": "0.0.1"\n}\n')
     git("add", ".")
     git("commit", "-q", "-m", "base")
     git("push", "-q", "origin", "main")
@@ -81,6 +83,8 @@ def sandbox() -> Path:
     commit_on("feat/4-x", "g.txt", "g\n")
     commit_on("feat/3-y", "h.txt", "h\n")
     commit_on("t/locked", "locked/k.txt", "k\n")
+    # the version line of the manifest: PR 35 (a feature title) must be refused, PR 36 (a Release title) passes
+    commit_on("t/version", ".claude-plugin/plugin.json", '{\n  "name": "o",\n  "version": "9.9.9"\n}\n')
     # the global config is a throwaway one, so no commit-msg hook strips this trailer: verify must see it
     commit_on("t/trailer", "t.txt", "t\n", "Add t.txt\n\nCo-Authored-By: Claude <noreply@anthropic.com>")
     # closing keywords GitHub reads in commit messages at merge: one quotes a hint that closes another issue,
