@@ -1,4 +1,5 @@
 Copyright (c) Jeffallan
 Source: https://github.com/Jeffallan (MIT, per the file's license header)
-Vendored verbatim. Its Reference-Guide section cites references/ files
-that are not part of this plugin — read them at the upstream source.
+Vendored with one deviation, disclosed here: a banner at the Reference
+Guide section (line ~43) says the references/ files it cites are not
+part of this plugin — the upstream skill assumed they ship alongside.
