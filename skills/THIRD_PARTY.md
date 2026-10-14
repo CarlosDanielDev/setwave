@@ -1,6 +1,6 @@
 # Skill provenance
 
-The plugin ships three skills (`setwave:<name>`), each vendored with its upstream copyright notice beside it (`<name>/LICENSE-NOTICE`). The other skills the prompt names are **not** vendored: their behavior is embedded in `templates/agent.md` §0, so a host that lacks them loses comfort, not correctness.
+The plugin vendors three skills (`setwave:<name>`), each vendored with its upstream copyright notice beside it (`<name>/LICENSE-NOTICE`). The other skills the prompt names are **not** vendored: their behavior is embedded in `templates/agent.md` §0, so a host that lacks them loses comfort, not correctness.
 
 | Skill | Upstream | License | Shipped as |
 | --- | --- | --- | --- |
