@@ -1,0 +1,277 @@
+<title>Setwave — auditoria /simplify</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,650&family=Public+Sans:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+  /* Design plan
+     Palette: deep-water ink (bg dark-first), sea-foam accent (setwave = ondas),
+     warm paper for light theme, semantic red/green only for diff edges.
+     Type: Fraunces display (restrained), Public Sans body, JetBrains Mono code.
+     Layout: single 760px column, section numbers encode the audit sequence. */
+  :root {
+    --bg: #f7f5f0;
+    --fg: #1c2430;
+    --muted: #5d6b7a;
+    --accent: #0e7a6f;
+    --accent-soft: #dcefe9;
+    --surface: #ffffff;
+    --line: #d8d4c8;
+    --bad: #a83a2e;
+    --bad-soft: #f6e2df;
+    --good: #2f7d46;
+    --good-soft: #e2efe4;
+    --code-bg: #20293a;
+    --code-fg: #dbe4ee;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #131a24;
+      --fg: #e3e9f0;
+      --muted: #8fa0b3;
+      --accent: #4cc8b4;
+      --accent-soft: #17332f;
+      --surface: #1b2534;
+      --line: #2c3a4d;
+      --bad: #e08a7f;
+      --bad-soft: #3a2320;
+      --good: #7cc98f;
+      --good-soft: #1e3222;
+      --code-bg: #0d131d;
+      --code-fg: #c9d5e2;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #131a24;
+    --fg: #e3e9f0;
+    --muted: #8fa0b3;
+    --accent: #4cc8b4;
+    --accent-soft: #17332f;
+    --surface: #1b2534;
+    --line: #2c3a4d;
+    --bad: #e08a7f;
+    --bad-soft: #3a2320;
+    --good: #7cc98f;
+    --good-soft: #1e3222;
+    --code-bg: #0d131d;
+    --code-fg: #c9d5e2;
+    color-scheme: dark;
+  }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: "Public Sans", system-ui, sans-serif;
+    font-size: 16px;
+    line-height: 1.65;
+    margin: 0;
+    padding: 48px 20px 80px;
+  }
+  main { max-width: 760px; margin: 0 auto; }
+  h1, h2, h3 { font-family: "Fraunces", Georgia, serif; text-wrap: balance; }
+  h1 { font-size: clamp(2rem, 6vw, 2.9rem); font-weight: 650; line-height: 1.1; margin: 0 0 6px; }
+  h2 { font-size: 1.45rem; font-weight: 650; margin: 0 0 14px; }
+  h3 { font-size: 1.05rem; font-weight: 650; margin: 22px 0 8px; }
+  p { margin: 0 0 14px; }
+  a { color: var(--accent); }
+  .eyebrow {
+    font-size: .78rem; font-weight: 700; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--accent); margin-bottom: 14px;
+  }
+  .lede { font-size: 1.12rem; color: var(--fg); max-width: 62ch; }
+  section { margin-top: 52px; }
+  .secnum {
+    font-family: "JetBrains Mono", monospace; font-size: .8rem; color: var(--muted);
+    display: block; margin-bottom: 4px;
+  }
+  .tiles {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 10px; margin: 18px 0 6px;
+  }
+  .tile {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px 14px;
+  }
+  .tile b { font-family: "JetBrains Mono", monospace; font-size: 1.35rem; display: block; }
+  .tile span { font-size: .8rem; color: var(--muted); }
+  .card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+    padding: 16px 18px; margin: 12px 0;
+  }
+  .verdict {
+    display: inline-block; font-family: "JetBrains Mono", monospace; font-size: .75rem;
+    font-weight: 600; padding: 2px 9px; border-radius: 20px; margin-right: 8px;
+  }
+  .verdict.clean { background: var(--good-soft); color: var(--good); }
+  .verdict.finds { background: var(--bad-soft); color: var(--bad); }
+  .verdict.skip { background: var(--line); color: var(--muted); }
+  .ba { border-left: 3px solid var(--line); border-radius: 6px; margin: 10px 0 16px; overflow-x: auto; }
+  .ba.before { border-color: var(--bad); }
+  .ba.after { border-color: var(--good); }
+  .ba .tag {
+    display: block; font-family: "JetBrains Mono", monospace; font-size: .7rem;
+    font-weight: 600; letter-spacing: .1em; text-transform: uppercase;
+    padding: 7px 14px 0; color: var(--muted);
+  }
+  .ba.before .tag { color: var(--bad); }
+  .ba.after .tag { color: var(--good); }
+  pre {
+    background: var(--code-bg); color: var(--code-fg);
+    font-family: "JetBrains Mono", monospace; font-size: .82rem; line-height: 1.55;
+    padding: 12px 14px; margin: 0; white-space: pre;
+  }
+  code.inline {
+    font-family: "JetBrains Mono", monospace; font-size: .85em;
+    background: var(--accent-soft); color: var(--accent);
+    padding: 1px 5px; border-radius: 4px;
+  }
+  pre .del { color: var(--bad); }
+  pre .add { color: var(--good); }
+  pre .cmt { color: var(--muted); font-style: italic; }
+  table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  .tbl-wrap { overflow-x: auto; margin: 14px 0; }
+  th { text-align: left; font-size: .75rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  th, td { padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  td:first-child { font-family: "JetBrains Mono", monospace; font-size: .82rem; white-space: nowrap; }
+  ul { margin: 0 0 14px; padding-left: 22px; }
+  li { margin-bottom: 7px; }
+  li::marker { color: var(--accent); }
+  .skipnote {
+    border: 1px dashed var(--line); border-radius: 8px;
+    padding: 12px 16px; margin: 14px 0; color: var(--muted); font-size: .92rem;
+  }
+  .skipnote b { color: var(--fg); }
+  footer {
+    margin-top: 60px; padding-top: 18px; border-top: 1px solid var(--line);
+    font-size: .85rem; color: var(--muted);
+    font-family: "JetBrains Mono", monospace;
+  }
+</style>
+
+<main>
+  <div class="eyebrow">setwave · iteração v0.7.0 → auditoria</div>
+  <h1>/simplify em quatro juízes</h1>
+  <p class="lede">Auditoria do ciclo v0.6.0→v0.7.0: como está o setup de testes, onde a saúde do código aperta, e o que os quatro agentes de cleanup (<code class="inline">reuse</code>, <code class="inline">simplification</code>, <code class="inline">efficiency</code>, <code class="inline">altitude</code>) acharam no diff — com os fixes aplicados e os skips justificados.</p>
+
+  <section>
+    <span class="secnum">01 / setup de testes</span>
+    <h2>Três camadas, todas verdes</h2>
+    <div class="tiles">
+      <div class="tile"><b>332</b><span>testes unitários, stdlib puro</span></div>
+      <div class="tile"><b>~100s</b><span>suíte inteira, 100% offline</span></div>
+      <div class="tile"><b>92/82</b><span>guarantees / pinadas por teste</span></div>
+      <div class="tile"><b>864</b><span>runs reais no log desde 30/09</span></div>
+    </div>
+    <ul>
+      <li><strong>Unit</strong> — fake <code class="inline">gh</code> no PATH responde de fixtures e <em>recusa qualquer write</em>; remoto git descartável por teste. Nada toca a rede.</li>
+      <li><strong>E2E</strong> — <code class="inline">scripts/e2e.py</code> roda o loop completo contra repo sandbox real (plan → dispatch → fake agent → verify → judge → order → merge → resolve com conflito de propósito → close-out), cada passo cronometrado. Fora do CI de propósito: precisa de conta real.</li>
+      <li><strong>Telemetria</strong> — todo run vai para <code class="inline">log.jsonl</code>; "funciona?" se responde do log, não de memória.</li>
+    </ul>
+  </section>
+
+  <section>
+    <span class="secnum">02 / saúde do código</span>
+    <h2>Um ponto de atenção, nomeado</h2>
+    <table>
+      <thead><tr><th>Métrica</th><th>Valor</th><th>Leitura</th></tr></thead>
+      <tbody>
+        <tr><td>wave.py</td><td>3546 linhas, 171 funções</td><td>+88% na sessão (era 1881). Arquivo único é decisão documentada — mas é o item a vigiar</td></tr>
+        <tr><td>teste : código</td><td>2.1 : 1</td><td>8300 linhas de teste para 3979 de script — saudável</td></tr>
+        <tr><td>ambiente</td><td>2 testes sensíveis</td><td>flake de minuto no liveness; SDK Xcode deste host (ambiental, não do repo)</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <span class="secnum">03 / os quatro juízes</span>
+    <h2>Diff v0.6.0..HEAD — 23 arquivos, +521/−5</h2>
+    <p>Conteúdo vendido (<code class="inline">skills/*/SKILL.md</code>, notices, THIRD_PARTY) saiu do escopo: é verbatim upstream. Sobrou lógica nova em três superfícies: <code class="inline">templates/agent.md</code>, <code class="inline">tests/test_commands.py</code>, uma linha do <code class="inline">wave.py</code>.</p>
+
+    <div class="card">
+      <span class="verdict clean">clean</span><strong>reuse</strong>
+      <p style="margin:8px 0 0">Nada re-implementa helper existente. Nota marginal: a fixture de render está na 3ª cópia literal — hoistar só se aparecer a 4ª.</p>
+    </div>
+    <div class="card">
+      <span class="verdict clean">clean</span><strong>efficiency</strong>
+      <p style="margin:8px 0 0">Sem I/O repetido em rota de dispatch, sem fan-out sequencial, sem closure de longo vida. 1 candidato rejeitado com justificativa (dupla leitura de 7 KB em teste = pins diferentes de propósito).</p>
+    </div>
+    <div class="card">
+      <span class="verdict finds">7 achados</span><strong>simplification</strong>
+      <p style="margin:8px 0 0">O §0 re-explicava regras que o próprio template já carrega; 6 aplicados, 1 skipado.</p>
+    </div>
+    <div class="card">
+      <span class="verdict finds">6 achados</span><strong>altitude</strong>
+      <p style="margin:8px 0 0">O maior: política do CodeGraph em dois donos se contradizendo. 3 aplicados, 2 deferidos (mecanismo novo, não cleanup) + 1 parcial.</p>
+    </div>
+  </section>
+
+  <section>
+    <span class="secnum">04 / o fix principal</span>
+    <h2>CodeGraph: dois donos, uma contradição</h2>
+    <p>O agente de altitude <em>renderizou</em> os dois caminhos e provou a contradição: com índice presente — o estado exato que o <code class="inline">prepare</code> cria — o prompt mandava duas coisas opostas no mesmo fôlego.</p>
+
+    <div class="ba before">
+      <span class="tag">antes — dois donos</span>
+      <pre><span class="cmt"># wave.py:1444 (renderiza {{CODEGRAPH_NOTE}})</span>
+"o repo tem `.codegraph/`; use `codegraph explore`
+ antes de grep/Read"
+<span class="cmt"># templates/agent.md (texto estático, mesma frase)</span>
+<span class="del">comece por Grep/Read. Com ele, comece por explore</span></pre>
+    </div>
+    <div class="ba after">
+      <span class="tag">depois — dono único, 3 variantes</span>
+      <pre><span class="cmt"># wave.py — CODEGRAPH_NOTE é o único dono da política</span>
+índice no repo  → "comece por codegraph explore"
+binário no PATH → "rode codegraph init . primeiro"
+<span class="add">nada no host    → "comece por Grep/Read — nada
+                   aqui depende dele"</span>
+<span class="cmt"># agent.md — só o invariante sobrevive no template</span>
+"Quando o grafo discordar do disco, o disco ganha."</pre>
+    </div>
+
+    <h3>§0: de parágrafos gêmeos para ponteiros</h3>
+    <div class="ba before">
+      <span class="tag">antes — regra re-explicada</span>
+      <pre>Nenhum critério de aceite sem dono — o `## Done when`
+<span class="del">da issue traz um por item; você é o implementer,
+onde diz reviewer você confira e declare no PR.</span>
+<span class="cmt">(§2 já diz isso verbatim ao lado da issue)</span></pre>
+    </div>
+    <div class="ba after">
+      <span class="tag">depois — uma linha, dono apontado</span>
+      <pre>Nenhum critério de aceite sem dono
+<span class="add">(o `## Done when` da seção 2 já traz um por item).</span></pre>
+    </div>
+    <p>Mesmo tratamento para: a cláusula de dependência (dono = §3), o mutation-check (dono = Regras inegociáveis), a re-auditoria (dona = §6). Os fragmentos que o teste de autosuficiência pina continuam intactos — foi a primeira coisa verificada depois do corte.</p>
+  </section>
+
+  <section>
+    <span class="secnum">05 / aplicado vs skipado</span>
+    <h2>Tudo com a razão escrita</h2>
+    <table>
+      <thead><tr><th>Fix</th><th>De onde</th><th>Estado</th></tr></thead>
+      <tbody>
+        <tr><td>CodeGraph → dono único (3 variantes)</td><td>simpl #1 + altitude #1</td><td>aplicado</td></tr>
+        <tr><td>§0: 6 bullets → ponteiros com fragmentos pinados preservados</td><td>simpl #2–5 + altitude #2</td><td>aplicado</td></tr>
+        <tr><td>doctor: install sem re-narrar a política do prompt</td><td>simpl #7 + altitude #6</td><td>aplicado</td></tr>
+        <tr><td>define: fronteira termo vago (pendência) vs resultado não-observável (sensor 1)</td><td>altitude #5</td><td>aplicado</td></tr>
+        <tr><td>teste: assertion de <code class="inline">{{</code> vazando no render</td><td>altitude #4 (parcial)</td><td>aplicado</td></tr>
+        <tr><td><code class="inline">DEFAULT_SKILLS</code> divergente da lista do §0</td><td>altitude #3</td><td><span class="verdict skip">deferido</span> fix real = substituição <code class="inline">{{SKILLS}}</code> no canal de GATE/PROFILE — mecanismo novo, é issue, não cleanup</td></tr>
+        <tr><td>teste estrutural skill↔regra (paridade por contagem)</td><td>altitude #4</td><td><span class="verdict skip">skip</span> pins por fragmento + judge layer já cobrem; paridade contada é engenharia de prose demais</td></tr>
+        <tr><td>fixture de render triplicada</td><td>simpl #6 vs reuse</td><td><span class="verdict skip">skip</span> os dois agentes divergiram; custo ≈ benefício</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <span class="secnum">06 / validação</span>
+    <h2>Verde antes de subir</h2>
+    <div class="tiles">
+      <div class="tile"><b>332</b><span>testes OK pós-fix</span></div>
+      <div class="tile"><b>RC=0</b><span>wave guarantees</span></div>
+      <div class="tile"><b>0</b><span>placeholders <code class="inline">{{</code> no prompt real</span></div>
+    </div>
+    <p style="margin-top:14px">O assertion novo pegou o próprio bug do fix: o fragmento <code class="inline">nada aqui depende dele</code> mudou de dono (template → <code class="inline">wave.py</code>) e virou condicional ao PATH — o teste foi re-pinado por dono antes do commit. Fix em <code class="inline">e522489</code>, em <code class="inline">origin/main</code>.</p>
+  </section>
+
+  <footer>setwave · /simplify · 4 agentes · v0.6.0..HEAD · e522489</footer>
+</main>
