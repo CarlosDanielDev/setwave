@@ -1441,8 +1441,12 @@ def render_prompt(repo: Repo, iss: dict, branch: str, sha: str, parallel: int) -
         "GATE": "\n".join(repo.gate()), "GATE_ONE_LINE": " && ".join(repo.gate()),
         "PROTECTED": ", ".join(f"`{p}`" for p in repo.protected) or "(nenhum declarado em .wave.json / registro)",
         "CODEGRAPH_QUERY": codegraph_query(iss),
-        "CODEGRAPH_NOTE": "o repo tem `.codegraph/`; use `codegraph explore \"...\"` antes de grep/Read" if repo.has_codegraph()
-                          else "sem índice CodeGraph aqui; se `codegraph` existir no PATH, rode `codegraph init .` na worktree primeiro",
+        # the single owner of the CodeGraph policy: the template keeps only the invariant tail
+        "CODEGRAPH_NOTE": "o repo tem `.codegraph/`; comece por `codegraph explore \"...\"` antes de grep/Read"
+                          if repo.has_codegraph()
+                          else ("sem índice no repo, mas `codegraph` está no PATH: rode `codegraph init .` na worktree primeiro, depois comece por `codegraph explore \"...\"`"
+                                if sh_ok(["which", "codegraph"])[0]
+                                else "sem `codegraph` no host: comece por Grep/Read — nada aqui depende dele"),
         "ACCOUNT": f"conta gh `{repo.account}` (use `GH_TOKEN=$(gh auth token --user {repo.account})` nos comandos gh)" if repo.account else "conta gh ativa",
         "PROFILE": profile_prompt(repo.profile()),
         "PREPARED": prepared_note(iss.get("body") or ""),
@@ -2828,7 +2832,7 @@ def cmd_doctor(default: Repo | None, a) -> None:
     v = re.search(r"(\d+)\.(\d+)", out)
     checks.append(("git >= 2.38 (merge-tree --write-tree)", bool(v) and (int(v.group(1)), int(v.group(2))) >= (2, 38), out.strip(), True))
     checks.append(("codegraph on PATH (optional)", sh_ok(["which", "codegraph"])[0],
-                   "agents index their worktree with it — install with `npm install -g @colbymchenry/codegraph`; the prompt works without it (Grep/Read instead)", False))
+                   "agents index their worktree with it — install with `npm install -g @colbymchenry/codegraph`", False))
     if a.batch > MAX_BATCH:
         checks.append((f"batch of {a.batch} is at most {MAX_BATCH}", False,
                        "eleven parallel agents once hit the rate limit (3 of 11 killed) and one killed mid-build left a crate "

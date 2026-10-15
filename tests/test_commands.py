@@ -187,12 +187,15 @@ class EscalationPolicy(unittest.TestCase):
                          "ADR de três frases",           # architecture-designer
                          "Nenhum critério de aceite sem dono",  # team-agent-orchestration
                          "re-audite o fluxo tocado",     # poka-yoke
-                         "nada aqui depende dele"):      # graphify/codegraph absence path
+                         "o disco ganha"):               # graphify/codegraph invariant tail
             self.assertIn(fragment, src, f"the embedded rule survives without the skill: {fragment}")
+        self.assertIn("nada aqui depende dele", wave.Path(wave.__file__).read_text(),
+                      "the CodeGraph absence policy lives in CODEGRAPH_NOTE, its single owner")
         iss = {"number": 2, "title": "t", "html_url": "https://github.com/o/r/issues/2"}
         out = wave.render_prompt(repo(), iss, "feat/2-t", "0" * 40, 2)
-        for fragment in ("Skill ausente não bloqueia", "nada aqui depende dele"):
+        for fragment in ("Skill ausente não bloqueia", "o disco ganha"):
             self.assertIn(fragment, out, f"`wave prompt` delivers it to every agent: {fragment}")
+        self.assertNotIn("{{", out, "an unresolved placeholder in the prompt is the bare-host failure mode")
 
     def test_the_prompt_carries_the_pre_done_audit(self):
         src = (wave.TEMPLATES / "agent.md").read_text()

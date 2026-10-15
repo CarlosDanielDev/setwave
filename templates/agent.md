@@ -8,11 +8,11 @@ Repo: `{{REPO}}`, base `{{BASE}}`, {{ACCOUNT}}.
 Se estas skills existirem no teu host, invoque-as via Skill tool, nesta ordem, e siga-as pelo resto da sessão: `setwave:caveman` (nível ultra), `setwave:ponytail`, `setwave:architecture-designer`, `graphify`, `team-agent-orchestration`, `superpowers:test-driven-development`, `poka-yoke` — estas quatro últimas não vêm com o plugin; use a do host se houver. Antes de abrir o PR, re-audite pelo poka-yoke — skill do host ou a regra seis abaixo. Versões sem o prefixo `setwave:` do teu próprio host valem igual — prefira a do plugin. **Skill ausente não bloqueia e não é citada de novo** — o comportamento de cada uma está embutido nas regras abaixo, que valem sempre:
 
 - Prosa comprimida; código, comentários, commits e PR em inglês normal, bem escrito, no tom dos arquivos vizinhos.
-- A solução mais preguiçosa que funciona: diff mínimo, sem abstração especulativa, sem dependência nova sem justificativa no PR; simplificação deliberada leva um comentário `ponytail:` nomeando o teto conhecido dela.
+- A solução mais preguiçosa que funciona: diff mínimo, sem abstração especulativa (o porquê está na seção 3).
 - Test-first: escreva o teste, veja-o falhar pelo motivo certo, só então implemente.
-- Bifurcação de design real → ADR de três frases no PR (o `## ADR stub` da issue nomeia a bifurcação).
-- Nenhum critério de aceite sem dono — o `## Done when` da issue traz um por item; você é o implementer, onde diz reviewer você confira e declare no PR.
-- Antes de abrir o PR, re-audite o fluxo tocado procurando o erro que a mudança deixa passar: mutation-check em toda guarda nova, recusa em vez de aviso onde for possível.
+- ADR de três frases no PR quando o `## ADR stub` da issue nomear a bifurcação (seção 2).
+- Nenhum critério de aceite sem dono (o `## Done when` da seção 2 já traz um por item).
+- Antes de abrir o PR, re-audite o fluxo tocado procurando o erro que a mudança deixa passar — a seção 6 é o checklist; mutation-check e o "nada de `| tail`" estão nas Regras inegociáveis.
 
 Regras inegociáveis:
 - NUNCA atribuição de IA em commit ou PR (nada de `Co-Authored-By: Claude`, nada de "Generated with Claude Code").
@@ -31,7 +31,7 @@ Worktree JÁ CRIADA: `{{WORKTREE}}`, branch `{{BRANCH}}`, nascida de `origin/{{B
 ```bash
 cd {{WORKTREE}} && git fetch origin && git status --porcelain && git rev-list --left-right --count origin/{{BASE}}...HEAD
 ```
-Atrás > 0 → `git rebase origin/{{BASE}}` só com árvore limpa; conflito → pare e relate. CodeGraph: {{CODEGRAPH_NOTE}} — sem `codegraph` no host nada aqui depende dele: comece por Grep/Read. Com ele, comece por `codegraph explore "{{CODEGRAPH_QUERY}}"`; quando o grafo discordar do disco, o disco ganha.
+Atrás > 0 → `git rebase origin/{{BASE}}` só com árvore limpa; conflito → pare e relate. CodeGraph: {{CODEGRAPH_NOTE}}. Quando o grafo discordar do disco, o disco ganha.
 
 ## 2. A tarefa
 
