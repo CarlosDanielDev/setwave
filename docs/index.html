@@ -3,8 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>setwave — drive a GitHub epic to merged PRs</title>
-<meta name="description" content="One prompt. One worktree per issue, one agent per worktree, verification before anything is relayed — and a merge only when you say so.">
+<title>setwave — one prompt, a whole epic merged</title>
+<meta name="description" content="setwave drives a GitHub epic to merged pull requests, wave by wave: one worktree per issue, one agent per worktree, a judge that fails false claims — and a merge only when you say so.">
+<meta name="theme-color" content="#0a1220">
+<meta property="og:title" content="setwave — one prompt, a whole epic merged">
+<meta property="og:description" content="One git worktree per issue, one Claude Code agent per worktree, verification before anything is relayed — and a merge only when you say so.">
+<meta property="og:type" content="website">
 <style>
   :root {
     --abyss: #0a1220;
@@ -13,7 +17,6 @@
     --foam: #eaf4f2;
     --mist: #93a8bd;
     --crest: #45d6b8;
-    --crest-deep: #1d8f7c;
     --sand: #e8c88f;
     --danger: #ff8a75;
     --line: #22344e;
@@ -23,84 +26,48 @@
   * { box-sizing: border-box; }
   html { scroll-behavior: smooth; }
   @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } * { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
-  body {
-    margin: 0; background: var(--abyss); color: var(--foam);
-    font-family: var(--sans); font-size: 16.5px; line-height: 1.65;
-    -webkit-font-smoothing: antialiased;
-  }
+  body { margin: 0; background: var(--abyss); color: var(--foam); font-family: var(--sans); font-size: 16.5px; line-height: 1.65; -webkit-font-smoothing: antialiased; }
   .wrap { max-width: 1060px; margin: 0 auto; padding: 0 24px; }
-  section { padding: 88px 0; }
-  h1, h2, h3 { font-family: var(--sans); font-weight: 700; letter-spacing: -0.02em; text-wrap: balance; }
-  h2 { font-size: clamp(1.7rem, 4vw, 2.4rem); margin: 0 0 14px; }
-  .kicker {
-    font-family: var(--mono); font-size: .78rem; letter-spacing: .22em;
-    text-transform: uppercase; color: var(--crest); margin: 0 0 16px;
-  }
-  .sub { color: var(--mist); font-size: 1.12rem; max-width: 60ch; margin: 0 0 30px; }
-  code { font-family: var(--mono); font-size: .9em; }
+  .narrow { max-width: 820px; }
+  section { padding: 84px 0; }
+  h1, h2, h3 { font-weight: 700; letter-spacing: -0.02em; text-wrap: balance; }
+  h2 { font-size: clamp(1.7rem, 4vw, 2.35rem); margin: 0 0 14px; }
+  h3 { font-size: 1.02rem; margin: 0 0 8px; }
+  .kicker { font-family: var(--mono); font-size: .78rem; letter-spacing: .22em; text-transform: uppercase; color: var(--crest); margin: 0 0 16px; }
+  .sub { color: var(--mist); font-size: 1.12rem; max-width: 62ch; margin: 0 0 30px; }
+  code { font-family: var(--mono); font-size: .9em; color: var(--crest); }
 
-  /* ---- nav ---- */
-  nav {
-    position: sticky; top: 0; z-index: 20;
-    background: color-mix(in srgb, var(--abyss) 82%, transparent);
-    backdrop-filter: blur(10px);
-    border-bottom: 1px solid var(--line);
-  }
+  nav { position: sticky; top: 0; z-index: 20; background: color-mix(in srgb, var(--abyss) 82%, transparent); backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
   nav .wrap { display: flex; align-items: center; gap: 22px; height: 58px; }
   nav .brand { font-family: var(--mono); font-weight: 700; color: var(--foam); text-decoration: none; font-size: 1rem; }
   nav .brand::before { content: "〰 "; color: var(--crest); }
   nav a.link { color: var(--mist); text-decoration: none; font-size: .92rem; }
   nav a.link:hover { color: var(--foam); }
   nav .cta { margin-left: auto; }
-
-  /* ---- buttons ---- */
-  .btn {
-    display: inline-block; font-family: var(--mono); font-size: .92rem; font-weight: 600;
-    padding: 11px 20px; border-radius: 8px; text-decoration: none; cursor: pointer;
-    border: 1px solid transparent; transition: transform .12s ease, background .12s ease;
-  }
+  .btn { display: inline-block; font-family: var(--mono); font-size: .92rem; font-weight: 600; padding: 11px 20px; border-radius: 8px; text-decoration: none; cursor: pointer; border: 1px solid transparent; transition: transform .12s ease, background .12s ease; }
   .btn:hover { transform: translateY(-1px); }
   .btn.primary { background: var(--crest); color: #062420; }
   .btn.primary:hover { background: #5fe6cb; }
   .btn.ghost { border-color: var(--line); color: var(--foam); }
   .btn.ghost:hover { border-color: var(--crest); }
 
-  /* ---- hero ---- */
-  .hero { padding: 96px 0 70px; position: relative; overflow: hidden; }
-  .hero::after {
-    content: ""; position: absolute; inset: auto -10% -60px -10%; height: 220px;
-    background:
-      radial-gradient(60% 100% at 20% 100%, rgba(69,214,184,.14), transparent 70%),
-      radial-gradient(50% 100% at 80% 100%, rgba(232,200,143,.08), transparent 70%);
-    pointer-events: none;
-  }
-  .hero h1 { font-size: clamp(2.4rem, 7vw, 4.1rem); line-height: 1.04; margin: 0 0 20px; }
+  .hero { padding: 92px 0 64px; position: relative; overflow: hidden; }
+  .hero::after { content: ""; position: absolute; inset: auto -10% -60px -10%; height: 220px;
+    background: radial-gradient(60% 100% at 20% 100%, rgba(69,214,184,.14), transparent 70%),
+                radial-gradient(50% 100% at 80% 100%, rgba(232,200,143,.08), transparent 70%); pointer-events: none; }
+  .hero h1 { font-size: clamp(2.4rem, 7vw, 4rem); line-height: 1.05; margin: 0 0 20px; }
   .hero h1 em { font-style: normal; color: var(--crest); }
-  .hero .sub { font-size: 1.22rem; margin-bottom: 34px; }
-  .badge-row { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 40px; }
-  .badge {
-    font-family: var(--mono); font-size: .78rem; padding: 4px 12px; border-radius: 20px;
-    border: 1px solid var(--line); color: var(--mist); text-decoration: none;
-  }
-  .badge:hover { border-color: var(--crest); color: var(--foam); }
+  .hero .sub { font-size: 1.2rem; margin-bottom: 32px; }
+  .badge-row { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 38px; }
+  .badge { font-family: var(--mono); font-size: .78rem; padding: 4px 12px; border-radius: 20px; border: 1px solid var(--line); color: var(--mist); text-decoration: none; }
   .badge b { color: var(--crest); font-weight: 600; }
 
-  /* ---- terminal ---- */
-  .term {
-    background: var(--deep); border: 1px solid var(--line); border-radius: 12px;
-    box-shadow: 0 24px 60px rgba(0,0,0,.45); overflow: hidden; margin-top: 8px;
-  }
-  .term-bar {
-    display: flex; align-items: center; gap: 7px; padding: 11px 16px;
-    border-bottom: 1px solid var(--line); background: var(--swell);
-  }
+  .term { background: var(--deep); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 24px 60px rgba(0,0,0,.45); overflow: hidden; margin-top: 8px; }
+  .term-bar { display: flex; align-items: center; gap: 7px; padding: 11px 16px; border-bottom: 1px solid var(--line); background: var(--swell); }
   .dot { width: 11px; height: 11px; border-radius: 50%; background: var(--line); }
   .dot.r { background: #e0665f; } .dot.y { background: #d8b054; } .dot.g { background: #58b368; }
   .term-title { font-family: var(--mono); font-size: .78rem; color: var(--mist); margin-left: 8px; }
-  .term-body {
-    font-family: var(--mono); font-size: .88rem; line-height: 1.8;
-    padding: 20px 22px; min-height: 540px;
-  }
+  .term-body { font-family: var(--mono); font-size: .88rem; line-height: 1.8; padding: 20px 22px; min-height: 540px; }
   .tline { display: grid; grid-template-columns: 1.3em 1fr; column-gap: 10px; margin: 1px 0; }
   .tline > .pr { color: var(--crest); user-select: none; }
   .tline.dim > .tx { color: var(--mist); }
@@ -112,86 +79,83 @@
   .tline .st.open { color: var(--sand); }
   .tline .tag { color: var(--mist); }
   .tline .br { color: var(--foam); }
-  .tline .bar {
-    display: inline-block; height: .7em; vertical-align: middle; border-radius: 3px;
-    background: var(--crest); margin-right: 6px; transition: width .5s ease;
-  }
+  .tline .bar { display: inline-block; height: .7em; vertical-align: middle; border-radius: 3px; background: var(--crest); margin-right: 6px; transition: width .5s ease; }
   .spin { display: inline-block; width: 1.2em; color: var(--crest); }
-  .term-body .cursor { display: inline-block; width: .55em; height: 1.1em;
-    background: var(--crest); vertical-align: text-bottom; animation: blink 1s steps(1) infinite; }
+  .term-body .cursor { display: inline-block; width: .55em; height: 1.1em; background: var(--crest); vertical-align: text-bottom; animation: blink 1s steps(1) infinite; }
   @keyframes blink { 50% { opacity: 0; } }
 
-  /* ---- one prompt ---- */
-  .oneliner {
-    font-family: var(--mono); font-size: clamp(1.05rem, 3.4vw, 1.5rem);
-    background: var(--deep); border: 1px solid var(--line); border-radius: 12px;
-    padding: 26px 30px; text-align: center; color: var(--foam); margin: 8px 0 18px;
-  }
+  .oneliner { font-family: var(--mono); font-size: clamp(1.05rem, 3.4vw, 1.5rem); background: var(--deep); border: 1px solid var(--line); border-radius: 12px; padding: 26px 30px; text-align: center; margin: 8px 0 18px; }
   .oneliner b { color: var(--crest); }
   .center { text-align: center; }
 
-  /* ---- loop steps ---- */
+  .wrong { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; margin-top: 28px; }
+  .wrong .w { background: var(--deep); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; }
+  .wrong .w b { display: block; margin-bottom: 6px; color: var(--danger); }
+  .wrong .w p { margin: 0; color: var(--mist); font-size: .92rem; }
+  .turn { margin: 34px 0 0; font-size: 1.15rem; color: var(--foam); }
+  .turn b { color: var(--crest); }
+
   .steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-top: 34px; }
-  .step {
-    background: var(--deep); border: 1px solid var(--line); border-radius: 10px; padding: 18px;
-  }
+  .step { background: var(--deep); border: 1px solid var(--line); border-radius: 10px; padding: 18px; }
   .step .n { font-family: var(--mono); color: var(--crest); font-size: .8rem; }
   .step h3 { font-size: 1.02rem; margin: 6px 0 6px; }
   .step p { margin: 0; color: var(--mist); font-size: .9rem; }
-  .step .who { display: inline-block; margin-top: 10px; font-family: var(--mono); font-size: .7rem;
-    padding: 2px 9px; border-radius: 20px; border: 1px solid var(--line); color: var(--mist); }
+  .step .who { display: inline-block; margin-top: 10px; font-family: var(--mono); font-size: .7rem; padding: 2px 9px; border-radius: 20px; border: 1px solid var(--line); color: var(--mist); }
   .step .who.human { color: var(--sand); border-color: color-mix(in srgb, var(--sand) 40%, transparent); }
 
-  /* ---- refusals ---- */
+  .states { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin-top: 30px; }
+  .state { background: var(--deep); border: 1px solid var(--line); border-radius: 10px; padding: 20px 22px; }
+  .state h3 { font-family: var(--mono); font-size: .82rem; letter-spacing: .14em; text-transform: uppercase; }
+  .state.inside h3 { color: var(--crest); }
+  .state.out h3 { color: var(--danger); }
+  .state.ask h3 { color: var(--sand); }
+  .state ul { margin: 0; padding: 0; list-style: none; }
+  .state li { padding: 7px 0 7px 24px; position: relative; color: var(--mist); font-size: .93rem; border-bottom: 1px dashed var(--line); }
+  .state li:last-child { border-bottom: none; }
+  .state li::before { position: absolute; left: 0; font-family: var(--mono); }
+  .state.inside li::before { content: "✓"; color: var(--crest); }
+  .state.out li::before { content: "✕"; color: var(--danger); }
+  .state.ask li::before { content: "?"; color: var(--sand); }
+  .state li b { color: var(--foam); font-weight: 600; }
+
   .refusals { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; margin-top: 30px; }
   .refusal { background: var(--deep); border: 1px solid var(--line); border-left: 3px solid var(--danger); border-radius: 10px; padding: 16px 18px; }
   .refusal code { color: var(--danger); font-size: .85rem; font-weight: 600; display: block; margin-bottom: 6px; }
   .refusal p { margin: 0; color: var(--mist); font-size: .9rem; }
 
-  /* ---- proof ---- */
-  .proof { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-top: 30px; }
+  .proof { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; margin-top: 30px; }
   .stat { background: var(--deep); border: 1px solid var(--line); border-radius: 10px; padding: 20px; text-align: center; }
   .stat b { display: block; font-family: var(--mono); font-size: 2rem; color: var(--crest); }
   .stat span { color: var(--mist); font-size: .88rem; }
-  .anecdote {
-    margin-top: 30px; background: var(--swell); border: 1px solid var(--line);
-    border-radius: 10px; padding: 20px 24px;
-  }
+  .anecdote { margin-top: 30px; background: var(--swell); border: 1px solid var(--line); border-radius: 10px; padding: 20px 24px; }
   .anecdote p { margin: 0 0 10px; }
   .anecdote .rounds { font-family: var(--mono); font-size: .84rem; color: var(--mist); }
 
-  /* ---- anywhere grid ---- */
-  .anywhere { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin-top: 30px; }
-  .card { background: var(--deep); border: 1px solid var(--line); border-radius: 10px; padding: 20px; }
-  .card h3 { font-size: 1rem; margin: 0 0 8px; }
-  .card h3::before { content: "〰 "; color: var(--crest); }
-  .card p { margin: 0; color: var(--mist); font-size: .92rem; }
+  .notgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-top: 28px; }
+  .notcard { background: var(--deep); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; }
+  .notcard b { display: block; margin-bottom: 6px; }
+  .notcard p { margin: 0; color: var(--mist); font-size: .92rem; }
 
-  /* ---- install ---- */
+  details { background: var(--deep); border: 1px solid var(--line); border-radius: 10px; padding: 0 20px; margin-top: 12px; }
+  details[open] { padding-bottom: 8px; }
+  summary { cursor: pointer; font-weight: 600; padding: 15px 0; list-style: none; position: relative; padding-right: 30px; }
+  summary::-webkit-details-marker { display: none; }
+  summary::after { content: "+"; position: absolute; right: 4px; top: 50%; transform: translateY(-50%); font-family: var(--mono); color: var(--crest); font-size: 1.2rem; }
+  details[open] summary::after { content: "–"; }
+  details p { margin: 0 0 16px; color: var(--mist); font-size: .95rem; }
+
   .install-box { background: var(--deep); border: 1px solid var(--line); border-radius: 12px; max-width: 640px; margin: 26px auto 0; }
-  .install-line {
-    display: flex; align-items: center; gap: 12px; padding: 16px 20px;
-    font-family: var(--mono); font-size: .95rem;
-  }
+  .install-line { display: flex; align-items: center; gap: 12px; padding: 16px 20px; font-family: var(--mono); font-size: .95rem; }
   .install-line + .install-line { border-top: 1px solid var(--line); }
   .install-line .dollar { color: var(--crest); }
-  .install-line code { flex: 1; overflow-x: auto; white-space: nowrap; }
-  .copy {
-    font-family: var(--mono); font-size: .72rem; font-weight: 600; letter-spacing: .08em;
-    background: none; border: 1px solid var(--line); color: var(--mist);
-    border-radius: 6px; padding: 5px 10px; cursor: pointer;
-  }
+  .install-line code { flex: 1; overflow-x: auto; white-space: nowrap; color: var(--foam); }
+  .copy { font-family: var(--mono); font-size: .72rem; font-weight: 600; letter-spacing: .08em; background: none; border: 1px solid var(--line); color: var(--mist); border-radius: 6px; padding: 5px 10px; cursor: pointer; }
   .copy:hover { border-color: var(--crest); color: var(--crest); }
   .copy.done { color: var(--crest); border-color: var(--crest); }
 
-  /* ---- principles ---- */
-  .principles { max-width: 760px; margin: 30px auto 0; }
-  .principles p { font-size: 1.06rem; }
-  .principles p b { color: var(--foam); }
-  .principles p { color: var(--mist); }
-
-  /* ---- footer ---- */
-  footer { border-top: 1px solid var(--line); padding: 40px 0 60px; }
+  .final-cta { text-align: center; padding: 40px 0 0; }
+  .final-cta h2 { font-size: clamp(1.8rem, 5vw, 2.6rem); }
+  footer { border-top: 1px solid var(--line); padding: 40px 0 60px; margin-top: 70px; }
   footer .wrap { display: flex; flex-wrap: wrap; gap: 20px; align-items: center; justify-content: space-between; }
   footer .fine { color: var(--mist); font-size: .88rem; }
   footer a { color: var(--mist); }
@@ -199,9 +163,9 @@
   .wave-sep { text-align: center; color: var(--line); font-family: var(--mono); letter-spacing: .6em; padding: 10px 0; user-select: none; }
 
   @media (max-width: 640px) {
-    section { padding: 64px 0; }
+    section { padding: 62px 0; }
     nav .link { display: none; }
-    .term-body { font-size: .78rem; min-height: 300px; }
+    .term-body { font-size: .78rem; min-height: 540px; }
   }
 </style>
 </head>
@@ -210,10 +174,11 @@
 <nav>
   <div class="wrap">
     <a class="brand" href="#top">setwave</a>
+    <a class="link" href="#problem">Why</a>
     <a class="link" href="#loop">The loop</a>
+    <a class="link" href="#states">Inside a wave</a>
     <a class="link" href="#poka">Poka-yoke</a>
-    <a class="link" href="#proof">Proof</a>
-    <a class="link" href="#install">Install</a>
+    <a class="link" href="#faq">FAQ</a>
     <a class="btn ghost cta" href="https://github.com/CarlosDanielDev/setwave">GitHub ↗</a>
   </div>
 </nav>
@@ -227,10 +192,10 @@
       <span class="badge"><b>92</b> guarantees</span>
       <span class="badge"><b>MIT</b> license</span>
     </div>
-    <h1>Drive a GitHub epic<br>to merged PRs, <em>wave by wave</em>.</h1>
-    <p class="sub">One prompt. One git worktree per issue, one Claude Code agent per worktree, verification before anything is relayed — and a merge only when you say so. The state lives in GitHub and git, never in a chat.</p>
+    <h1>One prompt.<br>A whole epic <em>merged</em>.</h1>
+    <p class="sub">setwave drives a GitHub epic to merged pull requests, wave by wave: one git worktree per issue, one Claude Code agent per worktree, a judge that fails false claims — and a merge only when you say so.</p>
     <a class="btn primary" href="#install">Install the plugin</a>
-    <a class="btn ghost" href="#loop">See the loop</a>
+    <a class="btn ghost" href="#problem">Why it exists</a>
 
     <div class="term" aria-label="animated run of setwave">
       <div class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="term-title">claude — /setwave:wave 34</span></div>
@@ -239,11 +204,28 @@
   </div>
 </header>
 
+<section id="problem">
+  <div class="wrap narrow">
+    <p class="kicker">the problem</p>
+    <h2>How a good epic goes wrong.</h2>
+    <p class="sub">You already know this story. You have lived it.</p>
+    <div class="wrong">
+      <div class="w"><b>Eleven agents, one shared folder</b><p>Everyone builds in the same checkout. Two agents touch the same file, one overwrites the other, and the third runs a build against half-applied changes.</p></div>
+      <div class="w"><b>“It's done”</b><p>An agent says the work is green. You merge. CI goes red on something the agent never ran — and now five people know the merge was premature.</p></div>
+      <div class="w"><b>Where were we?</b><p>The epic's state lives in a chat that scrolled away. Tomorrow, a new session starts from zero: which issues are blocked, which have PRs, which were abandoned mid-build.</p></div>
+      <div class="w"><b>The merge stampede</b><p>Four green PRs, merged in the wrong order. The conflict lands after the fact, the fix goes in on top of it, and the diff that nobody reviewed becomes the diff that ships.</p></div>
+    </div>
+    <p class="turn">setwave exists so that story ends: <b>one issue, one worktree, one agent — and a script that refuses every step you have not approved.</b></p>
+  </div>
+</section>
+
+<div class="wave-sep">〰〰〰</div>
+
 <section id="loop">
   <div class="wrap">
     <p class="kicker">the loop</p>
-    <h2>Every state is one of a fixed, exclusive set.</h2>
-    <p class="sub">Every conclusion the tool prints is the last line of a syllogism whose premises it just checked. Eight steps, one of them yours.</p>
+    <h2>Eight steps. Seven belong to the script.</h2>
+    <p class="sub">Every conclusion it prints is the last line of a syllogism whose premises it just checked. The one human step is the one that cannot be mechanized: the OK.</p>
     <div class="steps">
       <div class="step"><span class="n">01</span><h3>doctor</h3><p>Every ✗ is a mistake dispatch would otherwise let happen: no gate, dirty checkout, dead agents, half-extracted caches.</p><span class="who">script</span></div>
       <div class="step"><span class="n">02</span><h3>next</h3><p>The leaves that are open, unblocked, without a PR, without a worktree — each in exactly one state.</p><span class="who">script</span></div>
@@ -253,6 +235,47 @@
       <div class="step"><span class="n">06</span><h3>order</h3><p>Pairwise merge-tree, a chain simulation that names the PR that will conflict, serial paths queued.</p><span class="who">script</span></div>
       <div class="step"><span class="n">07</span><h3>your OK</h3><p>The plan pins the base SHA and every PR head. The OK is for that delta — if anything moves, it re-plans and asks again.</p><span class="who human">human</span></div>
       <div class="step"><span class="n">08</span><h3>merge</h3><p>One at a time, CI green before each, re-running verify and the judge check itself. Stops at the first conflict, never force-pushes.</p><span class="who">script</span></div>
+    </div>
+  </div>
+</section>
+
+<div class="wave-sep">〰〰〰</div>
+
+<section id="states">
+  <div class="wrap">
+    <p class="kicker">inside a wave</p>
+    <h2>The walls, in three columns.</h2>
+    <p class="sub">What an agent in a setwave wave can reach, what it can never touch, and what happens only on your word.</p>
+    <div class="states">
+      <div class="state inside">
+        <h3>Inside the wave</h3>
+        <ul>
+          <li><b>Its own worktree</b>, at its issue's branch, born from origin/base</li>
+          <li><b>The issue body and its comments</b> — premises included, with permission to correct them</li>
+          <li><b>The repo's real gate</b>, read from CI or the manifest — never invented</li>
+          <li><b>A judge over its diff</b>, before any merge</li>
+          <li><b>Sibling issues warned</b> when its PR changes symbols they cite</li>
+        </ul>
+      </div>
+      <div class="state out">
+        <h3>Out of reach</h3>
+        <ul>
+          <li><b>Your main checkout</b> — never worked in, refused when dirty</li>
+          <li><b>Force push, auto-merge, branch deletion</b> — not a flag, an absence</li>
+          <li><b>Other agents' worktrees</b> and build directories</li>
+          <li><b>AI attribution</b> in any commit or PR body</li>
+          <li><b>The chat as storage</b> — state lives in GitHub and git</li>
+        </ul>
+      </div>
+      <div class="state ask">
+        <h3>Only on your OK</h3>
+        <ul>
+          <li><b>The merge</b> — one PR at a time, for the pinned delta</li>
+          <li><b>The plan</b> — base SHA and every head; anything moved, it asks again</li>
+          <li><b>Issue creation</b> — a refinement session authors locally; <code>wave plan</code> is the only door</li>
+          <li><b>Reopening a closed epic</b> — refused; the flag is yours to pass</li>
+        </ul>
+      </div>
     </div>
   </div>
 </section>
@@ -301,16 +324,50 @@
 
 <section>
   <div class="wrap">
+    <p class="kicker">what it is not</p>
+    <h2>Honest boundaries.</h2>
+    <div class="notgrid">
+      <div class="notcard"><b>Not autonomous</b><p>No agent merges anything. The loop stops at your OK — every time, on every wave, in every repo.</p></div>
+      <div class="notcard"><b>Not a scheduler</b><p>Nothing runs in the background while you sleep. A wave runs when you run it, and the run log says what happened.</p></div>
+      <div class="notcard"><b>Not a CI replacement</b><p>The gate comes from your CI or your manifest. setwave reads the truth; it does not become it.</p></div>
+      <div class="notcard"><b>Not GitHub-only forever</b><p>The state model is sub-issues + blocked_by. That is the whole model — other trackers are a different plugin.</p></div>
+    </div>
+  </div>
+</section>
+
+<div class="wave-sep">〰〰〰</div>
+
+<section>
+  <div class="wrap">
     <p class="kicker">any repo · any account · any stack</p>
     <h2>The prompt is the same line tomorrow.</h2>
     <div class="oneliner"><b>/setwave:wave</b> &lt;epic&gt;</div>
     <p class="sub center" style="margin-inline:auto">The data comes from GitHub and git at run time — so the same words work in the next session, the next wave, the next repo, the next account.</p>
-    <div class="anywhere">
-      <div class="card"><h3>Cross-repo epics</h3><p>Sub-issues and blockers are followed across repositories. Refs are <code>owner/name#N</code>; every call runs with that repo's own account token.</p></div>
-      <div class="card"><h3>Zero to first wave</h3><p><code>wave init</code> detects your gate, profile and worktree convention, proposes the config, asks one question, never asks twice.</p></div>
-      <div class="card"><h3>Issues authored to Ready</h3><p><code>/setwave:define</code> interviews you in rounds — every question with a recommended answer — and only <code>wave plan</code>, behind your OK, ever writes to GitHub.</p></div>
-      <div class="card"><h3>The stack ships with it</h3><p>Eight skills install as <code>setwave:*</code>. The agent prompt is self-sufficient on a bare host: skills are accelerators, never requirements.</p></div>
-    </div>
+  </div>
+</section>
+
+<div class="wave-sep">〰〰〰</div>
+
+<section id="faq">
+  <div class="wrap narrow">
+    <p class="kicker">questions people ask</p>
+    <h2>Before you ask.</h2>
+    <details>
+      <summary>What happens when two PRs conflict?</summary>
+      <p>Predicted before the merge: <code>wave order</code> runs pairwise <code>git merge-tree</code> and a chain simulation that names the PR that will turn red. When it still lands, <code>wave resolve</code> merges the base into the PR's branch in its own worktree, runs the gate, and pushes normally — a conflict stops with file and line ranges for you, and <code>--continue</code> refuses leftover markers.</p>
+    </details>
+    <details>
+      <summary>Does it only work on Rust repos / my stack?</summary>
+      <p>Any stack with a gate: the commands are read from your CI workflow or from the manifest (Cargo, package.json, pyproject, go.mod, Makefile). Stdlib Python is the only runtime dependency on your machine besides <code>gh</code> and <code>git</code>.</p>
+    </details>
+    <details>
+      <summary>Can an agent go rogue and merge something?</summary>
+      <p>The merge path is <code>wave merge</code>, and it re-runs verify and the judge check itself before each PR. Agents have no merge command in their prompt, fail-open hooks deny destructive git, and the guard hooks are installable with one command.</p>
+    </details>
+    <details>
+      <summary>What does it cost in tokens?</summary>
+      <p>Batches of four, not eleven — the same result for a quarter of the tokens, no rate-limit deaths. A dead agent is resumed with its context, never redispatched from zero. Every run is logged, so <code>wave stats</code> answers from data.</p>
+    </details>
   </div>
 </section>
 
@@ -325,18 +382,9 @@
       <div class="install-line"><span class="dollar">$</span><code id="c2">/plugin install setwave@setwave</code><button class="copy" data-target="c2">COPY</button></div>
     </div>
     <p class="sub center" style="margin:22px auto 0; text-align:center">Needs <code>gh</code> (logged in), <code>git</code> ≥ 2.38, Python 3. Stdlib only — nothing else to install.</p>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <p class="kicker">principles</p>
-    <h2>What it will never do</h2>
-    <div class="principles">
-      <p><b>Never a force push.</b> A conflict is resolved by merging the base into the PR's branch and pushing normally — or it stops and shows you the line ranges.</p>
-      <p><b>Never an auto-merge.</b> There is no <code>--auto</code>. A human reads the plan and says yes to that exact delta.</p>
-      <p><b>Never state in a chat.</b> Sub-issues, dependencies, PRs, worktrees, ledgers — the state lives where the next session can read it.</p>
-      <p><b>Never delete.</b> Quarantine moves aside; sweeps revert lies and comment; branches stay after cleanup.</p>
+    <div class="final-cta">
+      <h2>Send your next epic into the water.</h2>
+      <a class="btn primary" href="https://github.com/CarlosDanielDev/setwave">star · read · install</a>
     </div>
   </div>
 </section>
@@ -366,7 +414,6 @@
     (last || el).insertAdjacentHTML("beforeend", '<span class="cursor"></span>');
   }
 
-  /* the final state, one op per beat */
   var ops = [
     { op: "type", kind: "you", pr: "❯", text: "/setwave:wave 34" },
     { op: "line", kind: "ok",  pr: "✓", html: "doctor — gate real · checkout clean · 4 agents alive · disk ok" },
@@ -398,7 +445,7 @@
     ops.forEach(function (o) {
       if (o.op === "type") line(el, "you", "❯", "<span class='br'>" + o.text + "</span>");
       else if (o.op === "agent") line(el, "dim", "·", "<span class='st done'>done</span> agent <span class='br'>" + o.br + "</span> → <span class='br'>" + o.branch + "</span> · PR opened · verify ✓");
-      else if (o.op === "update") { /* agents already render done */ }
+      else if (o.op === "update") { }
       else if (o.op === "merge") line(el, "ok", "✓", "merged <span class='bar' style='width:9em'></span> 4/4 · CI green after each · no force push");
       else if (o.op === "cursor") finishCursor();
       else line(el, o.kind, o.pr, o.html);
