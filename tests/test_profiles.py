@@ -6,9 +6,12 @@ override in `.wave.json`; o/h has hooks only; o/c has a CLAUDE.md and nothing un
 Detection is by name and location; `.wave.json` `phases` overrides any phase.
 """
 import json
+import os
+import shutil
 import unittest
+from pathlib import Path
 
-from helpers import TMP, git, run_wave, sandbox, wave
+from helpers import TESTS, TMP, git, run_wave, sandbox, wave
 
 P = TMP / "profile-full"  # full .claude/ orchestration
 H = TMP / "profile-hooks"  # hooks only
@@ -156,17 +159,19 @@ class FullRepo(unittest.TestCase):
                       p.stdout)
 
     def test_sync_provider_runs_before_the_worktrees(self):
-        synced = P / ".synced"
-        synced.unlink(missing_ok=True)
+        # tests/bin/make is first on PATH: the host's make (and its Xcode) is never asked
+        self.assertEqual(shutil.which("make"), str(TESTS / "bin" / "make"), "the stub make, not the host's")
+        log = Path(os.environ["FAKE_MAKE_LOG"])
+        log.unlink(missing_ok=True)
         wave.sync_provider(repo("full"), dry_run=False)
-        self.assertTrue(synced.exists(), "make sync ran in the repo root")
-        synced.unlink()
+        self.assertEqual(json.loads(log.read_text()), {"args": ["sync"], "cwd": str(P)},
+                         "make sync ran in the repo root")
 
     def test_sync_provider_dry_run_runs_nothing(self):
-        synced = P / ".synced"
-        synced.unlink(missing_ok=True)
+        log = Path(os.environ["FAKE_MAKE_LOG"])
+        log.unlink(missing_ok=True)
         wave.sync_provider(repo("full"), dry_run=True)
-        self.assertFalse(synced.exists())
+        self.assertFalse(log.exists())
 
     def test_a_failing_declared_sync_refuses(self):
         with self.assertRaises(SystemExit):

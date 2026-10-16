@@ -33,6 +33,7 @@ os.environ.update({
     "GIT_CONFIG_NOSYSTEM": "1",
     "FAKE_GH_LOG": str(TMP / "gh.log"),
     "FAKE_GH_ENV_LOG": str(TMP / "gh-env.log"),
+    "FAKE_MAKE_LOG": str(TMP / "make.log"),
 })
 os.environ.pop("GH_TOKEN", None)
 # a fake gh that lost its executable bit would let the real one answer, against real GitHub: refuse to run

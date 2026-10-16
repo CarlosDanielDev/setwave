@@ -1360,11 +1360,12 @@ def next_resume_counts(repo: Repo, wt: Path, stamp: dict, respawn: bool) -> tupl
             stamp.get("respawns", 0) + (1 if respawn else 0))
 
 
-def liveness(repo: Repo, n: int, wt: Path | None = None) -> dict:
-    """What an issue's worktree says about its agent. Nothing but files and git is read: no process is looked at."""
+def liveness(repo: Repo, n: int, wt: Path | None = None, now: float | None = None) -> dict:
+    """What an issue's worktree says about its agent. Nothing but files and git is read: no process is looked at.
+    `now` is the epoch the ages are measured against, the wall clock unless a test pins it."""
     wt = wt or repo.worktree(n)
     stamp = stamp_of(wt)
-    now = time.time()
+    now = time.time() if now is None else now
     dispatched = _epoch(stamp.get("dispatched_at"))
     idle = (now - last_activity(repo, wt, dispatched)) / 60
     pr = pr_for_issue(repo, n)
