@@ -27,7 +27,8 @@
   * { box-sizing: border-box; }
   html { scroll-behavior: smooth; }
   @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } * { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
-  body { margin: 0; background: var(--abyss); color: var(--foam); font-family: var(--sans); font-size: 16.5px; line-height: 1.65; -webkit-font-smoothing: antialiased; }
+  html, body { overflow-x: clip; }
+  body { margin: 0; background: var(--abyss); color: var(--foam); font-family: var(--sans); font-size: 16.5px; line-height: 1.65; -webkit-font-smoothing: antialiased; scrollbar-gutter: stable; }
   .wrap { max-width: 1060px; margin: 0 auto; padding: 0 24px; }
   .narrow { max-width: 820px; }
   section { padding: 84px 0; }
