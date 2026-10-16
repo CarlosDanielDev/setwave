@@ -96,7 +96,7 @@ def wave_at_now(*args, cwd) -> SimpleNamespace:
             try:
                 wave.main(list(args))
             except SystemExit as e:
-                code = e.code if isinstance(e.code, int) else 1
+                code = 0 if e.code is None else e.code if isinstance(e.code, int) else 1
     finally:
         os.chdir(here)
     return SimpleNamespace(returncode=code, stdout=out.getvalue(), stderr=err.getvalue())
@@ -125,9 +125,9 @@ class Liveness(unittest.TestCase):
         self.assertEqual(got[4]["pr"], 20)
 
     def test_the_clock_is_the_one_passed(self):
-        later = {n: wave.liveness(repo(), n, now=NOW + 10 * 60) for n in (10, 11)}
-        self.assertEqual((later[10]["idle_min"], later[10]["verdict"]), (12, "quiet"), "2 min + 10 on the passed clock")
-        self.assertEqual((later[11]["idle_min"], later[11]["verdict"]), (30, "quiet"))
+        later = {n: wave.liveness(repo(), n, now=NOW + 9 * 60) for n in (10, 11)}
+        self.assertEqual((later[10]["idle_min"], later[10]["verdict"]), (11, "quiet"), "2 min + 9 on the passed clock: working before")
+        self.assertEqual((later[11]["idle_min"], later[11]["verdict"]), (29, "quiet"), "clear of the 30 min edge")
 
 
 class Agents(unittest.TestCase):
