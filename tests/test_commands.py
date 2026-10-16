@@ -9,6 +9,7 @@ import contextlib
 import io
 import json
 import unittest
+from unittest import mock
 
 from helpers import TMP, TESTS, WAVE, gh_calls, run_wave, sandbox, wave
 
@@ -196,6 +197,18 @@ class EscalationPolicy(unittest.TestCase):
         for fragment in ("Skill ausente não bloqueia", "o disco ganha"):
             self.assertIn(fragment, out, f"`wave prompt` delivers it to every agent: {fragment}")
         self.assertNotIn("{{", out, "an unresolved placeholder in the prompt is the bare-host failure mode")
+
+    def test_section_zero_lists_the_skills_the_handoff_declares(self):
+        iss = {"number": 2, "title": "t", "html_url": "https://github.com/o/r/issues/2", "body": ""}
+        rendered = lambda: wave.render_prompt(repo(), iss, "feat/2-t", "0" * 40, 2).split("## 1.")[0]
+        for s in wave.DEFAULT_SKILLS:
+            self.assertIn(f"`{s}`", rendered(), f"section 0 names the default skill: {s}")
+        for s in ("setwave:caveman", "setwave:ponytail", "setwave:architecture-designer"):
+            self.assertTrue(any(d.startswith(s) for d in wave.DEFAULT_SKILLS), f"the default stack ships {s}")
+        with mock.patch.object(wave, "profile_skills", return_value=["repo-skill-74"]):
+            self.assertIn("`repo-skill-74`", rendered(), "the profile's skills win in section 0")
+            self.assertNotIn("`ponytail`", rendered())
+            self.assertIn("Skills: `repo-skill-74`", wave.handoff_block(repo(), iss), "the handoff reads the same source")
 
     def test_the_prompt_carries_the_pre_done_audit(self):
         src = (wave.TEMPLATES / "agent.md").read_text()

@@ -81,7 +81,9 @@ RETRY_CEILING = 3
 # more parallel agents than this once hit the API rate limit and left a half-extracted crate in the shared cargo cache
 MAX_BATCH = 6
 # the agent skills a handoff names when the repo declares and detects none (`phases.agent_skills` in .wave.json wins)
-DEFAULT_SKILLS = ["caveman (ultra)", "ponytail", "superpowers:test-driven-development"]
+# (the plugin ships the `setwave:*` ones; the rest are host-only and the prompt says to use them only if present)
+DEFAULT_SKILLS = ["setwave:caveman (ultra)", "setwave:ponytail", "setwave:architecture-designer",
+                  "graphify", "team-agent-orchestration", "superpowers:test-driven-development", "poka-yoke"]
 # a registry package in Cargo.lock: name, version, then a registry or sparse-index source (git and path packages are not cached there)
 LOCK_PACKAGE = re.compile(r'\[\[package\]\]\s*\nname = "([^"]+)"\s*\nversion = "([^"]+)"\s*\nsource = "(?:registry|sparse)\+')
 # `order --run-gate` checks each simulated step out into a detached worktree named so; `doctor` reports any it finds
@@ -697,6 +699,11 @@ def profile_skills(p: dict) -> list[str]:
         if prov["source"] == "detected" and prov["provider"] not in skills:
             skills.append(prov["provider"])
     return skills
+
+
+def agent_skills(repo: "Repo") -> list[str]:
+    """The one list of skills a handoff and the prompt's section 0 both name: the repo's own, else the default stack."""
+    return profile_skills(repo.profile()) or DEFAULT_SKILLS
 
 
 def profile_prompt(p: dict) -> str:
@@ -1449,6 +1456,7 @@ def render_prompt(repo: Repo, iss: dict, branch: str, sha: str, parallel: int) -
                                 else "sem `codegraph` no host: comece por Grep/Read — nada aqui depende dele"),
         "ACCOUNT": f"conta gh `{repo.account}` (use `GH_TOKEN=$(gh auth token --user {repo.account})` nos comandos gh)" if repo.account else "conta gh ativa",
         "PROFILE": profile_prompt(repo.profile()),
+        "SKILLS": ", ".join(f"`{s}`" for s in agent_skills(repo)),
         "PREPARED": prepared_note(iss.get("body") or ""),
         "PARALLEL": str(max(parallel - 1, 0)),
     }
@@ -2670,7 +2678,7 @@ def handoff_block(repo: Repo, iss: dict) -> str:
     gate, skills (`.wave.json`'s `phases.agent_skills`, else the default stack), the non-negotiables and
     `Closes #N`. The judgement — the Done when, the file:line, the ADR — is never written here."""
     n = iss["number"]
-    gate, skills = repo.gate(), profile_skills(repo.profile()) or DEFAULT_SKILLS
+    gate, skills = repo.gate(), agent_skills(repo)
     return "\n".join([
         "## Handoff",
         PREPARE_MARK, "",
