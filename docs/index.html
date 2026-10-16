@@ -97,8 +97,28 @@
   .term-body .cursor { display: inline-block; width: .55em; height: 1.1em; background: var(--crest); vertical-align: text-bottom; animation: blink 1s steps(1) infinite; }
   @keyframes blink { 50% { opacity: 0; } }
 
-  .oneliner { font-family: var(--mono); font-size: clamp(1.05rem, 3.4vw, 1.5rem); background: var(--deep); border: 1px solid var(--line); border-radius: 12px; padding: 26px 30px; text-align: center; margin: 8px 0 18px; }
-  .oneliner b { color: var(--crest); }
+  .flip-box {
+    perspective: 1200px; max-width: 720px; margin: 8px auto 6px;
+  }
+  .flip-card {
+    background: var(--deep); border: 1px solid var(--line); border-radius: 12px;
+    padding: 22px 26px; text-align: center; min-height: 128px;
+    display: flex; flex-direction: column; justify-content: center; gap: 6px;
+    transition: transform .38s ease, opacity .38s ease, border-color .3s ease;
+    transform-style: preserve-3d;
+  }
+  .flip-card:hover { border-color: color-mix(in srgb, var(--crest) 50%, var(--line)); }
+  .flip-card.out { transform: rotateX(-88deg); opacity: 0; }
+  .flip-card.in { transform: rotateX(88deg); opacity: 0; }
+  .flip-cmd { font-family: var(--mono); font-size: clamp(1.02rem, 3vw, 1.35rem); }
+  .flip-cmd b { color: var(--crest); font-weight: 700; }
+  .flip-cmd .arg { color: var(--foam); }
+  .flip-desc { color: var(--mist); font-size: .9rem; }
+  .flip-idx { font-family: var(--mono); font-size: .72rem; color: var(--mist); margin-top: 10px; }
+  .flip-idx b { color: var(--crest); }
+  .flip-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 8px; max-width: 860px; margin: 14px auto 0; }
+  .flip-grid span { font-family: var(--mono); font-size: .8rem; color: var(--mist); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
+  .flip-grid span b { color: var(--crest); font-weight: 600; }
   .center { text-align: center; }
 
   .wrong { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; margin-top: 28px; }
@@ -359,7 +379,14 @@
   <div class="wrap">
     <p class="kicker">any repo · any account · any stack</p>
     <h2>The prompt is the same line tomorrow.</h2>
-    <div class="oneliner"><b>/setwave:wave</b> &lt;epic&gt;</div>
+    <div class="flip-box">
+      <div class="flip-card" id="flipcard" tabindex="0" aria-live="polite">
+        <div class="flip-cmd" id="flipcmd"></div>
+        <div class="flip-desc" id="flipdesc"></div>
+        <div class="flip-idx" id="flipidx"></div>
+      </div>
+      <div class="flip-grid" id="flipgrid" hidden></div>
+    </div>
     <p class="sub center" style="margin-inline:auto">The data comes from GitHub and git at run time — so the same words work in the next session, the next wave, the next repo, the next account.</p>
   </div>
 </section>
@@ -538,6 +565,51 @@
     if (es[0].isIntersecting) { io.disconnect(); run(); }
   }, { threshold: 0.3 });
   io.observe(el);
+})();
+(function () {
+  var cmds = [
+    { c: "<b>/setwave:wave</b> <span class='arg'>34</span>", d: "run the epic — the loop dispatches, verifies, judges, merges" },
+    { c: "<b>/setwave:define</b> <span class='arg'>&quot;the checkout is slow&quot;</span>", d: "interviews you in rounds until the issue is Ready — nothing written without your OK" },
+    { c: "<b>wave init</b>", d: "first run in a repo: gate, profile and worktrees detected, one question, never twice" },
+    { c: "<b>wave adopt</b> <span class='arg'>--milestone &quot;Sprint 42&quot;</span>", d: "an existing milestone becomes an epic — sub-issues linked, dependencies wired" },
+    { c: "<b>wave epics</b>", d: "every open epic across your repos, sorted by ready work, with the command to continue" },
+    { c: "<b>wave prepare</b> <span class='arg'>61</span>", d: "an issue without a handoff gets the facts written — and the judgement asked of you" },
+    { c: "<b>wave doctor</b>", d: "every ✗ is a mistake dispatch would otherwise let happen" },
+    { c: "<b>wave stats</b>", d: "runs, durations and failures — from the log, not from memory" }
+  ];
+  var card = document.getElementById("flipcard");
+  if (!card) return;
+  var cmd = document.getElementById("flipcmd"), desc = document.getElementById("flipdesc"),
+      idx = document.getElementById("flipidx"), grid = document.getElementById("flipgrid");
+  var i = 0, timer = null, paused = false;
+  function show(n) {
+    cmd.innerHTML = cmds[n].c; desc.textContent = cmds[n].d;
+    idx.innerHTML = "<b>" + (n + 1) + "</b> / " + cmds.length;
+  }
+  function flip() {
+    if (paused) return;
+    card.classList.add("out");
+    setTimeout(function () {
+      i = (i + 1) % cmds.length; show(i);
+      card.classList.remove("out"); card.classList.add("in");
+      setTimeout(function () { card.classList.remove("in"); }, 400);
+    }, 390);
+  }
+  function start() { if (!timer) timer = setInterval(flip, 3000); }
+  function stop() { clearInterval(timer); timer = null; }
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    card.style.minHeight = "auto";
+    show(0);
+    grid.hidden = false;
+    grid.innerHTML = cmds.map(function (c) { return "<span>" + c.c + "</span>"; }).join("");
+    return;
+  }
+  show(0); start();
+  card.addEventListener("mouseenter", stop);
+  card.addEventListener("mouseleave", start);
+  card.addEventListener("focusin", stop);
+  card.addEventListener("focusout", start);
+  card.addEventListener("click", flip);
 })();
 (function () {
   document.querySelectorAll(".copy").forEach(function (b) {
