@@ -325,7 +325,11 @@ class Dogfood(unittest.TestCase):
         found = []
         for block in json.loads(committed.read_text())["hooks"]["PreToolUse"]:
             for h in block["hooks"]:
-                interpreter, script, name = h["command"].split()
+                parts = h["command"].split()
+                self.assertEqual(len(parts), 3, f"expected `python3 <path>/hooks/guards.py <name>`, got {h['command']!r}")
+                interpreter, script, name = parts
+                # deliberate: only the tail of the path is pinned. The prefix is the owner's plugin checkout
+                # (machine-specific, see README "Developing"; #76 owns the drift), so it cannot be asserted here.
                 self.assertEqual((interpreter, Path(script).parts[-2:]), ("python3", ("hooks", "guards.py")), h)
                 found.append((name, block["matcher"]))
         self.assertEqual(found, [(name, matcher) for name, matcher, _ in wave.GUARD_HOOKS])
@@ -333,4 +337,3 @@ class Dogfood(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
