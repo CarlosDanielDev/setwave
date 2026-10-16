@@ -98,14 +98,25 @@
   .dot.r { background: #e0665f; } .dot.y { background: #d8b054; } .dot.g { background: #58b368; }
   .term-title { font-family: var(--mono); font-size: .78rem; color: var(--mist); margin-left: 8px; }
   .term-body {
-    font-family: var(--mono); font-size: .88rem; line-height: 1.75;
-    padding: 20px 22px; min-height: 345px; white-space: pre-wrap; word-break: break-word;
+    font-family: var(--mono); font-size: .88rem; line-height: 1.8;
+    padding: 20px 22px; min-height: 540px;
   }
-  .term-body .p { color: var(--crest); }
-  .term-body .cmd { color: var(--foam); font-weight: 600; }
-  .term-body .ok { color: #58b368; }
-  .term-body .dim { color: var(--mist); }
-  .term-body .warn { color: var(--sand); }
+  .tline { display: grid; grid-template-columns: 1.3em 1fr; column-gap: 10px; margin: 1px 0; }
+  .tline > .pr { color: var(--crest); user-select: none; }
+  .tline.dim > .tx { color: var(--mist); }
+  .tline.ok > .tx { color: #58b368; }
+  .tline.warn > .tx { color: var(--sand); }
+  .tline.you > .tx { color: var(--foam); font-weight: 600; }
+  .tline .st { color: var(--crest); }
+  .tline .st.done { color: #58b368; }
+  .tline .st.open { color: var(--sand); }
+  .tline .tag { color: var(--mist); }
+  .tline .br { color: var(--foam); }
+  .tline .bar {
+    display: inline-block; height: .7em; vertical-align: middle; border-radius: 3px;
+    background: var(--crest); margin-right: 6px; transition: width .5s ease;
+  }
+  .spin { display: inline-block; width: 1.2em; color: var(--crest); }
   .term-body .cursor { display: inline-block; width: .55em; height: 1.1em;
     background: var(--crest); vertical-align: text-bottom; animation: blink 1s steps(1) infinite; }
   @keyframes blink { 50% { opacity: 0; } }
@@ -339,57 +350,128 @@
 
 <script>
 (function () {
-  var lines = [
-    { t: "you",   x: "/setwave:wave 34" },
-    { t: "ok",    x: "✓ doctor: gate real · checkout clean · 4 agents alive · disk ok" },
-    { t: "dim",   x: "next wave (batch 4): #35 #36 #37 #38" },
-    { t: "dim",   x: "dispatch → 4 worktrees from origin/main · 4 prompt files" },
-    { t: "dim",   x: "  ⎡ agent #35 → feat/35-guard-hooks   working" },
-    { t: "dim",   x: "  ⎢ agent #36 → feat/36-state-sweep   working" },
-    { t: "dim",   x: "  ⎢ agent #37 → feat/37-judge         working" },
-    { t: "dim",   x: "  ⎣ agent #38 → feat/38-typed-issues  working" },
-    { t: "ok",    x: "✓ verify #43 #42 #44 #45 — CI green · ledgers match" },
-    { t: "ok",    x: "✓ judge 4/4 pass — verdicts keyed to head SHAs" },
-    { t: "warn",  x: "order: #45 will conflict with #42, #44 on scripts/wave.py" },
-    { t: "dim",   x: "plan pinned: base ecefb53 · heads 63b6040 e677838 6ab5ef4 6710d99" },
-    { t: "you",   x: "OK — merge the wave" },
-    { t: "ok",    x: "✓ merged 4/4 · CI green after each · ledgers applied" },
-    { t: "ok",    x: "✓ epic closed · worktrees cleaned · status posted" }
-  ];
   var el = document.getElementById("term");
   var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  function cls(t) { return t === "you" ? "p" : t === "ok" ? "ok" : t === "warn" ? "warn" : "dim"; }
-  if (reduce) {
-    el.innerHTML = lines.map(function (l) {
-      return "<span class='" + cls(l.t) + "'>" + (l.t === "you" ? "❯ " : "  ") + l.x + "</span>";
-    }).join("\n");
-    return;
+  var SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+  function line(parent, kind, prompt, html) {
+    var d = document.createElement("div");
+    d.className = "tline " + kind;
+    d.innerHTML = '<span class="pr">' + (prompt || "") + "</span><span class='tx'>" + html + "</span>";
+    parent.appendChild(d);
+    return d;
   }
-  var li = 0, ci = 0, out = [];
-  function tick() {
-    if (li >= lines.length) {
-      var c = document.createElement("span");
-      c.className = "cursor"; el.appendChild(c);
-      return;
+  function finishCursor() {
+    var last = el.lastElementChild && el.lastElementChild.querySelector(".tx");
+    (last || el).insertAdjacentHTML("beforeend", '<span class="cursor"></span>');
+  }
+
+  /* the final state, one op per beat */
+  var ops = [
+    { op: "type", kind: "you", pr: "❯", text: "/setwave:wave 34" },
+    { op: "line", kind: "ok",  pr: "✓", html: "doctor — gate real · checkout clean · 4 agents alive · disk ok" },
+    { op: "line", kind: "dim", pr: "″", html: "next (batch 4): <span class='br'>#35</span> <span class='br'>#36</span> <span class='br'>#37</span> <span class='br'>#38</span> — leaves, unblocked, no PR, no worktree" },
+    { op: "line", kind: "dim", pr: "″", html: "dispatch → 4 worktrees from <span class='br'>origin/main</span> @ ecefb53 · 4 prompt files" },
+
+    { op: "agent", id: "a35", br: "#35", branch: "feat/35-guard-hooks" },
+    { op: "agent", id: "a36", br: "#36", branch: "feat/36-state-sweep" },
+    { op: "agent", id: "a37", br: "#37", branch: "feat/37-judge" },
+    { op: "agent", id: "a38", br: "#38", branch: "feat/38-typed-issues" },
+
+    { op: "update", id: "a35", st: "done", x: "PR opened · verify ✓ · CI green" },
+    { op: "update", id: "a36", st: "done", x: "PR opened · verify ✓ · CI green" },
+    { op: "update", id: "a37", st: "open", x: "rate-limited (429) · resuming from its own context" },
+    { op: "update", id: "a37", st: "done", x: "resumed · PR opened · verify ✓" },
+    { op: "update", id: "a38", st: "done", x: "PR opened · verify ✓ · ledger matches" },
+    { op: "line",  kind: "ok",  pr: "✓", html: "judge — 4 read-only reviews · 4 pass · verdicts keyed to head SHAs" },
+    { op: "line",  kind: "warn", pr: "△", html: "order — <span class='br'>#45</span> will conflict with <span class='br'>#42</span>, <span class='br'>#44</span> on <span class='br'>scripts/wave.py</span> · chain simulated · serial queued" },
+    { op: "line",  kind: "dim", pr: "″", html: "plan pinned — base ecefb53 · heads 63b6040 · e677838 · 6ab5ef4 · 6710d99" },
+    { op: "type", kind: "you", pr: "❯", text: "OK — merge the wave" },
+    { op: "merge" },
+    { op: "line",  kind: "ok",  pr: "✓", html: "ledgers applied to the issues · parents closed · worktrees cleaned" },
+    { op: "line",  kind: "ok",  pr: "✓", html: "status posted on the epic — the next session starts from it" },
+    { op: "cursor" }
+  ];
+
+  function finalState() {
+    el.innerHTML = "";
+    ops.forEach(function (o) {
+      if (o.op === "type") line(el, "you", "❯", "<span class='br'>" + o.text + "</span>");
+      else if (o.op === "agent") line(el, "dim", "·", "<span class='st done'>done</span> agent <span class='br'>" + o.br + "</span> → <span class='br'>" + o.branch + "</span> · PR opened · verify ✓");
+      else if (o.op === "update") { /* agents already render done */ }
+      else if (o.op === "merge") line(el, "ok", "✓", "merged <span class='bar' style='width:9em'></span> 4/4 · CI green after each · no force push");
+      else if (o.op === "cursor") finishCursor();
+      else line(el, o.kind, o.pr, o.html);
+    });
+  }
+
+  if (reduce) { finalState(); return; }
+
+  var spinIdx = 0;
+  var spinTimer = setInterval(function () {
+    spinIdx = (spinIdx + 1) % SPIN.length;
+    document.querySelectorAll(".spin").forEach(function (s) {
+      if (!s.dataset.fixed) s.textContent = SPIN[spinIdx] + " ";
+    });
+  }, 90);
+
+  function addAgent(o) {
+    var d = line(el, "dim", "·",
+      '<span class="spin">' + SPIN[0] + ' </span><span class="st">working</span> agent <span class="br">' + o.br +
+      "</span> → <span class='br'>" + o.branch + "</span><span class='tail'></span>");
+    d.dataset.id = o.id;
+  }
+  function upd(o) {
+    var d = el.querySelector('[data-id="' + o.id + '"]');
+    if (!d) return;
+    var st = d.querySelector(".st");
+    st.className = "st " + (o.st === "done" ? "done" : "open");
+    st.textContent = o.st === "done" ? "done " : "stalled ";
+    d.querySelector(".tail").innerHTML = " · " + o.x;
+    if (o.st === "open") { var sp = d.querySelector(".spin"); sp.dataset.fixed = 1; sp.textContent = "↻ "; }
+  }
+  function mergeBar() {
+    var d = line(el, "ok", "✓", 'merged <span class="bar" style="width:0"></span> <span class="ct">0/4</span> · CI green before each');
+    var bar = d.querySelector(".bar"), ct = d.querySelector(".ct");
+    var n = 0;
+    (function step() {
+      n++;
+      bar.style.width = n * 2.25 + "em";
+      ct.textContent = n + "/4";
+      if (n < 4) setTimeout(step, 420);
+    })();
+    return d;
+  }
+
+  var i = 0;
+  function run() {
+    var o = ops[i];
+    if (!o) return;
+    if (o.op === "type") {
+      var d = line(el, "you", "❯", "");
+      var tx = d.querySelector(".tx"), c = 0;
+      (function t() {
+        tx.innerHTML = "<span class='br'>" + o.text.slice(0, ++c) + "</span>";
+        if (c < o.text.length) setTimeout(t, 55);
+        else { i++; setTimeout(run, 620); }
+      })();
+    } else if (o.op === "line") {
+      line(el, o.kind, o.pr, o.html); i++; setTimeout(run, 240);
+    } else if (o.op === "agent") {
+      addAgent(o); i++; setTimeout(run, 160);
+    } else if (o.op === "update") {
+      upd(o); i++; setTimeout(run, o.st === "open" ? 900 : 500);
+    } else if (o.op === "merge") {
+      mergeBar(); i++; setTimeout(run, 2100);
+    } else if (o.op === "cursor") {
+      clearInterval(spinTimer);
+      document.querySelectorAll(".spin").forEach(function (s) { s.remove(); });
+      finishCursor();
     }
-    var line = lines[li];
-    if (ci === 0) {
-      var span = document.createElement("span");
-      span.className = cls(line.t);
-      span.textContent = line.t === "you" ? "❯ " : "  ";
-      el.appendChild(span);
-    }
-    var spans = el.children[el.children.length - 1];
-    var speed = line.t === "you" ? 55 : 7;
-    var chunk = line.t === "you" ? 1 : 3 + Math.floor(Math.random() * 4);
-    spans.textContent += line.x.slice(ci, ci + chunk);
-    ci += chunk;
-    if (ci >= line.x.length) { li++; ci = 0; out.push(1); setTimeout(tick, line.t === "you" ? 500 : 130); }
-    else setTimeout(tick, speed);
   }
   var io = new IntersectionObserver(function (es) {
-    if (es[0].isIntersecting) { io.disconnect(); tick(); }
-  }, { threshold: 0.35 });
+    if (es[0].isIntersecting) { io.disconnect(); run(); }
+  }, { threshold: 0.3 });
   io.observe(el);
 })();
 (function () {
