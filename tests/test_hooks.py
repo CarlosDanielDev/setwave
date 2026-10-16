@@ -316,5 +316,21 @@ class GuaranteesTable(unittest.TestCase):
             self.assertTrue(row.startswith("  ✓ "), row)
 
 
+class Dogfood(unittest.TestCase):
+    """setwave runs with its own guards: the project's committed .claude/settings.json carries all four."""
+
+    def test_the_committed_settings_carry_the_four_guards(self):
+        committed = TESTS.parent / ".claude" / "settings.json"
+        self.assertTrue(committed.exists(), "run `wave hooks install` in this repo and commit .claude/settings.json")
+        found = []
+        for block in json.loads(committed.read_text())["hooks"]["PreToolUse"]:
+            for h in block["hooks"]:
+                interpreter, script, name = h["command"].split()
+                self.assertEqual((interpreter, Path(script).parts[-2:]), ("python3", ("hooks", "guards.py")), h)
+                found.append((name, block["matcher"]))
+        self.assertEqual(found, [(name, matcher) for name, matcher, _ in wave.GUARD_HOOKS])
+
+
 if __name__ == "__main__":
     unittest.main()
+

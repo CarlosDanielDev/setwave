@@ -271,6 +271,8 @@ python3 -m unittest discover -s tests -v
 python3 scripts/wave.py guarantees
 ```
 
+Setup, once per checkout: run `python3 scripts/wave.py hooks install` from the main checkout and let `wave doctor` confirm `guard hooks installed: 4/4 active`. This repo eats its own dogfood, so the four guards ship in the committed `.claude/settings.json`; the install is idempotent and only adds what is missing. The entries carry the absolute path of the plugin checkout that wrote them (`/Users/carlos/projects/setwave`): if yours lives elsewhere, `doctor` shows `0/4`, so run the install and keep the rewritten file out of your commits.
+
 Stdlib only, tests included: nothing to install. The suite runs offline. `tests/helpers.py` builds a temporary bare remote `o/r` and a clone with branches that conflict and branches that do not, points the registry and the run log at that directory, and puts `tests/bin/gh` first on `PATH`: a fake `gh` that answers from `tests/fixtures/*.json`, keyed by the request, and refuses anything that would write to GitHub.
 
 | request | fixture |
