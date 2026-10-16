@@ -95,6 +95,8 @@ class ReadingNeverClones(Base):
         subprocess.run(["git", "-C", str(X), "remote", "add", "origin", "https://github.com/o/x.git"],
                        check=True, capture_output=True)
         p = wave_logged("why", "o/x#1")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("o/x#1 — ", p.stdout, "the premises were read from the checkout found on disk")
         self.assertNotIn("not cloned", p.stderr)
         self.assertFalse(cloned())
         self.assertEqual(REG.read_bytes(), self.before, "a read command repaired the registry")

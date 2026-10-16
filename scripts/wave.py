@@ -1588,7 +1588,9 @@ def cmd_epics(default: Repo | None, a):
                 found += [epic_stats(r, iss) for iss in epics_of(r)]
             except SystemExit as e:
                 why = str(e).strip().splitlines()[-1] if str(e).strip() else str(e)
-                print(f"skip {slug}: {why.removeprefix(slug + ': ')}", file=sys.stderr)
+                if why.startswith(f"{slug}: not cloned"):  # the message already names the slug; any other error keeps its own text
+                    why = why.removeprefix(f"{slug}: ")
+                print(f"skip {slug}: {why}", file=sys.stderr)
     found.sort(key=lambda s: (-s["ready"], s["repo"], s["number"]))
     if a.json:
         print(json.dumps(found, indent=2))
@@ -3157,7 +3159,7 @@ GUARANTEES = [
     ("doctor reports the retry ceiling, and with --epic the state sweep, both soft", "cmd_doctor -> sweep_retries, sweep_epic", "! no agent past the retry ceiling (3 no-progress dispatches ...) / ! state sweep of <epic>", True),
     ("a command run inside a worktree never re-points the registry: it names the main checkout", "Repo.from_cwd (--git-common-dir)", "repos.json path stays the main checkout; a worktree or missing path is repaired to it", True),
     ("a ref to a repo with no checkout is size-checked, cloned into the first search path, registered, and the command continues", "Repo.get -> clone_repo", "the size on GitHub, then 'cloned owner/name into …'; repos.json gains the path", True),
-    ("a command that only reads (epics, status, why, stats, guarantees) never clones, registers or repairs the registry: a repo with no checkout is 'not cloned', with the commands that fix it", "Repo.get(read=True) <- cmd_epics, cmd_status, cmd_why", "'owner/name: not cloned — gh repo clone …'; no clone, no new checkout, repos.json byte-identical; next, dispatch, prepare and prompt still clone", True),
+    ("a command that only reads (epics, status, why, stats, guarantees) never clones, registers or repairs the registry: a repo with no checkout is 'not cloned', with the commands that fix it", "Repo.get(read=True) <- cmd_epics, cmd_status, cmd_why; stats and guarantees resolve no repo (tests/test_read_never_clones.py)", "'owner/name: not cloned — gh repo clone …'; no clone, no new checkout, repos.json byte-identical; next, dispatch, prepare and prompt still clone", True),
     ("a clone is never shallow: worktrees, merge-tree and --merged need history", "clone_repo (no --depth, is-shallow-repository refused)", "a shallow result exits with 'need history' and registers nothing", True),
     ("cloning asks above clone_ask_over_mb (registry, default 500 MB): the command is printed instead", "clone_repo's diskUsage gate", "'over the 500 MB … gh repo clone owner/name …', nothing cloned or registered", True),
     ("scan and Repo.get agree on the checkout: the registry wins, a second checkout is reported, a dead path is repaired", "find_checkouts + cmd_repos scan", "'another checkout at … — the registry keeps …'", True),
