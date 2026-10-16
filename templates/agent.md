@@ -5,7 +5,7 @@ Repo: `{{REPO}}`, base `{{BASE}}`, {{ACCOUNT}}.
 
 ## 0. Modo de trabalho — antes de ler código
 
-Se estas skills existirem no teu host, invoque-as via Skill tool, nesta ordem, e siga-as pelo resto da sessão: {{SKILLS}}. As que não começam com `setwave:` não vêm com o plugin; use a do host se houver. Antes de abrir o PR, re-audite o seu diff pela regra seis abaixo e pela seção 6; uma skill de auditoria do host ajuda, mas a regra não depende dela. Versões sem o prefixo `setwave:` do teu próprio host valem igual — prefira a do plugin. **Skill ausente não bloqueia e não é citada de novo** — o comportamento de cada uma está embutido nas regras abaixo, que valem sempre:
+Se estas skills existirem no teu host, invoque-as via Skill tool, nesta ordem, e siga-as pelo resto da sessão: {{SKILLS}}. As `setwave:*` vêm com o plugin; as demais são do host (ou do repo) — use a que houver. Antes de abrir o PR, re-audite o seu diff pela regra seis abaixo e pela seção 6; uma skill de auditoria do host ajuda, mas a regra não depende dela. Versões sem o prefixo `setwave:` do teu próprio host valem igual — prefira a do plugin. **Skill ausente não bloqueia e não é citada de novo** — o comportamento de cada uma está embutido nas regras abaixo, que valem sempre:
 
 - Prosa comprimida; código, comentários, commits e PR em inglês normal, bem escrito, no tom dos arquivos vizinhos.
 - A solução mais preguiçosa que funciona: diff mínimo, sem abstração especulativa (o porquê está na seção 3).

@@ -204,8 +204,10 @@ class EscalationPolicy(unittest.TestCase):
         for s in wave.DEFAULT_SKILLS:
             self.assertIn(f"`{s.split(' (')[0]}`", rendered(), f"section 0 names the default skill: {s}")
         self.assertIn("`setwave:caveman` (ultra)", rendered(), "the level stays outside the Skill-tool name")
-        for s in ("setwave:caveman", "setwave:ponytail", "setwave:architecture-designer"):
-            self.assertTrue(any(d.startswith(s) for d in wave.DEFAULT_SKILLS), f"the default stack ships {s}")
+        for s in wave.DEFAULT_SKILLS:
+            if s.startswith("setwave:"):
+                name = s.split(" (")[0].removeprefix("setwave:")
+                self.assertTrue((WAVE.parent.parent / "skills" / name / "SKILL.md").exists(), f"the plugin ships {s}")
         with mock.patch.object(wave, "profile_skills", return_value=["repo-skill-74"]):
             self.assertIn("`repo-skill-74`", rendered(), "the profile's skills win in section 0")
             self.assertNotIn("`setwave:ponytail`", rendered(), "a profile replaces the defaults in section 0")
