@@ -15,4 +15,10 @@ Not vendored, license or right not established:
 - **poka-yoke** — no author and no license on file (all rights reserved by default). Its behavior (the pre-PR mistake-proofing audit) is prompt rule six.
 - **superpowers:test-driven-development** — obra/superpowers, its own license; test-first is prompt rule three.
 
+## Owner-provided
+
+| Skill | Origin | License |
+| --- | --- | --- |
+| improve-codebase-architecture | supplied by the repo owner from the team skills collection; adapted — the three Skill-tool dependencies (codebase-design, grilling, domain-modeling) were redirected to what ships with the plugin: the vocabulary is inlined, the grilling loop defers to `setwave:define`'s rounds, GLOSSARY.md stays the model record | carried by this repo (MIT); take-down on request |
+
 Take-down: if any skill here is yours and you do not want it shipped, open an issue and it leaves the next release.
