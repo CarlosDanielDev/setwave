@@ -706,6 +706,11 @@ def agent_skills(repo: "Repo") -> list[str]:
     return profile_skills(repo.profile()) or DEFAULT_SKILLS
 
 
+def skill_list(skills: list[str]) -> str:
+    """Skills as the Skill tool names them, backticked; a trailing "(level)" stays outside the name."""
+    return ", ".join(re.sub(r"^(\S+)( \(.*\))?$", r"`\1`\2", s) for s in skills)
+
+
 def profile_prompt(p: dict) -> str:
     """The `{{PROFILE}}` block of the agent prompt: what the repo itself provides for each phase of the
     loop, named so the agent expects it — or the plain default stack when nothing is found. Rule files
@@ -716,7 +721,7 @@ def profile_prompt(p: dict) -> str:
         return ("Nenhuma orquestração própria detectada neste repositório (nada em `.claude/`, nenhum "
                 "CLAUDE.md/AGENTS.md/CONTRIBUTING.md): use a stack padrão acima como está.")
     lines = ["Este repositório tem orquestração própria:",
-             ("- skills dele, nesta ordem, antes da stack padrão: " + ", ".join(f"`{s}`" for s in skills))
+             ("- skills dele, nesta ordem (são as que o §0 lista no lugar da stack padrão): " + ", ".join(f"`{s}`" for s in skills))
              if skills else "- nenhuma skill própria: a stack padrão acima vale."]
     if p["hooks"]:
         lines.append("- hooks que se impõem (o Claude Code os roda; espere tropeçar neles): "
@@ -1456,7 +1461,7 @@ def render_prompt(repo: Repo, iss: dict, branch: str, sha: str, parallel: int) -
                                 else "sem `codegraph` no host: comece por Grep/Read — nada aqui depende dele"),
         "ACCOUNT": f"conta gh `{repo.account}` (use `GH_TOKEN=$(gh auth token --user {repo.account})` nos comandos gh)" if repo.account else "conta gh ativa",
         "PROFILE": profile_prompt(repo.profile()),
-        "SKILLS": ", ".join(f"`{s}`" for s in agent_skills(repo)),
+        "SKILLS": skill_list(agent_skills(repo)),
         "PREPARED": prepared_note(iss.get("body") or ""),
         "PARALLEL": str(max(parallel - 1, 0)),
     }
@@ -2688,7 +2693,7 @@ def handoff_block(repo: Repo, iss: dict) -> str:
         "```", "",
         f"Base `origin/{repo.base}` at `{repo.origin_sha()}`. Gate:",
         "", "```bash", *gate, "```", "",
-        "Skills: " + ", ".join(f"`{s}`" for s in skills), "",
+        "Skills: " + skill_list(skills), "",
         "Non-negotiables: no AI attribution in commits or PRs; never `git gc --prune`, `git reflog expire`, "
         "`git stash`, `git reset --hard`, `git clean -f`, `git push --force*`, `git branch -D`, `rm -rf`; "
         "never merge — the owner merges; never touch the main checkout or a sibling worktree; "
