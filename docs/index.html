@@ -52,7 +52,7 @@
   .btn.ghost { border-color: var(--line); color: var(--foam); }
   .btn.ghost:hover { border-color: var(--crest); }
 
-  .hero { padding: 92px 0 64px; position: relative; overflow: hidden; }
+  .hero { padding: 92px 0 64px; position: relative; }
   .hero .sea { position: absolute; inset: auto 0 -2px 0; height: 90px; pointer-events: none;
     -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 45%, #000 78%, transparent 100%);
             mask-image: linear-gradient(to bottom, transparent 0, #000 45%, #000 78%, transparent 100%); }
@@ -61,11 +61,11 @@
   .hero .sea .w2 { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='360' height='60'%3E%3Cpath d='M0 40 Q 90 10 180 40 T 360 40' fill='none' stroke='rgba(69,214,184,.28)' stroke-width='2'/%3E%3C/svg%3E"); background-size: 360px 60px; animation: driftB 11s linear infinite; }
   @keyframes driftA { to { background-position-x: -240px; } }
   @keyframes driftB { to { background-position-x: 360px; } }
-  .hero::after { content: ""; position: absolute; inset: auto -10% -60px -10%; height: 220px;
+  .hero::after { content: ""; position: absolute; inset: auto -10% -150px -10%; height: 330px;
     background: radial-gradient(60% 100% at 20% 100%, rgba(69,214,184,.14), transparent 70%),
                 radial-gradient(50% 100% at 80% 100%, rgba(232,200,143,.08), transparent 70%); pointer-events: none;
-    -webkit-mask-image: radial-gradient(120% 100% at 50% 100%, #000 40%, transparent 92%);
-            mask-image: radial-gradient(120% 100% at 50% 100%, #000 40%, transparent 92%); }
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 38%, #000 72%, transparent 100%);
+            mask-image: linear-gradient(to bottom, transparent 0, #000 38%, #000 72%, transparent 100%); }
   .hero h1 { font-size: clamp(2.4rem, 7vw, 4rem); line-height: 1.05; margin: 0 0 20px; }
   .hero h1 em { font-style: normal; color: var(--crest); }
   .hero .sub { font-size: 1.2rem; margin-bottom: 32px; }
