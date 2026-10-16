@@ -1,0 +1,10 @@
+# blocked	blocker
+split-adr	no-clone
+split-adr	dogfood
+split-adr	suite-determinism
+split-adr	skills-substitution
+split-adr	release-helper
+split-adr	hooks-drift
+split-adr	vendored-references
+split-adr	showcase-polish
+split-adr	worktree-state

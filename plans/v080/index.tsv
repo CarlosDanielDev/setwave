@@ -1,0 +1,12 @@
+# key	title	labels	parent
+epic	v0.8.0 — a auditoria do harness: os gaps, fechados	epic	-
+no-clone	Comando de leitura nunca clona: wave epics puxou um repo sem ninguém pedir	enhancement,bug	epic
+dogfood	Dogfood: o próprio setwave roda com as guardas ativas	enhancement,doctor	epic
+suite-determinism	Suíte determinística: nem make real, nem relógio de parede	enhancement	epic
+skills-substitution	A lista de skills tem um dono: substituição no mesmo canal de GATE e PROFILE	enhancement	epic
+release-helper	wave release: o ritual que hoje é manual do dono	enhancement	epic
+hooks-drift	hooks drift: o path do guards.py morre quando o plugin atualiza	enhancement,doctor	epic
+vendored-references	architecture-designer inteiro: as references/ que ficaram para trás	enhancement	epic
+showcase-polish	Showcase: o cartão social que não existe	enhancement	epic
+split-adr	O wave.py passa dos 3500: a decisão de dividir (ou de ficar)	enhancement	epic
+worktree-state	Um classificador de estado de worktree: doctor e cleanup deixam de discordar	enhancement	epic

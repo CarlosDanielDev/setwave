@@ -1,0 +1,13 @@
+{
+  "epic": 70,
+  "no-clone": 71,
+  "dogfood": 72,
+  "suite-determinism": 73,
+  "skills-substitution": 74,
+  "release-helper": 75,
+  "hooks-drift": 76,
+  "vendored-references": 77,
+  "showcase-polish": 78,
+  "split-adr": 79,
+  "worktree-state": 80
+}
