@@ -8,12 +8,16 @@ mtime and commit date is set by the test, so no real process of the machine is l
   l-12  likely dead: no stamp, one commit 50 min ago
   l-4   done:        PR 20 closes #4
 """
+import contextlib
+import io
 import json
 import os
 import subprocess
 import time
 import unittest
 from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest import mock
 
 from helpers import TMP, git, run_wave, sandbox, wave
 
@@ -40,8 +44,7 @@ def iso(minutes: float, fmt: str) -> str:
 
 
 def settle() -> None:
-    """Lay every fixture's trace at its age from a fresh `NOW`: the CLI tests read the wall clock, which has
-    moved on since the module was set up (a slow host takes minutes to get from there to here)."""
+    """Lay every fixture's trace at its age from `NOW`, taken here."""
     global NOW
     NOW = time.time()
     for n, minutes in STAMPED.items():
@@ -82,6 +85,23 @@ def setUpModule():
     settle()
 
 
+def wave_at_now(*args, cwd) -> SimpleNamespace:
+    """`wave <args>` run in-process with the clock pinned to NOW, so the printed minutes cannot drift with the host's
+    speed. (The subprocess `run_wave` reads the wall clock; the minutes it prints are 45 + however long the run took.)"""
+    out, err, code = io.StringIO(), io.StringIO(), 0
+    here = os.getcwd()
+    os.chdir(cwd)
+    try:
+        with mock.patch.object(wave.time, "time", return_value=NOW), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                wave.main(list(args))
+            except SystemExit as e:
+                code = e.code if isinstance(e.code, int) else 1
+    finally:
+        os.chdir(here)
+    return SimpleNamespace(returncode=code, stdout=out.getvalue(), stderr=err.getvalue())
+
+
 def repo():
     return wave.Repo("o/l", {"path": str(L)})
 
@@ -96,9 +116,6 @@ class Verdict(unittest.TestCase):
 
 
 class Liveness(unittest.TestCase):
-    def setUp(self):
-        settle()
-
     def test_each_worktree_gets_its_verdict(self):
         got = {n: wave.liveness(repo(), n, now=NOW) for n in (9, 10, 11, 12, 4)}
         self.assertEqual({n: lv["verdict"] for n, lv in got.items()},
@@ -114,11 +131,8 @@ class Liveness(unittest.TestCase):
 
 
 class Agents(unittest.TestCase):
-    def setUp(self):
-        settle()
-
     def test_every_worktree_is_listed_with_its_verdict(self):
-        p = run_wave("agents", cwd=L)
+        p = wave_at_now("agents", cwd=L)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         rows = {int(l.split()[0].split("#")[1]): l for l in p.stdout.splitlines() if l.startswith("  o/l#")}
         self.assertTrue({4, 9, 10, 11, 12} <= set(rows), p.stdout)
@@ -130,18 +144,15 @@ class Agents(unittest.TestCase):
         self.assertIn("PR #20", rows[4])
 
     def test_inside_a_worktree_it_lists_the_siblings_too(self):
-        p = run_wave("agents", cwd=TMP / "l-9")
+        p = wave_at_now("agents", cwd=TMP / "l-9")
         self.assertEqual(p.returncode, 0, p.stderr)
         rows = {int(l.split()[0].split("#")[1]) for l in p.stdout.splitlines() if l.startswith("  o/l#")}
         self.assertTrue({4, 9, 10, 11, 12} <= rows, p.stdout)
 
 
 class Doctor(unittest.TestCase):
-    def setUp(self):
-        settle()
-
     def test_likely_dead_agents_are_named_with_the_recovery(self):
-        p = run_wave("doctor", cwd=L)
+        p = wave_at_now("doctor", cwd=L)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         dead = next(l for l in p.stdout.splitlines() if "likely dead" in l and l.startswith("  !"))
         for name in ("l-9", "l-12"):

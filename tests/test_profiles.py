@@ -56,7 +56,7 @@ def setUpModule():
     (hooks / "missing-interp.sh").chmod(0o755)
     (P / ".claude" / "issue-templates").mkdir(parents=True)
     (P / ".claude" / "issue-templates" / "story.md").write_text("# story\n\n## Done when\n\n## Handoff\n")
-    (P / "Makefile").write_text(".PHONY: sync test\n\nsync:\n\t@touch .synced\n\ntest:\n\t@echo testing\n")
+    (P / "Makefile").write_text(".PHONY: sync test\n\nsync:\n\t@echo sync\n\ntest:\n\t@echo testing\n")
     commit_all(P, "full orchestration")
 
     build("profile-hooks")
