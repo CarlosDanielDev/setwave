@@ -317,7 +317,7 @@ class GuaranteesTable(unittest.TestCase):
 
 
 class Dogfood(unittest.TestCase):
-    """setwave runs with its own guards: the project's committed .claude/settings.json carries all four."""
+    """The committed .claude/settings.json lists the four guards of GUARD_HOOKS (names, matchers, order), each as `python3 <path>/hooks/guards.py <name>`; only the path tail is checked."""
 
     def test_the_committed_settings_carry_the_four_guards(self):
         committed = TESTS.parent / ".claude" / "settings.json"
