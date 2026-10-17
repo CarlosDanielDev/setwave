@@ -10,6 +10,54 @@
 <meta property="og:title" content="setwave — one prompt, a whole epic merged">
 <meta property="og:description" content="One git worktree per issue, one Claude Code agent per worktree, verification before anything is relayed — and a merge only when you say so.">
 <meta property="og:type" content="website">
+<meta property="og:url" content="https://carlosdanieldev.github.io/setwave/">
+<meta property="og:image" content="https://carlosdanieldev.github.io/setwave/og-card.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="setwave: one prompt, a whole epic merged">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://carlosdanieldev.github.io/setwave/og-card.png">
+<link rel="canonical" href="https://carlosdanieldev.github.io/setwave/">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "What happens when two PRs conflict?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Predicted before the merge: wave order runs pairwise git merge-tree and a chain simulation that names the PR that will turn red. When it still lands, wave resolve merges the base into the PR's branch in its own worktree, runs the gate, and pushes normally — a conflict stops with file and line ranges for you, and --continue refuses leftover markers."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does it only work on Rust repos / my stack?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Any stack with a gate: the commands are read from your CI workflow or from the manifest (Cargo, package.json, pyproject, go.mod, Makefile). Stdlib Python is the only runtime dependency on your machine besides gh and git."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Can an agent go rogue and merge something?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "The merge path is wave merge, and it re-runs verify and the judge check itself before each PR. Agents have no merge command in their prompt, fail-open hooks deny destructive git, and the guard hooks are installable with one command."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "What does it cost in tokens?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Batches of four, not eleven — the same result for a quarter of the tokens, no rate-limit deaths. A dead agent is resumed with its context, never redispatched from zero. Every run is logged, so wave stats answers from data."
+      }
+    }
+  ]
+}
+</script>
 <style>
   :root {
     --abyss: #0a1220;
