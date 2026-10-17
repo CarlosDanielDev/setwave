@@ -9,6 +9,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import subprocess
 import sys
 import types
@@ -294,13 +295,13 @@ class Install(unittest.TestCase):
         self.assertIn("attribution", line(out.getvalue(), "missing target"))
 
     def test_doctor_carries_one_line(self):
-        p = run_wave("doctor")
+        p = run_wave("doctor",)
         warn = line(p.stdout, "guard hooks installed")
         self.assertTrue(warn.startswith("  ! "), warn)
         self.assertIn("0/4", warn)
         self.assertIn("`wave hooks install`", warn)
         self.assertEqual(run_wave("hooks", "install").returncode, 0)
-        p = run_wave("doctor")
+        p = run_wave("doctor",)
         ok = line(p.stdout, "guard hooks installed")
         self.assertTrue(ok.startswith("  ✓ "), ok)
         self.assertIn("4/4", ok)
@@ -344,7 +345,7 @@ class TargetDrift(unittest.TestCase):
 
     def test_doctor_warns_on_a_hook_whose_target_is_gone(self):
         write_settings(settings_with(lambda n: f"python3 {STALE} {n}"))
-        warn = line(run_wave("doctor").stdout, "guard hooks installed")
+        warn = line(run_wave("doctor",).stdout, "guard hooks installed")
         self.assertTrue(warn.startswith("  ! "), warn)
         self.assertIn("missing target", warn)
         self.assertIn("0/4", warn)
@@ -385,7 +386,7 @@ class TargetDrift(unittest.TestCase):
         write_settings(settings_with(lambda n: RELATIVE + n))
         p = run_wave("hooks", "status")
         self.assertEqual(p.stdout.count("active"), 4, p.stdout)
-        ok = line(run_wave("doctor").stdout, "guard hooks installed")
+        ok = line(run_wave("doctor",).stdout, "guard hooks installed")
         self.assertTrue(ok.startswith("  ✓ "), ok)
         self.assertIn("4/4", ok)
 
@@ -426,7 +427,7 @@ class Untrusted(unittest.TestCase):
     def test_status_and_doctor_never_run_a_path_read_from_settings(self):
         write_settings(settings_with(lambda n: f"python3 {self.sentinel} {n}"))
         status = run_wave("hooks", "status")
-        doctor = run_wave("doctor")
+        doctor = run_wave("doctor",)
         self.assertFalse(self.mark.exists(), "the sentinel ran: a diagnostic executed repo-supplied code")
         self.assertEqual(status.stdout.count("untrusted"), 4, status.stdout)
         self.assertNotIn("active", status.stdout)
@@ -438,9 +439,32 @@ class Untrusted(unittest.TestCase):
         PROJECT_GUARDS.parent.mkdir(exist_ok=True)
         PROJECT_GUARDS.write_text(self.sentinel.read_text())
         write_settings(settings_with(lambda n: RELATIVE + n))
-        for args in (("hooks", "status"), ("doctor"), ("hooks", "install", "--check"), ("hooks", "install", "--dry-run")):
-            run_wave(*args)
+        out = {args: run_wave(*args) for args in (("hooks", "status"), ("doctor",), ("hooks", "install", "--check"), ("hooks", "install", "--dry-run"))}
         self.assertFalse(self.mark.exists(), "the sentinel ran")
+        self.assertEqual(out[("hooks", "status")].stdout.count("untrusted"), 4, out[("hooks", "status")].stdout)
+        self.assertNotIn("active", out[("hooks", "status")].stdout)
+        self.assertIn("untrusted", line(out[("doctor",)].stdout, "guard hooks installed"))
+        self.assertEqual(out[("hooks", "install", "--check")].returncode, 1)
+
+    @unittest.skipIf(os.name != "posix" or os.geteuid() == 0, "chmod 000 does not block reads here")
+    def test_a_guards_py_that_cannot_be_read_is_untrusted_not_a_crash(self):
+        PROJECT_GUARDS.parent.mkdir(exist_ok=True)
+        PROJECT_GUARDS.write_text(GUARDS.read_text())
+        PROJECT_GUARDS.chmod(0)
+        self.addCleanup(PROJECT_GUARDS.chmod, 0o644)
+        write_settings(settings_with(lambda n: RELATIVE + n))
+        for args in (("hooks", "status"), ("doctor",), ("hooks", "install", "--check")):
+            p = run_wave(*args)
+            self.assertNotIn("Traceback", p.stderr, p.stderr)
+            self.assertIn("untrusted", p.stdout, args)
+
+    def test_check_names_a_settings_file_it_cannot_parse_and_fails(self):
+        SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+        SETTINGS.write_text("{not json")
+        p = run_wave("hooks", "install", "--check")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("does not parse", p.stdout + p.stderr)
+        self.assertNotIn("Traceback", p.stderr)
 
     def test_a_guards_py_of_the_same_name_and_other_bytes_is_untrusted_not_active(self):
         PROJECT_GUARDS.parent.mkdir(exist_ok=True)
@@ -449,7 +473,7 @@ class Untrusted(unittest.TestCase):
         p = run_wave("hooks", "status")
         self.assertEqual(p.stdout.count("untrusted"), 4, p.stdout)
         self.assertNotIn("active", p.stdout)
-        self.assertIn("untrusted", line(run_wave("doctor").stdout, "guard hooks installed"))
+        self.assertIn("untrusted", line(run_wave("doctor",).stdout, "guard hooks installed"))
 
     def test_install_adds_the_plugins_entry_beside_an_untrusted_one(self):
         PROJECT_GUARDS.parent.mkdir(exist_ok=True)

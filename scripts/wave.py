@@ -3067,9 +3067,12 @@ def entry_verdict(root: Path, path: Path, rel: bool) -> str:
         return "gone"
     if path.resolve() == HOOKS_SCRIPT.resolve():
         return "trusted"
-    if rel and path == root / "hooks" / "guards.py" and HOOKS_SCRIPT.is_file() \
-            and hashlib.sha256(path.read_bytes()).digest() == hashlib.sha256(HOOKS_SCRIPT.read_bytes()).digest():
-        return "trusted"
+    try:
+        if rel and path == root / "hooks" / "guards.py" and HOOKS_SCRIPT.is_file() \
+                and hashlib.sha256(path.read_bytes()).digest() == hashlib.sha256(HOOKS_SCRIPT.read_bytes()).digest():
+            return "trusted"
+    except OSError:
+        pass  # exists but cannot be read: cannot be vouched for
     return "untrusted"
 
 
@@ -3119,6 +3122,8 @@ def cmd_hooks(default: Repo | None, a) -> None:
                 print(f"  {name:<18} {'active' if st == 'active' else f'broken   ping failed: {detail} — check the plugin checkout'}")
         return
     if a.check:
+        if data is None:
+            raise SystemExit(f"hooks --check refused: {path} {why} — fix it by hand")
         entries = guard_entries(data or {}, default.root)
         gone = 0
         for name, _, _ in GUARD_HOOKS:
