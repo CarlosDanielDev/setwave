@@ -289,6 +289,8 @@ gh pr list -R OWNER/REPO --state open --json number,title,headRefName,baseRefNam
 
 A guard is only as good as the test that fails without it: when you add one, remove it once, watch a test fail, restore it, and flip its row in `GUARANTEES` to tested. The version lives in both `.claude-plugin/*.json` (they are `serial`: one PR at a time), and it changes only in a Release PR — one titled starting with `Release`; `verify` refuses the bump anywhere else (`VERSION-OUTSIDE-RELEASE`). Releases are tags `vX.Y.Z` on `main` with notes.
 
+`wave release <version>` is the ritual up to the owner's decision. Run it in a clean checkout (`--dry-run` first: it prints the branch, the manifest diff and the notes draft, and writes nothing). It refuses a dirty tree (`RELEASE-DIRTY-TREE`), a version that is not above the last tag (`RELEASE-VERSION-NOT-NEWER`), a checkout with no versioned `.claude-plugin/*.json` (`RELEASE-WRONG-WORKSPACE`), a malformed version (`RELEASE-BAD-VERSION`) and an existing `release/<version>` (`RELEASE-BRANCH-EXISTS`). Without `--dry-run` it cuts `release/<version>` from `origin/main`, commits the bump of both manifests, pushes, opens the PR `Release <version>: …` whose body has one line per PR merged since the last tag, and stops. Review the notes, merge, then tag (`git tag v<version> <merge commit> && git push origin v<version>`) and `gh release create`: the tag publishes to every user of the plugin, so it is never taken for you.
+
 ## Lessons baked in
 
 - `git merge-tree` predicts textual conflicts, not semantic ones; `order --run-gate` finds a semantic one before the merge, at the cost of one gate run per step, and the base branch's CI after each merge stays the final word.
