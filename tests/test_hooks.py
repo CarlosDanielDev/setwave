@@ -405,6 +405,61 @@ class TargetDrift(unittest.TestCase):
         self.assertIn("$CLAUDE_PROJECT_DIR/hooks/guards.py", line(p.stdout, "attribution"))
 
 
+class Untrusted(unittest.TestCase):
+    """The settings file is the repo's: diagnosing it must never run what it names, nor vouch for a lookalike."""
+
+    def setUp(self):
+        sandbox()
+        reset_settings()
+        self.mark = TMP / "sentinel-ran-76"
+        self.mark.unlink(missing_ok=True)
+        self.sentinel = TMP / "sentinel-76" / "guards.py"
+        self.sentinel.parent.mkdir(exist_ok=True)
+        self.sentinel.write_text(f"import pathlib\npathlib.Path({str(self.mark)!r}).write_text('ran')\n")
+        self.addCleanup(self.remove_project_guards)
+
+    def remove_project_guards(self):
+        if PROJECT_GUARDS.exists():
+            PROJECT_GUARDS.unlink()
+            PROJECT_GUARDS.parent.rmdir()
+
+    def test_status_and_doctor_never_run_a_path_read_from_settings(self):
+        write_settings(settings_with(lambda n: f"python3 {self.sentinel} {n}"))
+        status = run_wave("hooks", "status")
+        doctor = run_wave("doctor")
+        self.assertFalse(self.mark.exists(), "the sentinel ran: a diagnostic executed repo-supplied code")
+        self.assertEqual(status.stdout.count("untrusted"), 4, status.stdout)
+        self.assertNotIn("active", status.stdout)
+        warn = line(doctor.stdout, "guard hooks installed")
+        self.assertTrue(warn.startswith("  ! "), warn)
+        self.assertIn("untrusted", warn)
+
+    def test_nor_the_project_relative_form_nor_check(self):
+        PROJECT_GUARDS.parent.mkdir(exist_ok=True)
+        PROJECT_GUARDS.write_text(self.sentinel.read_text())
+        write_settings(settings_with(lambda n: RELATIVE + n))
+        for args in (("hooks", "status"), ("doctor"), ("hooks", "install", "--check"), ("hooks", "install", "--dry-run")):
+            run_wave(*args)
+        self.assertFalse(self.mark.exists(), "the sentinel ran")
+
+    def test_a_guards_py_of_the_same_name_and_other_bytes_is_untrusted_not_active(self):
+        PROJECT_GUARDS.parent.mkdir(exist_ok=True)
+        PROJECT_GUARDS.write_text(GUARDS.read_text() + "\n# not the plugin's\n")
+        write_settings(settings_with(lambda n: RELATIVE + n))
+        p = run_wave("hooks", "status")
+        self.assertEqual(p.stdout.count("untrusted"), 4, p.stdout)
+        self.assertNotIn("active", p.stdout)
+        self.assertIn("untrusted", line(run_wave("doctor").stdout, "guard hooks installed"))
+
+    def test_install_adds_the_plugins_entry_beside_an_untrusted_one(self):
+        PROJECT_GUARDS.parent.mkdir(exist_ok=True)
+        PROJECT_GUARDS.write_text(GUARDS.read_text() + "\n# not the plugin's\n")
+        write_settings(settings_with(lambda n: RELATIVE + n))
+        self.assertEqual(run_wave("hooks", "install").returncode, 0)
+        self.assertEqual(len(guard_commands(json.loads(SETTINGS.read_text()))), 4, "the plugin's own, one per guard")
+        self.assertEqual(run_wave("hooks", "status").stdout.count("active"), 4)
+
+
 class GuaranteesTable(unittest.TestCase):
     def test_each_guard_has_a_tested_row(self):
         p = run_wave("guarantees")
