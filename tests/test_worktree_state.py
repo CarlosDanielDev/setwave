@@ -12,6 +12,7 @@ import json
 import os
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest import mock
 
 from helpers import TMP, gh_calls, git, run_wave, sandbox, wave
@@ -159,20 +160,44 @@ class UnpushedBeatsThePr(Case):
 
 
 class Truncated(Case):
-    def test_a_list_that_fills_the_limit_is_unknown_and_nothing_is_removed(self):
-        path = self.wt(4, "feat/4-nopr", "four.txt", push=True)  # no PR listed: stale for --stale-days 0
-        out, here = io.StringIO(), os.getcwd()
+    """A list that fills the limit may hide a PR: the worktrees it does not name are asked for one by one."""
+
+    def cleanup_with_a_cut_list(self, fail_head=False):
+        real, out, here = wave.Repo.gh_ok, io.StringIO(), os.getcwd()
+        fixture = json.loads((Path(__file__).parent / "fixtures" / "pr_list_all_o_ws.json").read_text())
+
+        def gh_ok(repo, args):
+            if args[:2] == ["pr", "list"] and "--head" not in args:
+                return True, json.dumps(fixture[:2])  # the page: PR 52 (feat/3-ahead) is beyond it
+            if args[:2] == ["pr", "list"] and fail_head:
+                return False, "HTTP 502"
+            return real(repo, args)
+
         wave.Repo._cache.pop("o/ws", None)
         os.chdir(self.root)
-        try:  # the fixture has as many PRs as the patched limit: gh may have cut the list short
-            with mock.patch.object(wave, "PR_LIST_LIMIT", 3), contextlib.redirect_stdout(out):
+        try:
+            with mock.patch.object(wave, "PR_LIST_LIMIT", 2), mock.patch.object(wave.Repo, "gh_ok", gh_ok), \
+                    contextlib.redirect_stdout(out):
                 wave.main(["cleanup", "--stale-days", "0", "--yes"])
         finally:
             os.chdir(here)
             wave.Repo._cache.pop("o/ws", None)
-        self.assertIn("KEEP ws-4: PR state unknown", out.getvalue())
-        self.assertNotIn("removed ws-", out.getvalue())
-        self.assertTrue(path.exists())
+        return out.getvalue()
+
+    def test_a_pr_beyond_the_page_is_asked_for_by_its_branch(self):
+        merged = self.wt(3, "feat/3-ahead", "three.txt", push=True)  # PR 52 merged, not on the page
+        nopr = self.wt(4, "feat/4-nopr", "four.txt", push=True)  # no PR at all: the per-branch answer is []
+        out = self.cleanup_with_a_cut_list()
+        self.assertIn("removed ws-3: PR #52 merged", out)
+        self.assertIn("removed ws-4: stale", out)
+        self.assertFalse(merged.exists() or nopr.exists())
+
+    def test_a_failed_per_branch_lookup_is_unknown_and_nothing_is_removed(self):
+        merged = self.wt(3, "feat/3-ahead", "three.txt", push=True)
+        out = self.cleanup_with_a_cut_list(fail_head=True)
+        self.assertIn("KEEP ws-3: PR state unknown", out)
+        self.assertNotIn("removed ws-", out)
+        self.assertTrue(merged.exists())
 
 
 class GhFailure(Case):

@@ -282,6 +282,8 @@ class Repo:
         self.handoffs = self.root.parent / f"{self.root.name}-handoffs"
         self._prs: list[dict] | None = None
         self._pr_states: dict[str, dict] | None | bool = False  # False: not asked yet; None: gh failed
+        self._pr_full = False  # the list filled PR_LIST_LIMIT: a branch it does not name is asked for alone
+        self._pr_heads: dict[str, dict | None] = {}
 
     def _load_cfg(self) -> None:
         """`.wave.json` as origin/<base> has it, the tree every worktree is cut from: the main checkout is
@@ -503,12 +505,30 @@ class Repo:
                 prs = json.loads(out) if ok else None
             except ValueError:
                 prs = None
-            if prs is not None and len(prs) >= PR_LIST_LIMIT:
-                prs = None  # a full page may have been cut short: a missing PR would read as "no PR", so say unknown
+            self._pr_full = prs is not None and len(prs) >= PR_LIST_LIMIT  # maybe cut short: see pr_of
             self._pr_states = None if prs is None else {}
             for pr in prs or []:
                 self._pr_states.setdefault(pr["headRefName"], pr)  # newest first
         return self._pr_states
+
+    def pr_of(self, branch: str) -> tuple[bool, dict | None]:
+        """(known, the newest PR with this head, or None for no PR). Unknown when gh failed. A list that filled the
+        limit may be missing the branch's PR, so a branch it does not name is asked for alone (`--head`, cached)."""
+        prs = self.pr_states()
+        if prs is None:
+            return False, None
+        if branch in prs or not self._pr_full:
+            return True, prs.get(branch)
+        if branch not in self._pr_heads:
+            ok, out = self.gh_ok(["pr", "list", "-R", self.slug, "--state", "all", "--head", branch,
+                                  "--limit", "200", "--json", "number,state,headRefName"])
+            try:
+                found = json.loads(out) if ok else None
+            except ValueError:
+                found = None
+            self._pr_heads[branch] = None if found is None else (found[0] if found else {})
+        got = self._pr_heads[branch]
+        return got is not None, got or None
 
     def pr_checks(self, n: int) -> dict[str, str]:
         """name -> bucket: pass | fail | pending | skipping | cancel (gh's own normalisation)."""
@@ -1453,12 +1473,11 @@ def worktree_state(repo: Repo, wt: Path, branch: str, n: int, now: float | None 
     dispatched = _epoch(stamp.get("dispatched_at"))
     idle = round((now - last_activity(repo, wt, dispatched)) / 60)
     ok, remote = repo.git_ok(["rev-parse", "--verify", "--quiet", f"origin/{branch}"])
-    prs = repo.pr_states()
-    pr = (prs or {}).get(branch)
+    known, pr = repo.pr_of(branch)
     f = {"issue": n, "worktree": str(wt), "branch": branch, "stamp": stamp, "stamped": bool(stamp),
          "dirty": bool(repo.git(["status", "--porcelain"], cwd=wt).strip()),
          "unpushed": ok and remote.strip() != repo.git(["rev-parse", "HEAD"], cwd=wt).strip(),
-         "pr_state": "unknown" if prs is None else (pr or {}).get("state"), "pr": (pr or {}).get("number"),
+         "pr_state": (pr or {}).get("state") if known else "unknown", "pr": (pr or {}).get("number"),
          "commits": int(repo.git_ok(["rev-list", "--count", f"origin/{repo.base}..HEAD"], cwd=wt)[1] or 0),
          "idle_min": idle, "age_min": round((now - dispatched) / 60) if dispatched else None,
          "progress": {"likely dead": "dead"}.get(verdict(idle, False), verdict(idle, False))}
@@ -2509,7 +2528,7 @@ def cmd_cleanup(default: Repo | None, a):
             elif state == "unpushed":
                 print(f"KEEP {wt.name}: unpushed (origin/{branch} is behind)")
             elif state == "unknown":
-                print(f"KEEP {wt.name}: PR state unknown (gh failed or its list was cut short): nothing is removed on a guess")
+                print(f"KEEP {wt.name}: PR state unknown (gh failed): nothing is removed on a guess")
             elif state == "merged":
                 remove(f"PR #{num} merged")
             elif state == "closed":
