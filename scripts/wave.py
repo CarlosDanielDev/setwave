@@ -208,6 +208,12 @@ def clone_repo(reg: dict, slug: str) -> Path:
     return dest
 
 
+def not_cloned(reg: dict, slug: str) -> str:
+    dest = Path(reg["search_paths"][0]).expanduser() / slug.split("/")[-1] if reg.get("search_paths") else f"<dir>/{slug.split('/')[-1]}"
+    return (f"{slug}: not cloned — a command that only reads does not clone it; "
+            f"`gh repo clone {slug} {dest}` then `wave.py repos add {dest} --slug {slug}`, or run `next`, `dispatch`, `prepare` or `prompt`")
+
+
 # ---------------------------------------------------------------- repo
 
 class Repo:
@@ -215,7 +221,9 @@ class Repo:
     _tokens: dict[str, str] = {}
 
     @classmethod
-    def get(cls, slug: str) -> "Repo":
+    def get(cls, slug: str, read: bool = False) -> "Repo":
+        """The repo for a slug. `read=True` is for commands that only look: a repo with no checkout is
+        `not cloned` (an error naming the commands that fix it), and nothing is cloned or registered."""
         if slug not in cls._cache:
             reg = load_registry()
             entry = reg["repos"].get(slug, {})
@@ -226,10 +234,13 @@ class Repo:
                     if len(found) > 1:
                         print(f"{slug}: {len(found)} checkouts — using {found[0]}, also at "
                               f"{', '.join(map(str, found[1:]))}; the registry keeps this one")
+                elif read:
+                    raise SystemExit(not_cloned(reg, slug))
                 else:
                     entry["path"] = str(clone_repo(reg, slug))
-                reg["repos"][slug] = entry
-                save_registry(reg)
+                if not read:
+                    reg["repos"][slug] = entry
+                    save_registry(reg)
             cls._cache[slug] = cls(slug, entry)
         return cls._cache[slug]
 
@@ -942,12 +953,12 @@ def cmd_init(default: Repo | None, a):
 
 # ---------------------------------------------------------------- refs & tree
 
-def parse_ref(text: str, default: Repo | None) -> tuple[Repo, int]:
+def parse_ref(text: str, default: Repo | None, read: bool = False) -> tuple[Repo, int]:
     m = REF.match(text.strip())
     if not m:
         raise SystemExit(f"bad ref {text!r}: use owner/name#N or N")
     if m.group("slug"):
-        return Repo.get(m.group("slug")), int(m.group("n"))
+        return Repo.get(m.group("slug"), read), int(m.group("n"))
     if default is None:
         raise SystemExit(f"ref {text!r} needs a repo: run inside one or use owner/name#N")
     return default, int(m.group("n"))
@@ -977,7 +988,7 @@ def merged_pr_for_issue(repo: Repo, n: int) -> dict | None:
     return None
 
 
-def tree(epic_repo: Repo, root: int) -> dict[str, dict]:
+def tree(epic_repo: Repo, root: int, read: bool = False) -> dict[str, dict]:
     """Every issue under the epic, keyed by 'slug#n', across repositories. One API round per level, in parallel."""
     nodes: dict[str, dict] = {}
     level: list[tuple[Repo, int, str | None]] = [(epic_repo, root, None)]
@@ -992,7 +1003,7 @@ def tree(epic_repo: Repo, root: int) -> dict[str, dict]:
                 node = {"key": k, "repo": r.slug, "number": n, "issue": iss, "children": [], "parent": parent}
                 nodes[k] = node
                 for child in children:
-                    crepo = Repo.get(slug_of_api(child["repository_url"]))
+                    crepo = Repo.get(slug_of_api(child["repository_url"]), read)
                     node["children"].append(key(crepo, child["number"]))
                     nxt.append((crepo, child["number"], k))
             level = nxt
@@ -1561,7 +1572,7 @@ def epics_of(repo: Repo) -> list[dict]:
 def epic_stats(repo: Repo, iss: dict) -> dict:
     """One `wave epics` row: the epic's leaves and where they stand (the `candidates` states, summed),
     and the date of the newest `wave status --post` comment — the paper trail left on the epic."""
-    nodes = tree(repo, iss["number"])
+    nodes = tree(repo, iss["number"], read=True)
     cands = candidates(nodes)
     lvs = leaves(nodes)
     comments = repo.api(f"repos/{repo.slug}/issues/{iss['number']}/comments?per_page=100", paginate=True) or []
@@ -1578,7 +1589,7 @@ def cmd_epics(default: Repo | None, a):
     if a.slug and getattr(a, "repo", None):
         raise SystemExit("give --slug or --repo, not both")
     if a.slug:
-        found = [epic_stats(Repo.get(a.slug), iss) for iss in epics_of(Repo.get(a.slug))]
+        found = [epic_stats(Repo.get(a.slug, True), iss) for iss in epics_of(Repo.get(a.slug, True))]
     elif getattr(a, "repo", None):
         r = Repo.from_cwd(a.repo)
         found = [epic_stats(r, iss) for iss in epics_of(r)]
@@ -1586,10 +1597,13 @@ def cmd_epics(default: Repo | None, a):
         found = []
         for slug in sorted(load_registry()["repos"]):
             try:  # one stale checkout or unreadable repo must not blind the whole overview: name it, move on
-                r = Repo.get(slug)
+                r = Repo.get(slug, True)
                 found += [epic_stats(r, iss) for iss in epics_of(r)]
             except SystemExit as e:
-                print(f"skip {slug}: {str(e).strip().splitlines()[-1] if str(e).strip() else e}", file=sys.stderr)
+                why = str(e).strip().splitlines()[-1] if str(e).strip() else str(e)
+                if why.startswith(f"{slug}: not cloned"):  # the message already names the slug; any other error keeps its own text
+                    why = why.removeprefix(f"{slug}: ")
+                print(f"skip {slug}: {why}", file=sys.stderr)
     found.sort(key=lambda s: (-s["ready"], s["repo"], s["number"]))
     if a.json:
         print(json.dumps(found, indent=2))
@@ -2579,13 +2593,13 @@ def cmd_sweep(default: Repo | None, a):
 
 
 def cmd_status(default: Repo | None, a):
-    repo, epic = parse_ref(a.epic, default)
-    nodes = tree(repo, epic)
+    repo, epic = parse_ref(a.epic, default, read=True)
+    nodes = tree(repo, epic, read=True)
     cands = {c["key"]: c for c in candidates(nodes)}
     repos = sorted({nd["repo"] for nd in nodes.values()})
     lines = [f"## wave status — epic {key(repo, epic)} — {now_iso()}", ""]
     for s in repos:
-        r = Repo.get(s)
+        r = Repo.get(s, True)
         r.fetch()
         lines.append(f"- `{s}` base `{r.base}` = `{r.origin_sha()}`" + (f", account `{r.account}`" if r.account else ""))
     lines.append("")
@@ -2814,7 +2828,7 @@ def cmd_amend(default: Repo | None, a):
 
 def cmd_why(default: Repo | None, a):
     for ref in a.refs:
-        repo, n = parse_ref(ref, default)
+        repo, n = parse_ref(ref, default, read=True)
         iss = repo.issue(n)
         prem = premises_for(repo, n)
         print(f"{key(repo, n)} — {iss['title']}")
@@ -3159,6 +3173,7 @@ GUARANTEES = [
     ("doctor reports the retry ceiling, and with --epic the state sweep, both soft", "cmd_doctor -> sweep_retries, sweep_epic", "! no agent past the retry ceiling (3 no-progress dispatches ...) / ! state sweep of <epic>", True),
     ("a command run inside a worktree never re-points the registry: it names the main checkout", "Repo.from_cwd (--git-common-dir)", "repos.json path stays the main checkout; a worktree or missing path is repaired to it", True),
     ("a ref to a repo with no checkout is size-checked, cloned into the first search path, registered, and the command continues", "Repo.get -> clone_repo", "the size on GitHub, then 'cloned owner/name into …'; repos.json gains the path", True),
+    ("a command that only reads (epics, status, why, stats, guarantees) never clones, registers or repairs the registry: a repo with no checkout is 'not cloned', with the commands that fix it", "Repo.get(read=True) <- cmd_epics, cmd_status, cmd_why; stats and guarantees resolve no repo (tests/test_read_never_clones.py)", "'owner/name: not cloned — gh repo clone …'; no clone, no new checkout, repos.json byte-identical; next, dispatch, prepare and prompt still clone", True),
     ("a clone is never shallow: worktrees, merge-tree and --merged need history", "clone_repo (no --depth, is-shallow-repository refused)", "a shallow result exits with 'need history' and registers nothing", True),
     ("cloning asks above clone_ask_over_mb (registry, default 500 MB): the command is printed instead", "clone_repo's diskUsage gate", "'over the 500 MB … gh repo clone owner/name …', nothing cloned or registered", True),
     ("scan and Repo.get agree on the checkout: the registry wins, a second checkout is reported, a dead path is repaired", "find_checkouts + cmd_repos scan", "'another checkout at … — the registry keeps …'", True),
