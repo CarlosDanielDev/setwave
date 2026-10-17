@@ -495,20 +495,18 @@ class GuaranteesTable(unittest.TestCase):
 
 
 class Dogfood(unittest.TestCase):
-    """The committed .claude/settings.json lists the four guards of GUARD_HOOKS (names, matchers, order), each as `python3 <path>/hooks/guards.py <name>`; only the path tail is checked."""
+    """The committed .claude/settings.json lists the four guards of GUARD_HOOKS (names, matchers, order), each exactly as `python3 "$CLAUDE_PROJECT_DIR/hooks/guards.py" <name>`: project-relative, never an absolute path."""
 
     def test_the_committed_settings_carry_the_four_guards(self):
         committed = TESTS.parent / ".claude" / "settings.json"
-        self.assertTrue(committed.exists(), "run `wave hooks install` in this repo and commit .claude/settings.json")
+        self.assertTrue(committed.exists(), "commit .claude/settings.json with the four guards")
         found = []
         for block in json.loads(committed.read_text())["hooks"]["PreToolUse"]:
             for h in block["hooks"]:
-                parts = h["command"].split()
-                self.assertEqual(len(parts), 3, f"expected `python3 <path>/hooks/guards.py <name>`, got {h['command']!r}")
-                interpreter, script, name = parts
-                # deliberate: only the tail of the path is pinned. The prefix is the owner's plugin checkout
-                # (machine-specific, see README "Developing"; #76 owns the drift), so it cannot be asserted here.
-                self.assertEqual((interpreter, Path(script).parts[-2:]), ("python3", ("hooks", "guards.py")), h)
+                prefix = 'python3 "$CLAUDE_PROJECT_DIR/hooks/guards.py" '
+                self.assertTrue(h["command"].startswith(prefix), f"expected {prefix}<name>, got {h['command']!r}")
+                name = h["command"][len(prefix):]
+                self.assertNotIn(" ", name, h)
                 found.append((name, block["matcher"]))
         self.assertEqual(found, [(name, matcher) for name, matcher, _ in wave.GUARD_HOOKS])
 
