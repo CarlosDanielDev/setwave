@@ -2862,9 +2862,10 @@ def cmd_release(default: Repo | None, a):
     repo, v = default, a.version.lstrip("v")
     if not SEMVER.fullmatch(v):
         release_refuse("RELEASE-BAD-VERSION", f"`{a.version}` is not X.Y.Z")
-    manifests = [p for p in sorted(repo.root.glob(".claude-plugin/*.json")) if VERSION_LINE.search(p.read_text())]
+    # the manifests this repo declares `serial` (its own release-owned files): a repo that does not declare them is another repo's workspace
+    manifests = [repo.root / f for f in repo.cfg.get("serial", []) if fnmatch(f, ".claude-plugin/*.json") and (repo.root / f).is_file()]
     if not manifests:
-        release_refuse("RELEASE-WRONG-WORKSPACE", f"{repo.slug} at {repo.root} has no .claude-plugin/*.json with a version line: not a plugin workspace")
+        release_refuse("RELEASE-WRONG-WORKSPACE", f"{repo.slug} at {repo.root} declares no .claude-plugin/*.json in .wave.json `serial`: not this plugin's workspace")
     dirty = repo.git(["status", "--porcelain"]).strip()
     if dirty:
         release_refuse("RELEASE-DIRTY-TREE", f"{repo.root} has uncommitted changes; commit or move them first:\n{dirty}")
@@ -2875,11 +2876,13 @@ def cmd_release(default: Repo | None, a):
         release_refuse("RELEASE-VERSION-NOT-NEWER", f"{v} is not greater than the last tag {last}")
     branch = f"release/{v}"
     if repo.git_ok(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"])[0] or repo.git(["ls-remote", "--heads", "origin", branch]).strip():
-        release_refuse("RELEASE-BRANCH-EXISTS", f"{branch} already exists, locally or on origin; the owner decides what happens to it")
+        release_refuse("RELEASE-BRANCH-EXISTS", f"{branch} already exists, locally or on origin (a half-finished run keeps it: see RELEASE-INCOMPLETE); the owner decides what happens to it")
     changes = []
     for p in manifests:
         rel = p.relative_to(repo.root).as_posix()
-        old = repo.git(["show", f"origin/{repo.base}:{rel}"])
+        ok, old = repo.git_ok(["show", f"origin/{repo.base}:{rel}"])
+        if not ok:
+            release_refuse("RELEASE-WRONG-WORKSPACE", f"{rel} is not on origin/{repo.base}: {old.strip()}")
         new, n = MANIFEST_VERSION.subn(rf"\g<1>{v}\g<2>", old)
         if n != 1:
             release_refuse("RELEASE-WRONG-WORKSPACE", f"{rel} has {n} version fields; expected exactly one")
@@ -2893,13 +2896,23 @@ def cmd_release(default: Repo | None, a):
             sys.stdout.writelines(difflib.unified_diff(old.splitlines(True), new.splitlines(True), f"a/{rel}", f"b/{rel}"))
         print(f"\nNotes draft:\n{body}\nNothing written.")
         return
+    start = repo.git(["rev-parse", "--abbrev-ref", "HEAD"]).strip()
+    if start == "HEAD":  # detached: come back to the commit
+        start = repo.git(["rev-parse", "HEAD"]).strip()
     repo.git(["switch", "-c", branch, f"origin/{repo.base}"])
-    for rel, _, new in changes:
-        (repo.root / rel).write_text(new)
-    repo.git(["add", *[c[0] for c in changes]])
-    repo.git(["commit", "-m", f"Release {v}"])
-    repo.git(["push", "-u", "origin", branch])
-    url = repo.gh(["pr", "create", "-R", repo.slug, "--base", repo.base, "--head", branch, "--title", title, "--body", body]).strip()
+    try:
+        for rel, _, new in changes:
+            (repo.root / rel).write_text(new)
+        repo.git(["add", *[c[0] for c in changes]])
+        repo.git(["commit", "-m", f"Release {v}"])
+        repo.git(["push", "-u", "origin", branch])
+        url = repo.gh(["pr", "create", "-R", repo.slug, "--base", repo.base, "--head", branch, "--title", title, "--body", body]).strip()
+    except SystemExit as e:
+        # the branch is kept (the tool never deletes one): the next run says RELEASE-BRANCH-EXISTS, this says how to finish by hand
+        release_refuse("RELEASE-INCOMPLETE", f"{e}\n{branch} holds the bump and is kept; finish with `git push -u origin {branch}` then "
+                       f"`gh pr create -R {repo.slug} --base {repo.base} --head {branch} --title '{title}'`, or drop the branch yourself and re-run")
+    finally:
+        repo.git(["switch", start])  # the owner's checkout goes back where it was, success or not
     print(f"{url}\n\nStopped here. Yours: review the notes, merge, then\n  git tag v{v} <merge commit> && git push origin v{v}\n  gh release create v{v} --notes-file <notes>")
 
 

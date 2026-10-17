@@ -11,17 +11,18 @@ import unittest
 
 from helpers import TMP, WAVE, git
 
-REL, BARE = TMP / "rel", TMP / "bare"
+REL, BARE, OTHER = TMP / "rel", TMP / "bare", TMP / "other"
+WAVE_JSON = {".wave.json": json.dumps({"base": "main", "serial": [".claude-plugin/plugin.json", ".claude-plugin/marketplace.json"]})}
 MANIFEST = '{\n  "name": "o",\n  "version": "0.7.1"\n}\n'
 MARKET = '{\n  "plugins": [\n    {\n      "name": "o",\n      "version": "0.7.1"\n    }\n  ]\n}\n'
 
 
 def mkrepo(slug: str, clone, files: dict[str, str]):
+    files = {".wave.json": json.dumps({"base": "main"}), **files}
     bare = TMP / "remote" / f"{slug}.git"
     bare.parent.mkdir(parents=True, exist_ok=True)
     git("init", "-q", "--bare", str(bare), cwd=TMP)
     git("clone", "-q", str(bare), str(clone), cwd=TMP)
-    files[".wave.json"] = json.dumps({"base": "main"})
     for name, text in files.items():
         (clone / name).parent.mkdir(exist_ok=True)
         (clone / name).write_text(text)
@@ -33,7 +34,7 @@ def mkrepo(slug: str, clone, files: dict[str, str]):
 def setUpModule():
     (TMP / "config").mkdir(exist_ok=True)
     (TMP / "config" / "repos.json").write_text(json.dumps({"search_paths": [str(TMP)], "repos": {}}))
-    mkrepo("o/rel", REL, {".claude-plugin/plugin.json": MANIFEST, ".claude-plugin/marketplace.json": MARKET})
+    mkrepo("o/rel", REL, {**WAVE_JSON, ".claude-plugin/plugin.json": MANIFEST, ".claude-plugin/marketplace.json": MARKET})
     git("tag", "v0.7.1", cwd=REL)
     git("push", "-q", "origin", "v0.7.1", cwd=REL)
     git("checkout", "-q", "-b", "feat/9-x", cwd=REL)
@@ -47,6 +48,8 @@ def setUpModule():
     git("commit", "-q", "-m", "Fix y (#10)", cwd=REL)
     git("push", "-q", "origin", "main", cwd=REL)
     mkrepo("o/bare", BARE, {"README.md": "no plugin here\n"})
+    # a versioned manifest that its repo does not declare `serial`: someone else's plugin
+    mkrepo("o/other", OTHER, {".claude-plugin/plugin.json": MANIFEST})
 
 
 def release(*args, cwd=REL, create=False):
@@ -73,6 +76,7 @@ class Release(unittest.TestCase):
             self.assertIn(f"+++ b/.claude-plugin/{f}", p.stdout)
         self.assertEqual(p.stdout.count('-  "version": "0.7.1"') + p.stdout.count('-      "version": "0.7.1"'), 2, p.stdout)
         self.assertIn('+  "version": "0.8.1"', p.stdout)
+        self.assertIn('+      "version": "0.8.1"', p.stdout, "marketplace.json too")
         self.assertIn("- Add the x thing (#9)", p.stdout)
         self.assertIn("- Fix y (#10)", p.stdout)
         self.assertEqual(head(), "main", "dry-run creates no branch")
@@ -80,12 +84,13 @@ class Release(unittest.TestCase):
         self.assertEqual([c for c in calls if c[:2] == ["pr", "create"]], [], "dry-run opens no PR")
 
     def test_real_run_branches_commits_pushes_opens_the_pr_and_stops(self):
-        self.addCleanup(git, "switch", "-q", "main", cwd=REL)
         p, calls = release("0.8.2", create=True)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        self.assertEqual(head(), "release/0.8.2")
-        self.assertIn('"version": "0.8.2"', (REL / ".claude-plugin" / "plugin.json").read_text())
-        subject = subprocess.run(["git", "log", "-1", "--format=%B"], cwd=REL, capture_output=True, text=True).stdout
+        self.assertEqual(head(), "main", "the checkout is back on the branch it started on")
+        self.assertIn('0.7.1', (REL / ".claude-plugin" / "plugin.json").read_text())
+        bumped = subprocess.run(["git", "show", "release/0.8.2:.claude-plugin/plugin.json"], cwd=REL, capture_output=True, text=True).stdout
+        self.assertIn('"version": "0.8.2"', bumped)
+        subject = subprocess.run(["git", "log", "-1", "--format=%B", "release/0.8.2"], cwd=REL, capture_output=True, text=True).stdout
         self.assertEqual(subject.strip(), "Release 0.8.2")
         remote = subprocess.run(["git", "ls-remote", "--heads", "origin", "release/0.8.2"], cwd=REL, capture_output=True, text=True).stdout
         self.assertTrue(remote.strip(), "the branch is pushed")
@@ -97,6 +102,15 @@ class Release(unittest.TestCase):
         self.assertEqual(tags.strip(), "", "no tag is created")
         self.assertIn("git tag v0.8.2", p.stdout, "the owner's remaining steps are printed")
         self.assertIn("/pull/99", p.stdout)
+
+    def test_a_failed_pr_keeps_the_branch_names_the_recovery_and_restores_the_checkout(self):
+        p, calls = release("0.8.3")  # the fake gh refuses `pr create` without FAKE_GH_PR_CREATE
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("RELEASE-INCOMPLETE:", p.stderr)
+        self.assertIn("gh pr create -R o/rel --base main --head release/0.8.3", p.stderr)
+        self.assertEqual(head(), "main", "the checkout is restored after a failure too")
+        again, _ = release("0.8.3", create=True)
+        self.assertIn("RELEASE-BRANCH-EXISTS:", again.stderr)
 
     def refused(self, code, *args, cwd=REL):
         p, calls = release(*args, cwd=cwd, create=True)
@@ -116,6 +130,9 @@ class Release(unittest.TestCase):
 
     def test_a_checkout_without_plugin_manifests_is_refused(self):
         self.refused("RELEASE-WRONG-WORKSPACE", "0.9.0", cwd=BARE)
+
+    def test_a_versioned_manifest_the_repo_does_not_declare_serial_is_refused(self):
+        self.refused("RELEASE-WRONG-WORKSPACE", "0.9.0", cwd=OTHER)
 
     def test_a_malformed_version_is_refused(self):
         self.refused("RELEASE-BAD-VERSION", "0.9")
