@@ -2897,22 +2897,36 @@ def cmd_release(default: Repo | None, a):
         print(f"\nNotes draft:\n{body}\nNothing written.")
         return
     start = repo.git(["rev-parse", "--abbrev-ref", "HEAD"]).strip()
-    if start == "HEAD":  # detached: come back to the commit
-        start = repo.git(["rev-parse", "HEAD"]).strip()
+    back = ["switch", start]
+    if start == "HEAD":  # detached: come back to the commit, which `switch` takes only with --detach
+        back = ["switch", "--detach", repo.git(["rev-parse", "HEAD"]).strip()]
     repo.git(["switch", "-c", branch, f"origin/{repo.base}"])
+    committed, err = False, None
     try:
         for rel, _, new in changes:
             (repo.root / rel).write_text(new)
         repo.git(["add", *[c[0] for c in changes]])
         repo.git(["commit", "-m", f"Release {v}"])
+        committed = True
         repo.git(["push", "-u", "origin", branch])
         url = repo.gh(["pr", "create", "-R", repo.slug, "--base", repo.base, "--head", branch, "--title", title, "--body", body]).strip()
     except SystemExit as e:
+        err = e
+    if not committed:  # take back our own writes (the tree was clean at the start) so nothing dirty rides back to the owner's branch
+        repo.git_ok(["restore", "--staged", "--", *[c[0] for c in changes]])
+        for rel, old, _ in changes:
+            (repo.root / rel).write_text(old)
+    back_ok, back_out = repo.git_ok(back)
+    note = "" if back_ok else (f"\nRELEASE-RESTORE-FAILED: could not return to where you started ({back_out.strip()}); "
+                               f"you are on {branch}: `git {' '.join(back)}`")
+    if err:
         # the branch is kept (the tool never deletes one): the next run says RELEASE-BRANCH-EXISTS, this says how to finish by hand
-        release_refuse("RELEASE-INCOMPLETE", f"{e}\n{branch} holds the bump and is kept; finish with `git push -u origin {branch}` then "
-                       f"`gh pr create -R {repo.slug} --base {repo.base} --head {branch} --title '{title}'`, or drop the branch yourself and re-run")
-    finally:
-        repo.git(["switch", start])  # the owner's checkout goes back where it was, success or not
+        how = (f"{branch} holds the bump and is kept; finish with `git push -u origin {branch}` then "
+               f"`gh pr create -R {repo.slug} --base {repo.base} --head {branch} --title '{title}'`, or drop the branch yourself and re-run" if committed else
+               f"nothing was committed and the manifests are back as they were; {branch} is an empty branch: drop it (`git branch -d {branch}`) and re-run once the commit works")
+        release_refuse("RELEASE-INCOMPLETE", f"{err}\n{how}{note}")
+    if note:
+        print(note.strip(), file=sys.stderr)
     print(f"{url}\n\nStopped here. Yours: review the notes, merge, then\n  git tag v{v} <merge commit> && git push origin v{v}\n  gh release create v{v} --notes-file <notes>")
 
 

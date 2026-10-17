@@ -112,6 +112,30 @@ class Release(unittest.TestCase):
         again, _ = release("0.8.3", create=True)
         self.assertIn("RELEASE-BRANCH-EXISTS:", again.stderr)
 
+    def test_a_detached_head_is_restored_to_the_same_commit_and_the_pr_url_still_prints(self):
+        sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REL, capture_output=True, text=True).stdout.strip()
+        git("checkout", "-q", "--detach", cwd=REL)
+        self.addCleanup(git, "switch", "-q", "main", cwd=REL)
+        p, _ = release("0.8.4", create=True)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("/pull/99", p.stdout)
+        self.assertEqual(subprocess.run(["git", "rev-parse", "HEAD"], cwd=REL, capture_output=True, text=True).stdout.strip(), sha)
+        self.assertEqual(head(), "HEAD", "still detached, not on release/0.8.4")
+
+    def test_a_failed_commit_leaves_a_clean_checkout_on_its_branch_and_says_nothing_was_committed(self):
+        hook = REL / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+        self.addCleanup(hook.unlink)
+        p, calls = release("0.8.5", create=True)
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("RELEASE-INCOMPLETE:", p.stderr)
+        self.assertIn("nothing was committed", p.stderr)
+        self.assertEqual(head(), "main")
+        status = subprocess.run(["git", "status", "--porcelain"], cwd=REL, capture_output=True, text=True).stdout
+        self.assertEqual(status, "", "the bump written for the commit is taken back, not left on the owner's tree")
+        self.assertEqual([c for c in calls if c[:2] == ["pr", "create"]], [])
+
     def refused(self, code, *args, cwd=REL):
         p, calls = release(*args, cwd=cwd, create=True)
         self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
