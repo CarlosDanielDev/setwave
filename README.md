@@ -319,7 +319,7 @@ skills/wave/SKILL.md            the orchestrator procedure Claude follows
 skills/define/SKILL.md          the authoring procedure: the refinement session that ends only at Ready
 skills/architecture-designer/   vendored MIT skill (Jeffallan) with its references/; provenance in skills/THIRD_PARTY.md
 improve-codebase-architecture/  the architecture review: deepening candidates as a visual report, then a grilling loop
-scripts/wave.py                 the deterministic steps (stdlib only)
+scripts/wave.py                 the deterministic steps (stdlib only); one file by design, no section past 1100 lines (docs/decisions/008)
 scripts/e2e.py                  one end-to-end run against a sandbox repository
 scripts/fake_agent.py           the agent the e2e run plays: change, commit, push, PR; keeps both sides of a conflict
 hooks/guards.py                 the PreToolUse guard hooks: attribution, forbidden git, secret reads, dispatch contract (fail open)
