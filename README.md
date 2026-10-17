@@ -192,8 +192,15 @@ The prompt tells an agent what never to do; a hook is what still holds when the 
 ```bash
 wave hooks install            # write the four guards into <repo>/.claude/settings.json — backs the file up, idempotent
 wave hooks install --dry-run  # print the diff, write nothing
-wave hooks status             # active | missing | broken, per guard; also one line in `wave doctor`
+wave hooks status             # active | missing | missing target | broken, per guard; also one line in `wave doctor`
+wave hooks install --check    # each guard's target path and whether the file exists; exit 1 when one is gone
 ```
+
+**Where the hook points.** `hooks install` writes the path of the `guards.py` that the running `wave.py` sits next to — for a marketplace install that is the versioned plugin cache (`~/.claude/plugins/cache/setwave/setwave/<version>/hooks/guards.py`). A plugin update replaces that directory, and the entry in your settings then points at a file that no longer exists. The guard does not run, and nothing else says so; `hooks status` and `doctor` now do (`missing target`, with the recorded path). **After updating the plugin, run `wave hooks install` again**: it replaces the dead entries with the current path and leaves everything else in the file alone. The plugin does not copy `guards.py` anywhere stable: a copy would be a second guard that drifts from the plugin's.
+
+A settings file that is committed cannot carry your absolute cache path — in another clone the script is not there. In a repo that vendors `hooks/guards.py` (this one does), commit the project-relative form instead, `python3 "$CLAUDE_PROJECT_DIR/hooks/guards.py" <guard>`: `status` and `doctor` read it as active only when it resolves, against the project root, to the project's own `hooks/guards.py` **and** that file is byte-identical (sha256) to the plugin's; `hooks install` then leaves it alone instead of adding the absolute entry beside it. Anything else that exists is `untrusted` (a lookalike, or the plugin's guard under another path), and a missing file is `missing target`.
+
+The settings file belongs to the repo, and `status`/`doctor` run outside Claude Code, so they never execute a path read from it: only the plugin's own `guards.py` is pinged; every other target gets a file check and a verdict. `$CLAUDE_PROJECT_DIR` is read as the project root, never from the environment.
 
 | guard | denies |
 | --- | --- |

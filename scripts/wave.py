@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -3027,17 +3028,23 @@ def cmd_doctor(default: Repo | None, a) -> None:
                            or ", ".join(h["path"] for h in hooks), False))
         checks.append(("protected paths declared", bool(r.protected), ", ".join(r.protected) or "none: verify cannot guard anything — `repos add . --protected <paths>`", False))
         hdata, hwhy = load_settings(r.root / ".claude" / "settings.json")
-        hhave = installed_guards(hdata) if hdata is not None else set()
-        hbroken = sorted(n for n in hhave if ping_guard(guard_command(n)))
-        hmissing = sorted(n for n, _, _ in GUARD_HOOKS if n not in hhave)
-        hsum = f"{len(hhave)}/{len(GUARD_HOOKS)} active"
+        hstate = guard_health(guard_entries(hdata, r.root) if hdata is not None else {}, r.root)
+        hbroken = sorted(n for n, (st, _) in hstate.items() if st == "broken")
+        hgone = sorted(n for n, (st, _) in hstate.items() if st == "missing target")
+        hmissing = sorted(n for n, (st, _) in hstate.items() if st == "missing")
+        hunsafe = sorted(n for n, (st, _) in hstate.items() if st == "untrusted")
+        hsum = f"{sum(st == 'active' for st, _ in hstate.values())}/{len(GUARD_HOOKS)} active"
         if hwhy:
             hsum += f", settings.json {hwhy}"
         if hmissing:
             hsum += f", missing: {', '.join(hmissing)} — `wave hooks install`"
+        if hgone:
+            hsum += f", missing target: {'; '.join(f'{n} -> {hstate[n][1]}' for n in hgone)} — the plugin moved, `wave hooks install`"
+        if hunsafe:
+            hsum += f", untrusted (not the plugin's guards.py, not run): {'; '.join(f'{n} -> {hstate[n][1]}' for n in hunsafe)} — `wave hooks install`"
         if hbroken:
             hsum += f", broken: {', '.join(hbroken)}"
-        checks.append(("guard hooks installed", not (hwhy or hmissing or hbroken), hsum, False))
+        checks.append(("guard hooks installed", not (hwhy or hmissing or hgone or hunsafe or hbroken), hsum, False))
         merged = {l.strip().replace("origin/", "") for l in r.git(["branch", "-r", "--merged", f"origin/{r.base}"]).splitlines()}
         alive, dead, stale, exhausted = [], [], [], []
         for wt, branch, n in issue_worktrees(r):
@@ -3138,16 +3145,62 @@ def load_settings(path: Path) -> tuple[dict | None, str | None]:
     return (data, None) if isinstance(data, dict) else (None, "is not a JSON object")
 
 
-def installed_guards(data: dict) -> set[str]:
-    """Names of the plugin's guards already present in the settings, whatever else lives in there."""
+def guard_entries(data: dict, root: Path) -> dict[str, list[tuple[str, str, Path, bool]]]:
+    """Per guard, the settings entries that run it: (command, path as written, path resolved, project-relative).
+    Reading is all this does: the file is the repo's, so nothing it names is run, and no env var is expanded —
+    `$CLAUDE_PROJECT_DIR` is read as the project root, whatever the environment says."""
+    found: dict[str, list[tuple[str, str, Path, bool]]] = {}
     blocks = data.get("hooks") or {}
     if not isinstance(blocks, dict):
-        return set()
-    commands = set()
+        return found
     for b in blocks.get("PreToolUse") or []:
-        if isinstance(b, dict):
-            commands.update(h.get("command") for h in b.get("hooks") or [] if isinstance(h, dict))
-    return {name for name, _, _ in GUARD_HOOKS if guard_command(name) in commands}
+        for h in (b.get("hooks") or []) if isinstance(b, dict) else []:
+            try:
+                parts = shlex.split(h.get("command") or "") if isinstance(h, dict) else []
+            except ValueError:
+                continue
+            if len(parts) != 3 or parts[0] != "python3" or parts[2] not in {n for n, _, _ in GUARD_HOOKS} or Path(parts[1]).name != "guards.py":
+                continue
+            written = parts[1]
+            rel = "CLAUDE_PROJECT_DIR" in written
+            path = Path(written.replace("${CLAUDE_PROJECT_DIR}", str(root)).replace("$CLAUDE_PROJECT_DIR", str(root))) if rel else Path(written)
+            found.setdefault(parts[2], []).append((h["command"], written, path, rel))
+    return found
+
+
+def entry_verdict(root: Path, path: Path, rel: bool) -> str:
+    """gone | trusted | untrusted. Trusted is the plugin's own HOOKS_SCRIPT, or the project's hooks/guards.py with
+    the very same bytes; any other file that exists is only ever reported."""
+    if not path.is_file():
+        return "gone"
+    if path.resolve() == HOOKS_SCRIPT.resolve():
+        return "trusted"
+    try:
+        if rel and path == root / "hooks" / "guards.py" and HOOKS_SCRIPT.is_file() \
+                and hashlib.sha256(path.read_bytes()).digest() == hashlib.sha256(HOOKS_SCRIPT.read_bytes()).digest():
+            return "trusted"
+    except OSError:
+        pass  # exists but cannot be read: cannot be vouched for
+    return "untrusted"
+
+
+def guard_health(entries: dict[str, list[tuple[str, str, Path, bool]]], root: Path) -> dict[str, tuple[str, str]]:
+    """name -> (state, detail): active | broken (the plugin's guards.py fails its ping) | untrusted (a guards.py we do not vouch
+    for, never run) | missing target (every recorded path is gone) | missing. Only HOOKS_SCRIPT is ever executed."""
+    out = {}
+    for name, _, _ in GUARD_HOOKS:
+        es = entries.get(name, [])
+        verdicts = [entry_verdict(root, e[2], e[3]) for e in es]
+        if "trusted" in verdicts:
+            broken = ping_guard(f"python3 {shlex.quote(str(HOOKS_SCRIPT))} {name}")
+            out[name] = ("broken", broken) if broken else ("active", "")
+        elif "untrusted" in verdicts:
+            out[name] = ("untrusted", ", ".join(e[1] for e, v in zip(es, verdicts) if v == "untrusted"))
+        elif es:
+            out[name] = ("missing target", ", ".join(e[1] for e in es))
+        else:
+            out[name] = ("missing", "")
+    return out
 
 
 def ping_guard(command: str) -> str | None:
@@ -3164,20 +3217,43 @@ def cmd_hooks(default: Repo | None, a) -> None:
     data, why = load_settings(path)
     if a.action == "status":
         print(f"guard hooks of {default.slug} — {path}" + (f" ({why})" if why else ""))
-        have = installed_guards(data) if data is not None else set()
+        state = guard_health(guard_entries(data, default.root) if data is not None else {}, default.root)
         for name, matcher, what in GUARD_HOOKS:
-            if name not in have:
+            st, detail = state[name]
+            if st == "missing":
                 print(f"  {name:<18} missing  ({what}) — `wave hooks install`")
-                continue
-            broken = ping_guard(guard_command(name))
-            print(f"  {name:<18} {'active' if not broken else f'broken   ping failed: {broken} — check the plugin checkout'}")
+            elif st == "untrusted":
+                print(f"  {name:<18} untrusted  {detail} — not the plugin's guards.py (or not byte-identical), never run here; `wave hooks install` adds the plugin's")
+            elif st == "missing target":
+                print(f"  {name:<18} missing target  {detail} — the plugin moved or updated; `wave hooks install` points it at the current one")
+            else:
+                print(f"  {name:<18} {'active' if st == 'active' else f'broken   ping failed: {detail} — check the plugin checkout'}")
         return
+    if a.check:
+        if data is None:
+            raise SystemExit(f"hooks --check refused: {path} {why} — fix it by hand")
+        entries = guard_entries(data or {}, default.root)
+        gone = 0
+        for name, _, _ in GUARD_HOOKS:
+            for _, written, path, rel in entries.get(name) or [(None, f"{HOOKS_SCRIPT}", HOOKS_SCRIPT, False)]:
+                v = entry_verdict(default.root, path, rel)
+                gone += v != "trusted"
+                tag = "" if name in entries else "not installed, `wave hooks install` would write "
+                print(f"  {name:<18} {tag}{written}  {'MISSING' if v == 'gone' else 'exists' if v == 'trusted' else 'exists, untrusted'}")
+        sys.exit(1 if gone else 0)
     if data is None:
         raise SystemExit(f"hooks refused: {path} {why} — fix it by hand; install never overwrites a file it cannot read")
     if not isinstance(data.get("hooks", {}), dict) or not isinstance(data.get("hooks", {}).get("PreToolUse", []), list):
         raise SystemExit(f"hooks refused: {path} has a `hooks` value install cannot extend safely — fix it by hand")
-    have = installed_guards(data)
-    todo = [(name, matcher) for name, matcher, _ in GUARD_HOOKS if name not in have]
+    entries = guard_entries(data, default.root)
+    todo = [(name, matcher) for name, matcher, _ in GUARD_HOOKS
+            if not any(entry_verdict(default.root, e[2], e[3]) == "trusted" for e in entries.get(name, []))]
+    dead = {e[0] for name, _ in todo for e in entries.get(name, []) if not e[2].is_file()}  # a re-install replaces the paths a plugin update orphaned
+    for b in data.get("hooks", {}).get("PreToolUse", []):
+        if isinstance(b, dict) and isinstance(b.get("hooks"), list) and any(isinstance(h, dict) and h.get("command") in dead for h in b["hooks"]):
+            b["hooks"] = [h for h in b["hooks"] if not (isinstance(h, dict) and h.get("command") in dead)]
+    if dead:
+        data["hooks"]["PreToolUse"] = [b for b in data["hooks"]["PreToolUse"] if not (isinstance(b, dict) and b.get("hooks") == [])]
     if not todo:
         print(f"already installed: {len(GUARD_HOOKS)}/{len(GUARD_HOOKS)} guard hooks present in {path}")
         return
@@ -3304,6 +3380,7 @@ GUARANTEES = [
     ("no AI attribution in a commit or PR-body command (fail open: a broken guard exits 0)", "hooks/guards.py attribution <- settings PreToolUse[Bash]", "exit 2: attribution-guard: this command carries AI attribution (...) — drop the trailer", True),
     ("no forbidden git command through Bash — gc --prune, reflog expire, stash, reset --hard, clean -f, push --force, branch -D, rm -rf — each refusal naming the safe alternative (fail open: a broken guard exits 0)", "hooks/guards.py forbidden-git <- settings PreToolUse[Bash]", "exit 2: forbidden-git-guard: `git stash` is refused: commit the work to a branch instead", True),
     ("no secret file's contents are printed — the registry's repos.json, .env, credentials, auth.json; ls, stat and grep -c stay open (fail open: a broken guard exits 0)", "hooks/guards.py secret-read <- settings PreToolUse[Bash]", "exit 2: secret-read-guard: use `ls -la`, `stat` or `grep -c` instead", True),
+    ("a guard hook whose recorded guards.py is gone is named, never read as installed: status says `missing target` with the path, doctor warns, install replaces the dead entry; status/doctor run only the plugin's own guards.py, never a path read from settings; `$CLAUDE_PROJECT_DIR/hooks/guards.py` is active only when byte-identical to it, else `untrusted`", "guard_entries / guard_health <- cmd_hooks, cmd_doctor", "! guard hooks installed: 0/4 active, missing target: attribution -> /…/0.7.0/hooks/guards.py — the plugin moved, `wave hooks install`", True),
     ("no Agent dispatch whose prompt lacks the contract sections — where, task, gate, delivery, Done when; a fork is exempt (fail open: a broken guard exits 0)", "hooks/guards.py dispatch-contract <- settings PreToolUse[Task]", "exit 2: dispatch-contract-guard: it lacks the dispatch contract: the gate to run, ...", True),
     # the skill-lint (scripts/validate_skills.py): a skill whose frontmatter is broken silently stops being offered to the tooling
     ("no skill whose frontmatter is broken — name kebab matching its directory, a description of at least 40 chars, no dead template link", "ci.yml skill-lint <- validate_skills.py", "CI red: skills/<dir>/SKILL.md: name `X` differs from its directory ...", True),
@@ -3617,8 +3694,9 @@ def main(argv=None):
     x = s.add_parser("plan", help="create an epic's issues from <dir>/index.tsv + deps.tsv + <key>.md, wiring sub-issues and blocked_by"); x.add_argument("dir"); x.add_argument("--slug"); x.add_argument("--milestone"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--force", action="store_true")
     x = s.add_parser("adopt", help="turn an existing milestone or label (or explicit refs) into an epic: attaches sub-issues, wires textual dependencies as blocked_by, comments what is missing"); x.add_argument("issues", nargs="*"); x.add_argument("--milestone"); x.add_argument("--label"); x.add_argument("--epic", help="an existing issue to designate as the epic; without it one is created titled after the milestone/label, with the `epic` label"); x.add_argument("--slug"); x.add_argument("--dry-run", action="store_true", help="print what would be wired and what could not be read; write nothing")
 
-    x = s.add_parser("hooks", help="guard hooks: install [--dry-run] writes them into the project's .claude/settings.json (idempotent, backed up); status: active | missing | broken")
+    x = s.add_parser("hooks", help="guard hooks: install [--dry-run] writes them into the project's .claude/settings.json (idempotent, backed up); status: active | missing | missing target | untrusted | broken; install --check: each guard's target and whether it exists")
     x.add_argument("action", choices=["install", "status"]); x.add_argument("--dry-run", action="store_true")
+    x.add_argument("--check", action="store_true", help="with install: list each guard's target and whether it exists, write nothing; exit 1 when one is missing")
     x = s.add_parser("stats", help="what the log says: runs, durations, failures per command")
     x = s.add_parser("guarantees", help="every promise the plugin makes, where it is enforced, whether a test pins it"); x.add_argument("--json", action="store_true")
 
