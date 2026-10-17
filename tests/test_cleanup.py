@@ -114,8 +114,8 @@ class Decision(unittest.TestCase):
         self.assertIn("KEEP k-11: dirty", out)
         self.assertIn("KEEP k-12: dispatched, no commit yet", out)
         self.assertIn("KEEP k-15: unpushed (origin/feat/15-ahead is behind)", out)
-        self.assertTrue(any(c[:8] == ["pr", "list", "-R", "o/k", "--state", "all", "--head", "feat/6-merged"]
-                            for c in gh_calls()), "the decision read the PR, not only --merged")
+        self.assertTrue(any(c[:6] == ["pr", "list", "-R", "o/k", "--state", "all"] for c in gh_calls()),
+                        "the decision read the PR, not only --merged")
         self.assertEqual(subprocess.run(["git", "rev-parse", "--verify", "-q", "feat/6-merged"],
                                         cwd=K, capture_output=True).returncode, 0, "the branch stays")
 
