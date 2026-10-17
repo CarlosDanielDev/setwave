@@ -3111,12 +3111,12 @@ def cmd_doctor(default: Repo | None, a) -> None:
             lv = {**rec, "verdict": agent_verdict(rec)}
             if rec["state"] in ("merged", "empty"):
                 stale.append((wt.name, du_kb(wt)))  # merged, or never dispatched, pushed, committed or edited: leftovers, `wave cleanup`
-            elif no_progress(rec["stamp"]) >= RETRY_CEILING:
-                exhausted.append((wt, n))      # past the retry ceiling: dispatch refuses it, the sweep escalates
             elif lv["verdict"] == "unknown":   # gh failed: neither alive nor dead is known
                 unknown.append(wt.name)
             elif rec["pr_state"] == "MERGED":  # dirt or an unpushed head behind a merged PR: not an agent, not for dispatch
                 unsaved.append(f"{wt.name} (PR #{rec['pr']} merged, {rec['state']})")
+            elif no_progress(rec["stamp"]) >= RETRY_CEILING:
+                exhausted.append((wt, n))      # past the retry ceiling: dispatch refuses it, the sweep escalates
             elif lv["verdict"] != "done":      # unmerged work with no open PR: an agent at work, or one that died
                 (dead if lv["verdict"] == "likely dead" else alive).append((wt.name, n, lv))
         checks.append(("agents at work (unmerged worktree, no PR yet)", True,
