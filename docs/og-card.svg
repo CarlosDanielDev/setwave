@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <rect width="1200" height="630" fill="#0a1220"/>
+  <rect x="0" y="330" width="1200" height="300" fill="#0f1a2c"/>
+  <path d="M0 470 Q 150 400 300 470 T 600 470 T 900 470 T 1200 470 V630 H0 Z" fill="#16233a"/>
+  <path d="M0 520 Q 150 450 300 520 T 600 520 T 900 520 T 1200 520" fill="none" stroke="#45d6b8" stroke-width="10" stroke-linecap="round" opacity=".55"/>
+  <path d="M0 470 Q 150 400 300 470 T 600 470 T 900 470 T 1200 470" fill="none" stroke="#45d6b8" stroke-width="14" stroke-linecap="round"/>
+  <text x="80" y="140" font-family="Courier" font-size="30" letter-spacing="7" fill="#45d6b8">SETWAVE</text>
+  <text x="80" y="235" font-family="Helvetica" font-size="84" font-weight="700" fill="#eaf4f2">One prompt.</text>
+  <text x="80" y="325" font-family="Helvetica" font-size="84" font-weight="700" fill="#eaf4f2">A whole epic <tspan fill="#45d6b8">merged</tspan>.</text>
+  <rect x="80" y="548" width="660" height="52" rx="10" fill="#0a1220" stroke="#22344e" stroke-width="2"/>
+  <text x="104" y="583" font-family="Courier" font-size="26" fill="#e8c88f"><tspan fill="#45d6b8">&gt;</tspan> /setwave:wave 34</text>
+</svg>

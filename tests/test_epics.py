@@ -60,7 +60,8 @@ class RegistryWide(unittest.TestCase):
     def test_a_repo_whose_issue_list_fails_is_skipped_loudly_too(self):
         p = run_wave("epics", cwd=TMP / "one")
         self.assertEqual(p.returncode, 0, p.stdout)
-        self.assertIn("skip y/broken", p.stderr)
+        self.assertIn("skip y/broken: fake gh: no fixture", p.stderr, "any error other than not-cloned keeps its own text")
+        self.assertNotIn("not cloned", next(l for l in p.stderr.splitlines() if l.startswith("skip y/broken")))
         self.assertIn("a/one#1", p.stdout, "the other repos are still listed")
 
 

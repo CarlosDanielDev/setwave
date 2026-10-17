@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -81,7 +82,9 @@ RETRY_CEILING = 3
 # more parallel agents than this once hit the API rate limit and left a half-extracted crate in the shared cargo cache
 MAX_BATCH = 6
 # the agent skills a handoff names when the repo declares and detects none (`phases.agent_skills` in .wave.json wins)
-DEFAULT_SKILLS = ["caveman (ultra)", "ponytail", "superpowers:test-driven-development"]
+# (the plugin ships the `setwave:*` ones; the rest are host-only and the prompt says to use them only if present)
+DEFAULT_SKILLS = ["setwave:caveman (ultra)", "setwave:ponytail", "setwave:architecture-designer",
+                  "graphify", "team-agent-orchestration", "superpowers:test-driven-development", "poka-yoke"]
 # a registry package in Cargo.lock: name, version, then a registry or sparse-index source (git and path packages are not cached there)
 LOCK_PACKAGE = re.compile(r'\[\[package\]\]\s*\nname = "([^"]+)"\s*\nversion = "([^"]+)"\s*\nsource = "(?:registry|sparse)\+')
 # `order --run-gate` checks each simulated step out into a detached worktree named so; `doctor` reports any it finds
@@ -206,6 +209,12 @@ def clone_repo(reg: dict, slug: str) -> Path:
     return dest
 
 
+def not_cloned(reg: dict, slug: str) -> str:
+    dest = Path(reg["search_paths"][0]).expanduser() / slug.split("/")[-1] if reg.get("search_paths") else f"<dir>/{slug.split('/')[-1]}"
+    return (f"{slug}: not cloned — a command that only reads does not clone it; "
+            f"`gh repo clone {slug} {dest}` then `wave.py repos add {dest} --slug {slug}`, or run `next`, `dispatch`, `prepare` or `prompt`")
+
+
 # ---------------------------------------------------------------- repo
 
 class Repo:
@@ -213,7 +222,9 @@ class Repo:
     _tokens: dict[str, str] = {}
 
     @classmethod
-    def get(cls, slug: str) -> "Repo":
+    def get(cls, slug: str, read: bool = False) -> "Repo":
+        """The repo for a slug. `read=True` is for commands that only look: a repo with no checkout is
+        `not cloned` (an error naming the commands that fix it), and nothing is cloned or registered."""
         if slug not in cls._cache:
             reg = load_registry()
             entry = reg["repos"].get(slug, {})
@@ -224,10 +235,13 @@ class Repo:
                     if len(found) > 1:
                         print(f"{slug}: {len(found)} checkouts — using {found[0]}, also at "
                               f"{', '.join(map(str, found[1:]))}; the registry keeps this one")
+                elif read:
+                    raise SystemExit(not_cloned(reg, slug))
                 else:
                     entry["path"] = str(clone_repo(reg, slug))
-                reg["repos"][slug] = entry
-                save_registry(reg)
+                if not read:
+                    reg["repos"][slug] = entry
+                    save_registry(reg)
             cls._cache[slug] = cls(slug, entry)
         return cls._cache[slug]
 
@@ -699,6 +713,16 @@ def profile_skills(p: dict) -> list[str]:
     return skills
 
 
+def agent_skills(repo: "Repo") -> list[str]:
+    """The one list of skills a handoff and the prompt's section 0 both name: the repo's own, else the default stack."""
+    return profile_skills(repo.profile()) or DEFAULT_SKILLS
+
+
+def skill_list(skills: list[str]) -> str:
+    """Skills as the Skill tool names them, backticked; a trailing "(level)" stays outside the name."""
+    return ", ".join(re.sub(r"^(\S+)( \(.*\))?$", r"`\1`\2", s) for s in skills)
+
+
 def profile_prompt(p: dict) -> str:
     """The `{{PROFILE}}` block of the agent prompt: what the repo itself provides for each phase of the
     loop, named so the agent expects it — or the plain default stack when nothing is found. Rule files
@@ -709,7 +733,7 @@ def profile_prompt(p: dict) -> str:
         return ("Nenhuma orquestração própria detectada neste repositório (nada em `.claude/`, nenhum "
                 "CLAUDE.md/AGENTS.md/CONTRIBUTING.md): use a stack padrão acima como está.")
     lines = ["Este repositório tem orquestração própria:",
-             ("- skills dele, nesta ordem, antes da stack padrão: " + ", ".join(f"`{s}`" for s in skills))
+             ("- skills dele, nesta ordem (são as que o §0 lista no lugar da stack padrão): " + ", ".join(f"`{s}`" for s in skills))
              if skills else "- nenhuma skill própria: a stack padrão acima vale."]
     if p["hooks"]:
         lines.append("- hooks que se impõem (o Claude Code os roda; espere tropeçar neles): "
@@ -930,12 +954,12 @@ def cmd_init(default: Repo | None, a):
 
 # ---------------------------------------------------------------- refs & tree
 
-def parse_ref(text: str, default: Repo | None) -> tuple[Repo, int]:
+def parse_ref(text: str, default: Repo | None, read: bool = False) -> tuple[Repo, int]:
     m = REF.match(text.strip())
     if not m:
         raise SystemExit(f"bad ref {text!r}: use owner/name#N or N")
     if m.group("slug"):
-        return Repo.get(m.group("slug")), int(m.group("n"))
+        return Repo.get(m.group("slug"), read), int(m.group("n"))
     if default is None:
         raise SystemExit(f"ref {text!r} needs a repo: run inside one or use owner/name#N")
     return default, int(m.group("n"))
@@ -965,7 +989,7 @@ def merged_pr_for_issue(repo: Repo, n: int) -> dict | None:
     return None
 
 
-def tree(epic_repo: Repo, root: int) -> dict[str, dict]:
+def tree(epic_repo: Repo, root: int, read: bool = False) -> dict[str, dict]:
     """Every issue under the epic, keyed by 'slug#n', across repositories. One API round per level, in parallel."""
     nodes: dict[str, dict] = {}
     level: list[tuple[Repo, int, str | None]] = [(epic_repo, root, None)]
@@ -980,7 +1004,7 @@ def tree(epic_repo: Repo, root: int) -> dict[str, dict]:
                 node = {"key": k, "repo": r.slug, "number": n, "issue": iss, "children": [], "parent": parent}
                 nodes[k] = node
                 for child in children:
-                    crepo = Repo.get(slug_of_api(child["repository_url"]))
+                    crepo = Repo.get(slug_of_api(child["repository_url"]), read)
                     node["children"].append(key(crepo, child["number"]))
                     nxt.append((crepo, child["number"], k))
             level = nxt
@@ -1360,11 +1384,12 @@ def next_resume_counts(repo: Repo, wt: Path, stamp: dict, respawn: bool) -> tupl
             stamp.get("respawns", 0) + (1 if respawn else 0))
 
 
-def liveness(repo: Repo, n: int, wt: Path | None = None) -> dict:
-    """What an issue's worktree says about its agent. Nothing but files and git is read: no process is looked at."""
+def liveness(repo: Repo, n: int, wt: Path | None = None, now: float | None = None) -> dict:
+    """What an issue's worktree says about its agent. Nothing but files and git is read: no process is looked at.
+    `now` is the epoch the ages are measured against, the wall clock unless a test pins it."""
     wt = wt or repo.worktree(n)
     stamp = stamp_of(wt)
-    now = time.time()
+    now = time.time() if now is None else now
     dispatched = _epoch(stamp.get("dispatched_at"))
     idle = (now - last_activity(repo, wt, dispatched)) / 60
     pr = pr_for_issue(repo, n)
@@ -1449,6 +1474,7 @@ def render_prompt(repo: Repo, iss: dict, branch: str, sha: str, parallel: int) -
                                 else "sem `codegraph` no host: comece por Grep/Read — nada aqui depende dele"),
         "ACCOUNT": f"conta gh `{repo.account}` (use `GH_TOKEN=$(gh auth token --user {repo.account})` nos comandos gh)" if repo.account else "conta gh ativa",
         "PROFILE": profile_prompt(repo.profile()),
+        "SKILLS": skill_list(agent_skills(repo)),
         "PREPARED": prepared_note(iss.get("body") or ""),
         "PARALLEL": str(max(parallel - 1, 0)),
     }
@@ -1548,7 +1574,7 @@ def epics_of(repo: Repo) -> list[dict]:
 def epic_stats(repo: Repo, iss: dict) -> dict:
     """One `wave epics` row: the epic's leaves and where they stand (the `candidates` states, summed),
     and the date of the newest `wave status --post` comment — the paper trail left on the epic."""
-    nodes = tree(repo, iss["number"])
+    nodes = tree(repo, iss["number"], read=True)
     cands = candidates(nodes)
     lvs = leaves(nodes)
     comments = repo.api(f"repos/{repo.slug}/issues/{iss['number']}/comments?per_page=100", paginate=True) or []
@@ -1565,7 +1591,7 @@ def cmd_epics(default: Repo | None, a):
     if a.slug and getattr(a, "repo", None):
         raise SystemExit("give --slug or --repo, not both")
     if a.slug:
-        found = [epic_stats(Repo.get(a.slug), iss) for iss in epics_of(Repo.get(a.slug))]
+        found = [epic_stats(Repo.get(a.slug, True), iss) for iss in epics_of(Repo.get(a.slug, True))]
     elif getattr(a, "repo", None):
         r = Repo.from_cwd(a.repo)
         found = [epic_stats(r, iss) for iss in epics_of(r)]
@@ -1573,10 +1599,13 @@ def cmd_epics(default: Repo | None, a):
         found = []
         for slug in sorted(load_registry()["repos"]):
             try:  # one stale checkout or unreadable repo must not blind the whole overview: name it, move on
-                r = Repo.get(slug)
+                r = Repo.get(slug, True)
                 found += [epic_stats(r, iss) for iss in epics_of(r)]
             except SystemExit as e:
-                print(f"skip {slug}: {str(e).strip().splitlines()[-1] if str(e).strip() else e}", file=sys.stderr)
+                why = str(e).strip().splitlines()[-1] if str(e).strip() else str(e)
+                if why.startswith(f"{slug}: not cloned"):  # the message already names the slug; any other error keeps its own text
+                    why = why.removeprefix(f"{slug}: ")
+                print(f"skip {slug}: {why}", file=sys.stderr)
     found.sort(key=lambda s: (-s["ready"], s["repo"], s["number"]))
     if a.json:
         print(json.dumps(found, indent=2))
@@ -2566,13 +2595,13 @@ def cmd_sweep(default: Repo | None, a):
 
 
 def cmd_status(default: Repo | None, a):
-    repo, epic = parse_ref(a.epic, default)
-    nodes = tree(repo, epic)
+    repo, epic = parse_ref(a.epic, default, read=True)
+    nodes = tree(repo, epic, read=True)
     cands = {c["key"]: c for c in candidates(nodes)}
     repos = sorted({nd["repo"] for nd in nodes.values()})
     lines = [f"## wave status — epic {key(repo, epic)} — {now_iso()}", ""]
     for s in repos:
-        r = Repo.get(s)
+        r = Repo.get(s, True)
         r.fetch()
         lines.append(f"- `{s}` base `{r.base}` = `{r.origin_sha()}`" + (f", account `{r.account}`" if r.account else ""))
     lines.append("")
@@ -2670,7 +2699,7 @@ def handoff_block(repo: Repo, iss: dict) -> str:
     gate, skills (`.wave.json`'s `phases.agent_skills`, else the default stack), the non-negotiables and
     `Closes #N`. The judgement — the Done when, the file:line, the ADR — is never written here."""
     n = iss["number"]
-    gate, skills = repo.gate(), profile_skills(repo.profile()) or DEFAULT_SKILLS
+    gate, skills = repo.gate(), agent_skills(repo)
     return "\n".join([
         "## Handoff",
         PREPARE_MARK, "",
@@ -2680,7 +2709,7 @@ def handoff_block(repo: Repo, iss: dict) -> str:
         "```", "",
         f"Base `origin/{repo.base}` at `{repo.origin_sha()}`. Gate:",
         "", "```bash", *gate, "```", "",
-        "Skills: " + ", ".join(f"`{s}`" for s in skills), "",
+        "Skills: " + skill_list(skills), "",
         "Non-negotiables: no AI attribution in commits or PRs; never `git gc --prune`, `git reflog expire`, "
         "`git stash`, `git reset --hard`, `git clean -f`, `git push --force*`, `git branch -D`, `rm -rf`; "
         "never merge — the owner merges; never touch the main checkout or a sibling worktree; "
@@ -2797,11 +2826,119 @@ def cmd_amend(default: Repo | None, a):
     print(f"{key(repo, n)}: Done-when written ({len(items)} item(s)); verify can now compare the PR's ledger")
 
 
+# ---------------------------------------------------------------- release
+
+SEMVER = re.compile(r"\d+\.\d+\.\d+")
+MANIFEST_VERSION = re.compile(r'("version"\s*:\s*")[^"]*(")')
+
+
+def semver(v: str) -> tuple[int, ...]:
+    return tuple(int(x) for x in v.lstrip("v").split("."))
+
+
+def release_refuse(code: str, why: str):
+    print(f"{code}: {why}", file=sys.stderr)
+    sys.exit(1)
+
+
+def release_notes(repo: Repo, tag: str | None) -> list[str]:
+    """One line per PR merged into origin/<base> since `tag`: a merge commit's first body line, or a squash subject ending `(#N)`."""
+    span = f"{tag}..origin/{repo.base}" if tag else f"origin/{repo.base}"
+    log = repo.git(["log", "--first-parent", "--format=%s%x1f%b%x1e", span])
+    notes = []
+    for rec in log.split("\x1e"):
+        subject, _, body = rec.strip().partition("\x1f")
+        m = re.match(r"Merge pull request #(\d+)", subject)
+        title = next((l.strip() for l in body.splitlines() if l.strip()), subject) if m else subject
+        sq = re.search(r"\(#(\d+)\)$", subject)
+        if m or sq:
+            notes.append(f"- {title} (#{(m or sq).group(1)})" if m else f"- {title}")
+    return notes
+
+
+def cmd_release(default: Repo | None, a):
+    """Prepare a release and stop: bump both manifests on release/<version>, open the PR with the notes. Merge, tag and the GitHub release stay the owner's."""
+    if default is None:
+        release_refuse("RELEASE-NO-REPO", "not inside a git checkout; run it in the plugin's checkout or pass --repo <path>")
+    repo, v = default, a.version.lstrip("v")
+    if not SEMVER.fullmatch(v):
+        release_refuse("RELEASE-BAD-VERSION", f"`{a.version}` is not X.Y.Z")
+    # the manifests this repo declares `serial` (its own release-owned files): a repo that does not declare them is another repo's workspace
+    manifests = [repo.root / f for f in repo.cfg.get("serial", []) if fnmatch(f, ".claude-plugin/*.json") and (repo.root / f).is_file()]
+    if not manifests:
+        release_refuse("RELEASE-WRONG-WORKSPACE", f"{repo.slug} at {repo.root} declares no .claude-plugin/*.json in .wave.json `serial`: not this plugin's workspace")
+    dirty = repo.git(["status", "--porcelain"]).strip()
+    if dirty:
+        release_refuse("RELEASE-DIRTY-TREE", f"{repo.root} has uncommitted changes; commit or move them first:\n{dirty}")
+    repo.git(["fetch", "origin", "--tags"])
+    tags = [t for t in repo.git(["tag", "--list", "v[0-9]*.[0-9]*.[0-9]*"]).split() if SEMVER.fullmatch(t[1:])]
+    last = max(tags, key=semver, default=None)
+    if last and semver(v) <= semver(last):
+        release_refuse("RELEASE-VERSION-NOT-NEWER", f"{v} is not greater than the last tag {last}")
+    branch = f"release/{v}"
+    if repo.git_ok(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"])[0] or repo.git(["ls-remote", "--heads", "origin", branch]).strip():
+        release_refuse("RELEASE-BRANCH-EXISTS", f"{branch} already exists, locally or on origin (a half-finished run keeps it: see RELEASE-INCOMPLETE); the owner decides what happens to it")
+    changes = []
+    for p in manifests:
+        rel = p.relative_to(repo.root).as_posix()
+        ok, old = repo.git_ok(["show", f"origin/{repo.base}:{rel}"])
+        if not ok:
+            release_refuse("RELEASE-WRONG-WORKSPACE", f"{rel} is not on origin/{repo.base}: {old.strip()}")
+        new, n = MANIFEST_VERSION.subn(rf"\g<1>{v}\g<2>", old)
+        if n != 1:
+            release_refuse("RELEASE-WRONG-WORKSPACE", f"{rel} has {n} version fields; expected exactly one")
+        changes.append((rel, old, new))
+    notes = release_notes(repo, last)
+    title = f"Release {v}: {len(notes)} change(s) since {last or 'the start'}"
+    body = f"Release {v}.\n\n## Notes\n\n" + ("\n".join(notes) or "- (no PRs merged since the last tag)") + "\n"
+    if a.dry_run:
+        print(f"[dry-run] branch: {branch} (from origin/{repo.base}); PR: {title}\n")
+        for rel, old, new in changes:
+            sys.stdout.writelines(difflib.unified_diff(old.splitlines(True), new.splitlines(True), f"a/{rel}", f"b/{rel}"))
+        print(f"\nNotes draft:\n{body}\nNothing written.")
+        return
+    start = repo.git(["rev-parse", "--abbrev-ref", "HEAD"]).strip()
+    back = ["switch", start]
+    if start == "HEAD":  # detached: come back to the commit, which `switch` takes only with --detach
+        back = ["switch", "--detach", repo.git(["rev-parse", "HEAD"]).strip()]
+    repo.git(["switch", "-c", branch, f"origin/{repo.base}"])
+    committed, err = False, None
+    try:
+        for rel, _, new in changes:
+            (repo.root / rel).write_text(new)
+        repo.git(["add", *[c[0] for c in changes]])
+        repo.git(["commit", "-m", f"Release {v}"])
+        committed = True
+        repo.git(["push", "-u", "origin", branch])
+        url = repo.gh(["pr", "create", "-R", repo.slug, "--base", repo.base, "--head", branch, "--title", title, "--body", body]).strip()
+    except (SystemExit, OSError, KeyboardInterrupt) as e:
+        err = e
+    if not committed:  # take back our own writes (the tree was clean at the start) so nothing dirty rides back to the owner's branch
+        repo.git_ok(["restore", "--staged", "--", *[c[0] for c in changes]])
+        for rel, old, _ in changes:
+            try:
+                (repo.root / rel).write_text(old)
+            except OSError:  # a file we could not write is a file we did not change
+                pass
+    back_ok, back_out = repo.git_ok(back)
+    note = "" if back_ok else (f"\nRELEASE-RESTORE-FAILED: could not return to where you started ({back_out.strip()}); "
+                               f"you are on {branch}: `git {' '.join(back)}`")
+    if err:
+        # the branch is kept (the tool never deletes one): the next run says RELEASE-BRANCH-EXISTS, this says how to finish by hand
+        how = (f"{branch} holds the bump and is kept; finish with `git push -u origin {branch}` then "
+               f"`gh pr create -R {repo.slug} --base {repo.base} --head {branch} --title '{title}'`, or drop the branch yourself and re-run" if committed else
+               f"nothing was committed and the manifests are back as they were; {branch} is an empty branch: drop it (`git branch -d {branch}`) and re-run once the commit works")
+        release_refuse("RELEASE-INCOMPLETE", f"{str(err) or type(err).__name__}\n{how}{note}")
+    if note:
+        print(note.strip(), file=sys.stderr)
+    print(f"{url}\n\nStopped here. Yours: review the notes, merge, then\n  git tag v{v} <merge commit> && git push origin v{v}\n  gh release create v{v} --notes-file <notes>")
+
+
 # ---------------------------------------------------------------- why / doctor
 
 def cmd_why(default: Repo | None, a):
     for ref in a.refs:
-        repo, n = parse_ref(ref, default)
+        repo, n = parse_ref(ref, default, read=True)
         iss = repo.issue(n)
         prem = premises_for(repo, n)
         print(f"{key(repo, n)} — {iss['title']}")
@@ -2891,17 +3028,23 @@ def cmd_doctor(default: Repo | None, a) -> None:
                            or ", ".join(h["path"] for h in hooks), False))
         checks.append(("protected paths declared", bool(r.protected), ", ".join(r.protected) or "none: verify cannot guard anything — `repos add . --protected <paths>`", False))
         hdata, hwhy = load_settings(r.root / ".claude" / "settings.json")
-        hhave = installed_guards(hdata) if hdata is not None else set()
-        hbroken = sorted(n for n in hhave if ping_guard(guard_command(n)))
-        hmissing = sorted(n for n, _, _ in GUARD_HOOKS if n not in hhave)
-        hsum = f"{len(hhave)}/{len(GUARD_HOOKS)} active"
+        hstate = guard_health(guard_entries(hdata, r.root) if hdata is not None else {}, r.root)
+        hbroken = sorted(n for n, (st, _) in hstate.items() if st == "broken")
+        hgone = sorted(n for n, (st, _) in hstate.items() if st == "missing target")
+        hmissing = sorted(n for n, (st, _) in hstate.items() if st == "missing")
+        hunsafe = sorted(n for n, (st, _) in hstate.items() if st == "untrusted")
+        hsum = f"{sum(st == 'active' for st, _ in hstate.values())}/{len(GUARD_HOOKS)} active"
         if hwhy:
             hsum += f", settings.json {hwhy}"
         if hmissing:
             hsum += f", missing: {', '.join(hmissing)} — `wave hooks install`"
+        if hgone:
+            hsum += f", missing target: {'; '.join(f'{n} -> {hstate[n][1]}' for n in hgone)} — the plugin moved, `wave hooks install`"
+        if hunsafe:
+            hsum += f", untrusted (not the plugin's guards.py, not run): {'; '.join(f'{n} -> {hstate[n][1]}' for n in hunsafe)} — `wave hooks install`"
         if hbroken:
             hsum += f", broken: {', '.join(hbroken)}"
-        checks.append(("guard hooks installed", not (hwhy or hmissing or hbroken), hsum, False))
+        checks.append(("guard hooks installed", not (hwhy or hmissing or hgone or hunsafe or hbroken), hsum, False))
         merged = {l.strip().replace("origin/", "") for l in r.git(["branch", "-r", "--merged", f"origin/{r.base}"]).splitlines()}
         alive, dead, stale, exhausted = [], [], [], []
         for wt, branch, n in issue_worktrees(r):
@@ -3002,16 +3145,62 @@ def load_settings(path: Path) -> tuple[dict | None, str | None]:
     return (data, None) if isinstance(data, dict) else (None, "is not a JSON object")
 
 
-def installed_guards(data: dict) -> set[str]:
-    """Names of the plugin's guards already present in the settings, whatever else lives in there."""
+def guard_entries(data: dict, root: Path) -> dict[str, list[tuple[str, str, Path, bool]]]:
+    """Per guard, the settings entries that run it: (command, path as written, path resolved, project-relative).
+    Reading is all this does: the file is the repo's, so nothing it names is run, and no env var is expanded —
+    `$CLAUDE_PROJECT_DIR` is read as the project root, whatever the environment says."""
+    found: dict[str, list[tuple[str, str, Path, bool]]] = {}
     blocks = data.get("hooks") or {}
     if not isinstance(blocks, dict):
-        return set()
-    commands = set()
+        return found
     for b in blocks.get("PreToolUse") or []:
-        if isinstance(b, dict):
-            commands.update(h.get("command") for h in b.get("hooks") or [] if isinstance(h, dict))
-    return {name for name, _, _ in GUARD_HOOKS if guard_command(name) in commands}
+        for h in (b.get("hooks") or []) if isinstance(b, dict) else []:
+            try:
+                parts = shlex.split(h.get("command") or "") if isinstance(h, dict) else []
+            except ValueError:
+                continue
+            if len(parts) != 3 or parts[0] != "python3" or parts[2] not in {n for n, _, _ in GUARD_HOOKS} or Path(parts[1]).name != "guards.py":
+                continue
+            written = parts[1]
+            rel = "CLAUDE_PROJECT_DIR" in written
+            path = Path(written.replace("${CLAUDE_PROJECT_DIR}", str(root)).replace("$CLAUDE_PROJECT_DIR", str(root))) if rel else Path(written)
+            found.setdefault(parts[2], []).append((h["command"], written, path, rel))
+    return found
+
+
+def entry_verdict(root: Path, path: Path, rel: bool) -> str:
+    """gone | trusted | untrusted. Trusted is the plugin's own HOOKS_SCRIPT, or the project's hooks/guards.py with
+    the very same bytes; any other file that exists is only ever reported."""
+    if not path.is_file():
+        return "gone"
+    if path.resolve() == HOOKS_SCRIPT.resolve():
+        return "trusted"
+    try:
+        if rel and path == root / "hooks" / "guards.py" and HOOKS_SCRIPT.is_file() \
+                and hashlib.sha256(path.read_bytes()).digest() == hashlib.sha256(HOOKS_SCRIPT.read_bytes()).digest():
+            return "trusted"
+    except OSError:
+        pass  # exists but cannot be read: cannot be vouched for
+    return "untrusted"
+
+
+def guard_health(entries: dict[str, list[tuple[str, str, Path, bool]]], root: Path) -> dict[str, tuple[str, str]]:
+    """name -> (state, detail): active | broken (the plugin's guards.py fails its ping) | untrusted (a guards.py we do not vouch
+    for, never run) | missing target (every recorded path is gone) | missing. Only HOOKS_SCRIPT is ever executed."""
+    out = {}
+    for name, _, _ in GUARD_HOOKS:
+        es = entries.get(name, [])
+        verdicts = [entry_verdict(root, e[2], e[3]) for e in es]
+        if "trusted" in verdicts:
+            broken = ping_guard(f"python3 {shlex.quote(str(HOOKS_SCRIPT))} {name}")
+            out[name] = ("broken", broken) if broken else ("active", "")
+        elif "untrusted" in verdicts:
+            out[name] = ("untrusted", ", ".join(e[1] for e, v in zip(es, verdicts) if v == "untrusted"))
+        elif es:
+            out[name] = ("missing target", ", ".join(e[1] for e in es))
+        else:
+            out[name] = ("missing", "")
+    return out
 
 
 def ping_guard(command: str) -> str | None:
@@ -3028,20 +3217,43 @@ def cmd_hooks(default: Repo | None, a) -> None:
     data, why = load_settings(path)
     if a.action == "status":
         print(f"guard hooks of {default.slug} — {path}" + (f" ({why})" if why else ""))
-        have = installed_guards(data) if data is not None else set()
+        state = guard_health(guard_entries(data, default.root) if data is not None else {}, default.root)
         for name, matcher, what in GUARD_HOOKS:
-            if name not in have:
+            st, detail = state[name]
+            if st == "missing":
                 print(f"  {name:<18} missing  ({what}) — `wave hooks install`")
-                continue
-            broken = ping_guard(guard_command(name))
-            print(f"  {name:<18} {'active' if not broken else f'broken   ping failed: {broken} — check the plugin checkout'}")
+            elif st == "untrusted":
+                print(f"  {name:<18} untrusted  {detail} — not the plugin's guards.py (or not byte-identical), never run here; `wave hooks install` adds the plugin's")
+            elif st == "missing target":
+                print(f"  {name:<18} missing target  {detail} — the plugin moved or updated; `wave hooks install` points it at the current one")
+            else:
+                print(f"  {name:<18} {'active' if st == 'active' else f'broken   ping failed: {detail} — check the plugin checkout'}")
         return
+    if a.check:
+        if data is None:
+            raise SystemExit(f"hooks --check refused: {path} {why} — fix it by hand")
+        entries = guard_entries(data or {}, default.root)
+        gone = 0
+        for name, _, _ in GUARD_HOOKS:
+            for _, written, path, rel in entries.get(name) or [(None, f"{HOOKS_SCRIPT}", HOOKS_SCRIPT, False)]:
+                v = entry_verdict(default.root, path, rel)
+                gone += v != "trusted"
+                tag = "" if name in entries else "not installed, `wave hooks install` would write "
+                print(f"  {name:<18} {tag}{written}  {'MISSING' if v == 'gone' else 'exists' if v == 'trusted' else 'exists, untrusted'}")
+        sys.exit(1 if gone else 0)
     if data is None:
         raise SystemExit(f"hooks refused: {path} {why} — fix it by hand; install never overwrites a file it cannot read")
     if not isinstance(data.get("hooks", {}), dict) or not isinstance(data.get("hooks", {}).get("PreToolUse", []), list):
         raise SystemExit(f"hooks refused: {path} has a `hooks` value install cannot extend safely — fix it by hand")
-    have = installed_guards(data)
-    todo = [(name, matcher) for name, matcher, _ in GUARD_HOOKS if name not in have]
+    entries = guard_entries(data, default.root)
+    todo = [(name, matcher) for name, matcher, _ in GUARD_HOOKS
+            if not any(entry_verdict(default.root, e[2], e[3]) == "trusted" for e in entries.get(name, []))]
+    dead = {e[0] for name, _ in todo for e in entries.get(name, []) if not e[2].is_file()}  # a re-install replaces the paths a plugin update orphaned
+    for b in data.get("hooks", {}).get("PreToolUse", []):
+        if isinstance(b, dict) and isinstance(b.get("hooks"), list) and any(isinstance(h, dict) and h.get("command") in dead for h in b["hooks"]):
+            b["hooks"] = [h for h in b["hooks"] if not (isinstance(h, dict) and h.get("command") in dead)]
+    if dead:
+        data["hooks"]["PreToolUse"] = [b for b in data["hooks"]["PreToolUse"] if not (isinstance(b, dict) and b.get("hooks") == [])]
     if not todo:
         print(f"already installed: {len(GUARD_HOOKS)}/{len(GUARD_HOOKS)} guard hooks present in {path}")
         return
@@ -3080,7 +3292,8 @@ GUARANTEES = [
     (".wave.json is read from origin/<base> after the fetch, not from a main checkout left behind; doctor names a stale copy", "Repo._load_cfg <- Repo.fetch, cmd_doctor", "facts config_source: origin/main:.wave.json; ! main checkout's `.wave.json` matches origin/main's: differs in gate", True),
     ("doctor names every CI action the gate does not cover", "cmd_doctor -> Repo.ci_gate", "! CI runs `x/y@v1` and the gate does not", True),
     ("the repo's own orchestration is detected per phase, by name and location, and `.wave.json` phases overrides it", "Repo.profile -> detect_profile", "facts profile.phases: provider + detected | declared | default", True),
-    ("the agent prompt carries the profile: repo skills in order before the default stack, hooks enforced, rule files first; nothing found says so", "render_prompt -> profile_prompt", "the {{PROFILE}} block of templates/agent.md", True),
+    ("the agent prompt carries the profile: repo skills in order, replacing the default stack in section 0, hooks enforced, rule files first; nothing found says so", "render_prompt -> profile_prompt", "the {{PROFILE}} block of templates/agent.md", True),
+    ("section 0 of the agent prompt renders its skill list from the same source as the handoff's \"Skills:\" line: the profile's skills, else DEFAULT_SKILLS", "render_prompt SKILLS <- agent_skills; handoff_block", "section 0 of `wave prompt` names every skill `agent_skills` returns; tests/test_commands.py test_section_zero_lists_the_skills_the_handoff_declares fails if the field or the shared source goes", True),
     ("dispatch runs the repo's sync provider before creating worktrees", "cmd_dispatch -> sync_provider", "make sync in <root>; a failure refuses, a `.claude/commands/*` provider is only named", True),
     ("Makefile targets test/check/lint/ci are gate candidates when the manifest falls through", "Repo._manifest_gate -> makefile_targets", "gate_sources: (make test, manifest)", True),
     ("doctor warns when the Makefile or the rule files name a command the gate lacks", "cmd_doctor -> doc_commands", "! `CLAUDE.md` names `make ci` and the gate does not", True),
@@ -3114,6 +3327,8 @@ GUARANTEES = [
     ("verify refuses a PR that changes the version line of .claude-plugin/*.json whose title does not start with `Release` — the bump is the owner's release ritual, one PR of its own", "verify_one (+ cmd_merge)", "VERSION-OUTSIDE-RELEASE[.claude-plugin/plugin.json: \"version\": \"9.9.9\" — ...]", True),
     ("verify refuses a PR without a `## Done when` ledger, or whose items differ from its issue's", "verify_one -> ledger_check (+ cmd_merge)", "LEDGER-MISSING[...] / LEDGER-MISMATCH[...] / ISSUE-NO-DONE-WHEN[...]", True),
     ("merge applies the PR's ledger to its issue after the merge, in one comment, and reopens it while an item is open", "cmd_merge -> apply_ledger -> tick_issue", "ledger applied from PR #N: X done, Y dropped, Z remain", True),
+    ("release refuses a dirty tree, a version not above the last tag, a checkout whose .wave.json `serial` lists no .claude-plugin manifest, a malformed version and an existing release branch — each with a named code", "cmd_release", "RELEASE-DIRTY-TREE / RELEASE-VERSION-NOT-NEWER / RELEASE-WRONG-WORKSPACE / RELEASE-BAD-VERSION / RELEASE-BRANCH-EXISTS", True),
+    ("release prepares and stops: branch, bump commit, PR — it never merges, tags or publishes, and the owner's checkout returns to its branch (RELEASE-INCOMPLETE keeps the bump and names the recovery)", "cmd_release", "the PR url and the owner's remaining steps (merge, tag, gh release create)", True),
     ("prepare writes only facts into the issue's `## Handoff` — appended, or an existing one replaced in place with every other byte kept — and asks, never answers, the judgement (Done when, evidence, ADR stub), one question per gap, commented once", "cmd_prepare -> prepare_issue, handoff_block, prepare_questions", "wave prepare <issue>: the block, the questions, one gap comment; the same facts twice write nothing", True),
     ("prepare refuses a parent: an issue with sub-issues never receives a Handoff (lint stays as the second net)", "prepare_issue <- cmd_prepare, cmd_dispatch", "exit 1: PREPARE-PARENT: owner/name#N is a parent (N sub-issues); parents are never dispatched", True),
     ("amend writes the owner's answered Done-when once, before the Handoff, and never over one that exists; every line of the file must be an item", "cmd_amend -> with_done_when", "exit 2: amend refused: the body already has a `## Done when`", True),
@@ -3145,6 +3360,7 @@ GUARANTEES = [
     ("doctor reports the retry ceiling, and with --epic the state sweep, both soft", "cmd_doctor -> sweep_retries, sweep_epic", "! no agent past the retry ceiling (3 no-progress dispatches ...) / ! state sweep of <epic>", True),
     ("a command run inside a worktree never re-points the registry: it names the main checkout", "Repo.from_cwd (--git-common-dir)", "repos.json path stays the main checkout; a worktree or missing path is repaired to it", True),
     ("a ref to a repo with no checkout is size-checked, cloned into the first search path, registered, and the command continues", "Repo.get -> clone_repo", "the size on GitHub, then 'cloned owner/name into …'; repos.json gains the path", True),
+    ("a command that only reads (epics, status, why, stats, guarantees) never clones, registers or repairs the registry: a repo with no checkout is 'not cloned', with the commands that fix it", "Repo.get(read=True) <- cmd_epics, cmd_status, cmd_why; stats and guarantees resolve no repo (tests/test_read_never_clones.py)", "'owner/name: not cloned — gh repo clone …'; no clone, no new checkout, repos.json byte-identical; next, dispatch, prepare and prompt still clone", True),
     ("a clone is never shallow: worktrees, merge-tree and --merged need history", "clone_repo (no --depth, is-shallow-repository refused)", "a shallow result exits with 'need history' and registers nothing", True),
     ("cloning asks above clone_ask_over_mb (registry, default 500 MB): the command is printed instead", "clone_repo's diskUsage gate", "'over the 500 MB … gh repo clone owner/name …', nothing cloned or registered", True),
     ("scan and Repo.get agree on the checkout: the registry wins, a second checkout is reported, a dead path is repaired", "find_checkouts + cmd_repos scan", "'another checkout at … — the registry keeps …'", True),
@@ -3164,6 +3380,7 @@ GUARANTEES = [
     ("no AI attribution in a commit or PR-body command (fail open: a broken guard exits 0)", "hooks/guards.py attribution <- settings PreToolUse[Bash]", "exit 2: attribution-guard: this command carries AI attribution (...) — drop the trailer", True),
     ("no forbidden git command through Bash — gc --prune, reflog expire, stash, reset --hard, clean -f, push --force, branch -D, rm -rf — each refusal naming the safe alternative (fail open: a broken guard exits 0)", "hooks/guards.py forbidden-git <- settings PreToolUse[Bash]", "exit 2: forbidden-git-guard: `git stash` is refused: commit the work to a branch instead", True),
     ("no secret file's contents are printed — the registry's repos.json, .env, credentials, auth.json; ls, stat and grep -c stay open (fail open: a broken guard exits 0)", "hooks/guards.py secret-read <- settings PreToolUse[Bash]", "exit 2: secret-read-guard: use `ls -la`, `stat` or `grep -c` instead", True),
+    ("a guard hook whose recorded guards.py is gone is named, never read as installed: status says `missing target` with the path, doctor warns, install replaces the dead entry; status/doctor run only the plugin's own guards.py, never a path read from settings; `$CLAUDE_PROJECT_DIR/hooks/guards.py` is active only when byte-identical to it, else `untrusted`", "guard_entries / guard_health <- cmd_hooks, cmd_doctor", "! guard hooks installed: 0/4 active, missing target: attribution -> /…/0.7.0/hooks/guards.py — the plugin moved, `wave hooks install`", True),
     ("no Agent dispatch whose prompt lacks the contract sections — where, task, gate, delivery, Done when; a fork is exempt (fail open: a broken guard exits 0)", "hooks/guards.py dispatch-contract <- settings PreToolUse[Task]", "exit 2: dispatch-contract-guard: it lacks the dispatch contract: the gate to run, ...", True),
     # the skill-lint (scripts/validate_skills.py): a skill whose frontmatter is broken silently stops being offered to the tooling
     ("no skill whose frontmatter is broken — name kebab matching its directory, a description of at least 40 chars, no dead template link", "ci.yml skill-lint <- validate_skills.py", "CI red: skills/<dir>/SKILL.md: name `X` differs from its directory ...", True),
@@ -3458,6 +3675,7 @@ def main(argv=None):
     x = s.add_parser("dispatch", help="create worktrees + prompt files (runs doctor and refuses issues that are not READY)"); x.add_argument("issues", nargs="+"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--force", action="store_true"); x.add_argument("--warm", action="store_true", help="Rust: `cargo fetch` in the main checkout first, so parallel builds only extract"); x.add_argument("--respawn", action="store_true", help="this dispatch returns with a new strategy after the same failure twice: the stamp counts a respawn, not a plain resume"); x.add_argument("--no-prepare", action="store_true", help="do not run `wave prepare` on an issue whose body has no `## Handoff`")
     x = s.add_parser("prepare", help="write the facts of a handoff (branch, worktree, base, gate, skills, non-negotiables, Closes #N) into the issue's `## Handoff` — appended, or an existing one replaced in place — and print the judgement it cannot write, one question per gap, for the orchestrator to ask"); x.add_argument("issues", nargs="+")
     x = s.add_parser("amend", help="write the owner's answered criteria into the issue once: --done-when <file>, one `- [ ] item` per line, written before the Handoff, never over one that exists"); x.add_argument("issue"); x.add_argument("--done-when", metavar="FILE", required=True)
+    x = s.add_parser("release", help="prepare a release and stop: bump both manifests on release/<version>, open the `Release <version>` PR with one note per PR since the last tag; --dry-run prints the branch, the diff and the notes. Merge, tag and gh release stay yours"); x.add_argument("version"); x.add_argument("--dry-run", action="store_true")
     x = s.add_parser("why", help="the premises behind READY / NOT READY for an issue, with evidence"); x.add_argument("refs", nargs="+")
     x = s.add_parser("doctor", help="preflight: gh, git, clean checkout, gate, protected paths, dead agents, retry ceiling, leftover worktrees, cargo cache, disk, batch size"); x.add_argument("--batch", type=int, default=4); x.add_argument("--fix-cache", action="store_true", help="move each half-extracted crate to ~/.config/setwave/quarantine/ (never deletes)"); x.add_argument("--epic", help="also run the state sweep of this epic as a soft check")
     x = s.add_parser("agents", help="every issue worktree: age since dispatch, minutes since the newest change, PR, verdict (working | quiet | likely dead | done)")
@@ -3476,8 +3694,9 @@ def main(argv=None):
     x = s.add_parser("plan", help="create an epic's issues from <dir>/index.tsv + deps.tsv + <key>.md, wiring sub-issues and blocked_by"); x.add_argument("dir"); x.add_argument("--slug"); x.add_argument("--milestone"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--force", action="store_true")
     x = s.add_parser("adopt", help="turn an existing milestone or label (or explicit refs) into an epic: attaches sub-issues, wires textual dependencies as blocked_by, comments what is missing"); x.add_argument("issues", nargs="*"); x.add_argument("--milestone"); x.add_argument("--label"); x.add_argument("--epic", help="an existing issue to designate as the epic; without it one is created titled after the milestone/label, with the `epic` label"); x.add_argument("--slug"); x.add_argument("--dry-run", action="store_true", help="print what would be wired and what could not be read; write nothing")
 
-    x = s.add_parser("hooks", help="guard hooks: install [--dry-run] writes them into the project's .claude/settings.json (idempotent, backed up); status: active | missing | broken")
+    x = s.add_parser("hooks", help="guard hooks: install [--dry-run] writes them into the project's .claude/settings.json (idempotent, backed up); status: active | missing | missing target | untrusted | broken; install --check: each guard's target and whether it exists")
     x.add_argument("action", choices=["install", "status"]); x.add_argument("--dry-run", action="store_true")
+    x.add_argument("--check", action="store_true", help="with install: list each guard's target and whether it exists, write nothing; exit 1 when one is missing")
     x = s.add_parser("stats", help="what the log says: runs, durations, failures per command")
     x = s.add_parser("guarantees", help="every promise the plugin makes, where it is enforced, whether a test pins it"); x.add_argument("--json", action="store_true")
 
@@ -3495,7 +3714,7 @@ def main(argv=None):
      "verify": cmd_verify, "judge": cmd_judge, "order": cmd_order, "merge": cmd_merge, "resolve": cmd_resolve, "close-parents": cmd_close_parents,
              "cleanup": cmd_cleanup, "status": cmd_status, "lint": cmd_lint, "plan": cmd_plan, "adopt": cmd_adopt, "why": cmd_why, "doctor": cmd_doctor,
              "agents": cmd_agents, "tick": cmd_tick, "prepare": cmd_prepare, "amend": cmd_amend, "sweep": cmd_sweep, "hooks": cmd_hooks,
-         "guarantees": cmd_guarantees}[a.cmd](default, a)
+         "release": cmd_release, "guarantees": cmd_guarantees}[a.cmd](default, a)
     except SystemExit as e:
         exit_code = e.code if isinstance(e.code, int) else 1
         raise

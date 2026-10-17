@@ -12,6 +12,7 @@ One git worktree per issue · one agent per worktree · verification before anyt
 [![Python](https://img.shields.io/badge/python-3-3776AB?logo=python&logoColor=white)](https://www.python.org)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Ubuntu-lightgrey)](.github/workflows/ci.yml)
 [![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2)](.claude-plugin/plugin.json)
+[![Showcase](https://img.shields.io/badge/showcase-carlosdanieldev.github.io%2Fsetwave-45d6b8)](https://carlosdanieldev.github.io/setwave/)
 
 In surfing, a *set* is the group of waves that arrives together. That is what this does with issues.
 
@@ -112,7 +113,7 @@ Conflicts are resolved by merging the base branch *into* the PR's branch and pus
 ## Any repo, any account, any stack
 
 - Epics can span repositories: sub-issues and blockers are followed by `repository_url`. Refs are `owner/name#N`; a bare `N` means the repo of the current directory.
-- `~/.config/setwave/repos.json` maps repositories to local checkouts, `gh` accounts, base branches, gate commands, protected and serial paths. Unknown repos are found by scanning the search paths; a ref to a repo that is nowhere local is cloned into the first of them — size-checked first (`clone_ask_over_mb`, default 500 MB, above it the clone command is printed instead), never shallow, and registered. Per-repo calls use that repo's account token (`gh auth token --user`); your global `gh` login is never switched.
+- `~/.config/setwave/repos.json` maps repositories to local checkouts, `gh` accounts, base branches, gate commands, protected and serial paths. Unknown repos are found by scanning the search paths; a ref to a repo that is nowhere local is cloned into the first of them by the commands that work on it (`next`, `dispatch`, `prepare`, `prompt`) — size-checked first (`clone_ask_over_mb`, default 500 MB, above it the clone command is printed instead), never shallow, and registered; the ones that only read (`epics`, `status`, `why`) say `not cloned` and write nothing. Per-repo calls use that repo's account token (`gh auth token --user`); your global `gh` login is never switched.
 - Two accounts, one registry — a personal repo and a work repo, each under its own `gh` login (`gh auth login` once per account; `gh auth status` lists both):
 
 ```json
@@ -155,7 +156,7 @@ What convention cannot know, `.wave.json` declares — `phases` overrides any ph
             "rules": ["docs/CONVENTIONS.md"]}}
 ```
 
-`facts` shows what was detected and what was not, so the line to add is obvious. The agent prompt names the repo's skills in order, before the default stack; the hooks it will trip on; and the rule files to read first — never their contents, so the prompt stays the same size in every repo. A repo rule that contradicts a non-negotiable (no AI attribution, no destructive git) loses, and the agent says so in its PR. `dispatch` runs the sync provider before creating any worktree (`make sync`, or the command `phases.sync` declares; a `.claude/commands/*` file is prose for the agent, only named). `doctor` lists the repo's hooks and warns when one cannot run (not executable, or its interpreter missing — the dispatch-contract hook would otherwise fail silently for every agent), and warns when the `Makefile` or a rule file names a command the gate does not contain.
+`facts` shows what was detected and what was not, so the line to add is obvious. The agent prompt names the repo's skills in order, in place of the default stack; the hooks it will trip on; and the rule files to read first — never their contents, so the prompt stays the same size in every repo. A repo rule that contradicts a non-negotiable (no AI attribution, no destructive git) loses, and the agent says so in its PR. `dispatch` runs the sync provider before creating any worktree (`make sync`, or the command `phases.sync` declares; a `.claude/commands/*` file is prose for the agent, only named). `doctor` lists the repo's hooks and warns when one cannot run (not executable, or its interpreter missing — the dispatch-contract hook would otherwise fail silently for every agent), and warns when the `Makefile` or a rule file names a command the gate does not contain.
 
 ## What an issue needs
 
@@ -192,8 +193,15 @@ The prompt tells an agent what never to do; a hook is what still holds when the 
 ```bash
 wave hooks install            # write the four guards into <repo>/.claude/settings.json — backs the file up, idempotent
 wave hooks install --dry-run  # print the diff, write nothing
-wave hooks status             # active | missing | broken, per guard; also one line in `wave doctor`
+wave hooks status             # active | missing | missing target | broken, per guard; also one line in `wave doctor`
+wave hooks install --check    # each guard's target path and whether the file exists; exit 1 when one is gone
 ```
+
+**Where the hook points.** `hooks install` writes the path of the `guards.py` that the running `wave.py` sits next to — for a marketplace install that is the versioned plugin cache (`~/.claude/plugins/cache/setwave/setwave/<version>/hooks/guards.py`). A plugin update replaces that directory, and the entry in your settings then points at a file that no longer exists. The guard does not run, and nothing else says so; `hooks status` and `doctor` now do (`missing target`, with the recorded path). **After updating the plugin, run `wave hooks install` again**: it replaces the dead entries with the current path and leaves everything else in the file alone. The plugin does not copy `guards.py` anywhere stable: a copy would be a second guard that drifts from the plugin's.
+
+A settings file that is committed cannot carry your absolute cache path — in another clone the script is not there. In a repo that vendors `hooks/guards.py` (this one does), commit the project-relative form instead, `python3 "$CLAUDE_PROJECT_DIR/hooks/guards.py" <guard>`: `status` and `doctor` read it as active only when it resolves, against the project root, to the project's own `hooks/guards.py` **and** that file is byte-identical (sha256) to the plugin's; `hooks install` then leaves it alone instead of adding the absolute entry beside it. Anything else that exists is `untrusted` (a lookalike, or the plugin's guard under another path), and a missing file is `missing target`.
+
+The settings file belongs to the repo, and `status`/`doctor` run outside Claude Code, so they never execute a path read from it: only the plugin's own `guards.py` is pinged; every other target gets a file check and a verdict. `$CLAUDE_PROJECT_DIR` is read as the project root, never from the environment.
 
 | guard | denies |
 | --- | --- |
@@ -291,6 +299,8 @@ gh pr list -R OWNER/REPO --state open --json number,title,headRefName,baseRefNam
 
 A guard is only as good as the test that fails without it: when you add one, remove it once, watch a test fail, restore it, and flip its row in `GUARANTEES` to tested. The version lives in both `.claude-plugin/*.json` (they are `serial`: one PR at a time), and it changes only in a Release PR — one titled starting with `Release`; `verify` refuses the bump anywhere else (`VERSION-OUTSIDE-RELEASE`). Releases are tags `vX.Y.Z` on `main` with notes.
 
+`wave release <version>` is the ritual up to the owner's decision. Run it in a clean checkout (`--dry-run` first: it fetches `origin` and its tags, prints the branch, the manifest diff and the notes draft, and changes nothing else). It refuses a dirty tree (`RELEASE-DIRTY-TREE`), a version that is not above the last tag (`RELEASE-VERSION-NOT-NEWER`), a checkout whose `.wave.json` `serial` does not list a `.claude-plugin/*.json` (`RELEASE-WRONG-WORKSPACE`), a malformed version (`RELEASE-BAD-VERSION`) and an existing `release/<version>` (`RELEASE-BRANCH-EXISTS`). Without `--dry-run` it cuts `release/<version>` from `origin/main`, commits the bump of both manifests, pushes, opens the PR `Release <version>: …` whose body has one line per PR merged since the last tag, and stops, with your checkout back on the branch it started on. If the push or the PR fails the bump stays on `release/<version>` (`RELEASE-INCOMPLETE` prints the two commands that finish it). Review the notes, merge, then tag (`git tag v<version> <merge commit> && git push origin v<version>`) and `gh release create`: the tag publishes to every user of the plugin, so it is never taken for you.
+
 ## Lessons baked in
 
 - `git merge-tree` predicts textual conflicts, not semantic ones; `order --run-gate` finds a semantic one before the merge, at the cost of one gate run per step, and the base branch's CI after each merge stays the final word.
@@ -307,6 +317,7 @@ A guard is only as good as the test that fails without it: when you add one, rem
 .wave.json                      this repo's own gate and serial files
 skills/wave/SKILL.md            the orchestrator procedure Claude follows
 skills/define/SKILL.md          the authoring procedure: the refinement session that ends only at Ready
+skills/architecture-designer/   vendored MIT skill (Jeffallan) with its references/; provenance in skills/THIRD_PARTY.md
 improve-codebase-architecture/  the architecture review: deepening candidates as a visual report, then a grilling loop
 scripts/wave.py                 the deterministic steps (stdlib only)
 scripts/e2e.py                  one end-to-end run against a sandbox repository
