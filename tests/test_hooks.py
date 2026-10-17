@@ -510,6 +510,33 @@ class Dogfood(unittest.TestCase):
                 found.append((name, block["matcher"]))
         self.assertEqual(found, [(name, matcher) for name, matcher, _ in wave.GUARD_HOOKS])
 
+    def _health(self, guards_bytes):
+        """The committed settings read by the repo's own guard_health against a clone-like project dir whose hooks/guards.py is `guards_bytes`."""
+        import shutil
+        import tempfile
+        data, why = wave.load_settings(TESTS.parent / ".claude" / "settings.json")
+        self.assertIsNone(why)
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d).resolve()
+            (root / "hooks").mkdir()
+            if guards_bytes is not None:
+                (root / "hooks" / "guards.py").write_bytes(guards_bytes)
+            return wave.guard_health(wave.guard_entries(data, root), root)
+
+    def test_the_repo_ships_the_script_the_settings_name(self):
+        self.assertTrue(GUARDS.is_file(), "the settings name $CLAUDE_PROJECT_DIR/hooks/guards.py: without it python3 exits 2 and blocks Bash")
+
+    def test_a_clone_with_the_same_guards_py_reads_4_of_4_active(self):
+        health = self._health(GUARDS.read_bytes())
+        self.assertEqual({n: st for n, (st, _) in health.items()}, {n: "active" for n, _, _ in wave.GUARD_HOOKS})
+
+    def test_a_clone_with_an_edited_guards_py_is_untrusted_not_active(self):
+        health = self._health(GUARDS.read_bytes() + b"\n# edited\n")
+        self.assertEqual({st for st, _ in health.values()}, {"untrusted"})
+
+    def test_a_clone_without_the_script_is_missing_target(self):
+        self.assertEqual({st for st, _ in self._health(None).values()}, {"missing target"})
+
 
 if __name__ == "__main__":
     unittest.main()
