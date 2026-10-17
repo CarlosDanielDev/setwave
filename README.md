@@ -305,6 +305,7 @@ A guard is only as good as the test that fails without it: when you add one, rem
 .wave.json                      this repo's own gate and serial files
 skills/wave/SKILL.md            the orchestrator procedure Claude follows
 skills/define/SKILL.md          the authoring procedure: the refinement session that ends only at Ready
+skills/architecture-designer/   vendored MIT skill (Jeffallan) with its references/; provenance in skills/THIRD_PARTY.md
 improve-codebase-architecture/  the architecture review: deepening candidates as a visual report, then a grilling loop
 scripts/wave.py                 the deterministic steps (stdlib only)
 scripts/e2e.py                  one end-to-end run against a sandbox repository

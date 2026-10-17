@@ -7,7 +7,8 @@ and nothing else in the loop notices. This linter runs in CI (both matrix OSes) 
 - no frontmatter block, or a `skills/<dir>/SKILL.md` that does not exist at all;
 - a `name` that is not kebab-case or that differs from its directory;
 - a `description` shorter than 40 characters (a skill one cannot summarize cannot be chosen);
-- a link to `templates/...` that names no file in the plugin.
+- a link to `templates/...` that names no file in the plugin;
+- a `references/...md` a skill cites that is not in that skill's directory.
 
     python3 scripts/validate_skills.py [--root PLUGIN_ROOT]    # exit 0 clean, 1 with one line per problem
 
@@ -25,6 +26,7 @@ MIN_DESCRIPTION = 40
 KEBAB = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.S)
 TEMPLATE_LINK = re.compile(r"templates/[\w\-./]+")
+REFERENCE_LINK = re.compile(r"references/[\w\-./]+\.md")
 
 
 def field(frontmatter: str, name: str) -> str | None:
@@ -64,6 +66,9 @@ def problems(root: Path) -> list[str]:
         for link in sorted(set(TEMPLATE_LINK.findall(f.read_text()))):
             if not (root / link).exists():
                 out.append(f"{where}: dead template link `{link}`")
+        for ref in sorted(set(REFERENCE_LINK.findall(f.read_text()))):
+            if not (d / ref).is_file():
+                out.append(f"{where}: cites `{ref}`, which is not in {d.relative_to(root)}/")
     return out
 
 

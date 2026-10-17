@@ -6,7 +6,7 @@ The plugin vendors three skills (`setwave:<name>`), each vendored with its upstr
 | --- | --- | --- | --- |
 | caveman | [JuliusBrussee/caveman](https://github.com/JuliusBrussee/caveman) | MIT, © 2026 Julius Brussee | `setwave:caveman` (description inlined for the skill-linter; README not shipped) |
 | ponytail | [DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail) | MIT (file header) | `setwave:ponytail` |
-| architecture-designer | [Jeffallan](https://github.com/Jeffallan) | MIT (file header) | `setwave:architecture-designer` (cites references/ files not shipped) |
+| architecture-designer | [Jeffallan](https://github.com/Jeffallan) | MIT (file header) | `setwave:architecture-designer` (with its five `references/*.md`, verbatim) |
 
 Not vendored, license or right not established:
 

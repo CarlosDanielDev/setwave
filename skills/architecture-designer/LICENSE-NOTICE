@@ -1,5 +1,6 @@
 Copyright (c) Jeffallan
-Source: https://github.com/Jeffallan (MIT, per the file's license header)
-Vendored with one deviation, disclosed here: a banner at the Reference
-Guide section (line ~43) says the references/ files it cites are not
-part of this plugin — the upstream skill assumed they ship alongside.
+Source: https://github.com/Jeffallan/claude-skills (MIT, per the file's license header)
+Vendored from the upstream skills/architecture-designer/ directory: the five
+references/*.md files are verbatim. SKILL.md is the upstream text at metadata
+version 1.1.0, minus the banner this plugin once carried at the Reference Guide
+(the references now ship beside it); upstream has since published 1.1.1.
