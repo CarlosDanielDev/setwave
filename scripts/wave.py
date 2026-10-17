@@ -281,6 +281,7 @@ class Repo:
         self._load_cfg()
         self.handoffs = self.root.parent / f"{self.root.name}-handoffs"
         self._prs: list[dict] | None = None
+        self._pr_states: dict[str, dict] | None | bool = False  # False: not asked yet; None: gh failed
 
     def _load_cfg(self) -> None:
         """`.wave.json` as origin/<base> has it, the tree every worktree is cut from: the main checkout is
@@ -491,11 +492,21 @@ class Repo:
         return json.loads(self.gh(["pr", "list", "-R", self.slug, "--state", "merged", "--limit", "100", "--search", search,
                                    "--json", "number,body,headRefName"]))
 
-    def prs_for_head(self, branch: str) -> list[dict]:
-        """Every PR whose head is this branch, any state. GitHub is the truth here: a squash merge and a
-        remote branch deleted after the merge are both invisible to `git branch --merged`."""
-        return json.loads(self.gh(["pr", "list", "-R", self.slug, "--state", "all", "--head", branch,
-                                   "--limit", "200", "--json", "number,state,headRefName"]))
+    def pr_states(self) -> dict[str, dict] | None:
+        """head branch -> its newest PR ({number, state, headRefName}), any state, from ONE `gh pr list`; None when gh
+        failed (asked once, the failure kept: a state is then `unknown`, never a guess). GitHub is the truth here: a
+        squash merge and a remote branch deleted after the merge are both invisible to `git branch --merged`."""
+        if self._pr_states is False:
+            ok, out = self.gh_ok(["pr", "list", "-R", self.slug, "--state", "all", "--limit", "1000",
+                                  "--json", "number,state,headRefName"])
+            try:
+                prs = json.loads(out) if ok else None
+            except ValueError:
+                prs = None
+            self._pr_states = None if prs is None else {}
+            for pr in prs or []:
+                self._pr_states.setdefault(pr["headRefName"], pr)  # newest first
+        return self._pr_states
 
     def pr_checks(self, n: int) -> dict[str, str]:
         """name -> bucket: pass | fail | pending | skipping | cancel (gh's own normalisation)."""
@@ -1408,6 +1419,53 @@ def issue_worktrees(repo: Repo) -> list[tuple[Path, str, int]]:
         if mm and b and Path(m.group(1)) != repo.root:
             out.append((Path(m.group(1)), b.group(1), int(mm.group(1))))
     return out
+
+
+PR_STATES = ("MERGED", "CLOSED", "OPEN")
+
+
+def derive_state(f: dict) -> str:
+    """The state a worktree is in, from its facts alone: dirty, unpushed, unknown, merged, closed, open, empty, then
+    working | quiet | dead by progress. Dirt and an unpushed head come first: a merged PR never authorises dropping
+    work that lives nowhere else. `unknown` (gh failed) comes before anything that reads the PR."""
+    if f["dirty"]:
+        return "dirty"
+    if f["unpushed"]:
+        return "unpushed"
+    if f["pr_state"] == "unknown":
+        return "unknown"
+    if f["pr_state"] in PR_STATES:
+        return f["pr_state"].lower()
+    if not f["commits"] and not f["stamped"]:
+        return "empty"
+    return f["progress"]
+
+
+def worktree_state(repo: Repo, wt: Path, branch: str, n: int, now: float | None = None) -> dict:
+    """The facts of one issue worktree plus the `state` derived from them (`derive_state`): dirty, unpushed, pr_state
+    (MERGED | CLOSED | OPEN | None for no PR | "unknown" when gh failed) and pr, commits ahead of origin/<base>,
+    the dispatch stamp, and progress (working | quiet | dead) by minutes since the newest change."""
+    stamp = stamp_of(wt)
+    now = time.time() if now is None else now
+    dispatched = _epoch(stamp.get("dispatched_at"))
+    idle = round((now - last_activity(repo, wt, dispatched)) / 60)
+    ok, remote = repo.git_ok(["rev-parse", "--verify", "--quiet", f"origin/{branch}"])
+    prs = repo.pr_states()
+    pr = (prs or {}).get(branch)
+    f = {"issue": n, "worktree": str(wt), "branch": branch, "stamp": stamp, "stamped": bool(stamp),
+         "dirty": bool(repo.git(["status", "--porcelain"], cwd=wt).strip()),
+         "unpushed": ok and remote.strip() != repo.git(["rev-parse", "HEAD"], cwd=wt).strip(),
+         "pr_state": "unknown" if prs is None else (pr or {}).get("state"), "pr": (pr or {}).get("number"),
+         "commits": int(repo.git_ok(["rev-list", "--count", f"origin/{repo.base}..HEAD"], cwd=wt)[1] or 0),
+         "idle_min": idle, "age_min": round((now - dispatched) / 60) if dispatched else None,
+         "progress": {"likely dead": "dead"}.get(verdict(idle, False), verdict(idle, False))}
+    return {**f, "state": derive_state(f)}
+
+
+def agent_verdict(rec: dict) -> str:
+    """What `agents` and `doctor` say of the agent behind a worktree record: unknown, done (a PR is open), or its progress."""
+    return "unknown" if rec["pr_state"] == "unknown" else "done" if rec["pr_state"] == "OPEN" else \
+        "likely dead" if rec["progress"] == "dead" else rec["progress"]
 
 
 def cargo_home() -> Path:
@@ -2431,7 +2489,7 @@ def cmd_cleanup(default: Repo | None, a):
     total_kb, removed_n = 0, 0
     for repo in repos:
         repo.fetch()
-        for wt, branch, _n in issue_worktrees(repo):
+        for wt, branch, n in issue_worktrees(repo):
             def remove(why: str) -> None:
                 nonlocal total_kb, removed_n
                 kb = du_kb(wt)
@@ -2441,26 +2499,27 @@ def cmd_cleanup(default: Repo | None, a):
                 repo.git(["worktree", "remove", str(wt)])
                 total_kb, removed_n = total_kb + kb, removed_n + 1
                 print(f"removed {wt.name}: {why}, reclaimed {fmt_kb(kb)} (branch {branch} kept)")
-            if repo.git(["status", "--porcelain"], cwd=wt).strip():
+            rec = worktree_state(repo, wt, branch, n)
+            state, num = rec["state"], rec["pr"]
+            if state == "dirty":
                 print(f"KEEP {wt.name}: dirty")
-                continue
-            ok, remote = repo.git_ok(["rev-parse", "--verify", "--quiet", f"origin/{branch}"])
-            if ok and remote.strip() != repo.git(["rev-parse", "HEAD"], cwd=wt).strip():
+            elif state == "unpushed":
                 print(f"KEEP {wt.name}: unpushed (origin/{branch} is behind)")
-                continue
-            pr = next(iter(repo.prs_for_head(branch)), None)
-            state, num = (pr or {}).get("state"), (pr or {}).get("number")
-            if state == "MERGED":
+            elif state == "unknown":
+                print(f"KEEP {wt.name}: PR state unknown (gh failed): nothing is removed on a guess")
+            elif state == "merged":
                 remove(f"PR #{num} merged")
-            elif state == "CLOSED":
+            elif state == "closed":
                 if a.include_closed:
                     remove(f"PR #{num} closed without merge (--include-closed)")
                 else:
                     print(f"KEEP {wt.name}: closed without merge: `--include-closed` to remove")
-            elif state == "OPEN":
+            elif state == "open":
                 print(f"KEEP {wt.name}: PR #{num} open (in progress)")
-            elif int(repo.git_ok(["rev-list", "--count", f"origin/{repo.base}..HEAD"], cwd=wt)[1] or 0):
-                days = round((time.time() - last_activity(repo, wt, _epoch(stamp_of(wt).get("dispatched_at")))) / 86400)
+            elif state == "empty":
+                remove("empty: no PR, no commits")
+            elif rec["commits"]:
+                days = round(rec["idle_min"] / 1440)
                 if a.stale_days is not None and days >= a.stale_days:
                     if a.yes:
                         remove(f"stale: nothing changed for {days} days and no PR")
@@ -2468,10 +2527,8 @@ def cmd_cleanup(default: Repo | None, a):
                         print(f"STALE {wt.name}: no PR, newest change {days} days ago, {fmt_kb(du_kb(wt))} — `--yes` to remove")
                 else:
                     print(f"KEEP {wt.name}: no PR, newest change {days} days ago")
-            elif stamp_of(wt):
-                print(f"KEEP {wt.name}: dispatched, no commit yet")
             else:
-                remove("empty: no PR, no commits")
+                print(f"KEEP {wt.name}: dispatched, no commit yet")
         repo.git(["worktree", "prune"])
     if removed_n:
         print(f"reclaimed {fmt_kb(total_kb)} from {removed_n} worktree(s)")
@@ -2952,12 +3009,12 @@ def cmd_agents(default: Repo | None, a):
     """Every issue worktree of the repo with what its files say about its agent."""
     if default is None:
         raise SystemExit("run inside a repo checkout, or pass --repo")
-    rows = [liveness(default, n, wt) for wt, _, n in issue_worktrees(default)]
+    rows = [worktree_state(default, wt, br, n) for wt, br, n in issue_worktrees(default)]
     print(f"{len(rows)} worktree(s) of {default.slug} — working < {WORKING_MIN} min since the newest change, quiet up to {DEAD_MIN}, then likely dead unless a PR is open")
-    for lv in sorted(rows, key=lambda x: x["issue"]):
-        print(f"  {key(default, lv['issue']):<24} {Path(lv['worktree']).name:<20} "
-              f"dispatched {'?' if lv['age_min'] is None else lv['age_min']} min ago   changed {lv['idle_min']} min ago   "
-              f"{'PR #' + str(lv['pr']) if lv['pr'] else 'no PR':<8} {lv['verdict']}")
+    for r in sorted(rows, key=lambda x: x["issue"]):
+        print(f"  {key(default, r['issue']):<24} {Path(r['worktree']).name:<20} "
+              f"dispatched {'?' if r['age_min'] is None else r['age_min']} min ago   changed {r['idle_min']} min ago   "
+              f"{'PR #' + str(r['pr']) if r['pr'] else 'no PR':<8} {r['state']:<9} {agent_verdict(r)}")
 
 
 def cmd_doctor(default: Repo | None, a) -> None:
@@ -3045,17 +3102,17 @@ def cmd_doctor(default: Repo | None, a) -> None:
         if hbroken:
             hsum += f", broken: {', '.join(hbroken)}"
         checks.append(("guard hooks installed", not (hwhy or hmissing or hgone or hunsafe or hbroken), hsum, False))
-        merged = {l.strip().replace("origin/", "") for l in r.git(["branch", "-r", "--merged", f"origin/{r.base}"]).splitlines()}
-        alive, dead, stale, exhausted = [], [], [], []
+        alive, dead, stale, exhausted, unknown = [], [], [], [], []
         for wt, branch, n in issue_worktrees(r):
-            untouched = (not r.git_ok(["rev-parse", "--verify", f"origin/{branch}"])[0] and not r.git(["log", "--oneline", f"origin/{r.base}..HEAD"], cwd=wt).strip()
-                         and not (wt / STAMP).exists() and not r.git(["status", "--porcelain"], cwd=wt).strip())
-            if branch in merged or untouched:
+            rec = worktree_state(r, wt, branch, n)
+            lv = {**rec, "verdict": agent_verdict(rec)}
+            if rec["state"] in ("merged", "empty"):
                 stale.append((wt.name, du_kb(wt)))  # merged, or never dispatched, pushed, committed or edited: leftovers, `wave cleanup`
-            elif no_progress(stamp_of(wt)) >= RETRY_CEILING:
+            elif no_progress(rec["stamp"]) >= RETRY_CEILING:
                 exhausted.append((wt, n))      # past the retry ceiling: dispatch refuses it, the sweep escalates
-            elif not pr_for_issue(r, n):       # unmerged work with no PR: an agent at work, or one that died
-                lv = liveness(r, n, wt)
+            elif lv["verdict"] == "unknown":   # gh failed: neither alive nor dead is known
+                unknown.append(wt.name)
+            elif lv["verdict"] != "done":      # unmerged work with no open PR: an agent at work, or one that died
                 (dead if lv["verdict"] == "likely dead" else alive).append((wt.name, n, lv))
         checks.append(("agents at work (unmerged worktree, no PR yet)", True,
                        ", ".join(f"{name} {lv['verdict']} ({lv['idle_min']} min)" for name, _, lv in alive) or "none", False))
@@ -3063,6 +3120,8 @@ def cmd_doctor(default: Repo | None, a) -> None:
                        (", ".join(f"{name} ({lv['idle_min']} min)" for name, _, lv in dead)
                         + " — resume the agent with `SendMessage` to its id, or "
                         + ", ".join(f"`wave dispatch --force {n}`" for _, n, _ in dead) + " to start over on top of what is there") if dead else "none", False))
+        checks.append(("every worktree's PR state could be read (gh answered)", not unknown,
+                       (", ".join(unknown) + " — unknown, so none is called dead and `wave cleanup` removes none; check `gh auth status`") if unknown else "yes", False))
         checks.append((f"no agent past the retry ceiling ({RETRY_CEILING} no-progress dispatches)", not exhausted,
                        ", ".join(f"{wt.name} ({stamp_of(wt).get('resumes')} resumes, {stamp_of(wt).get('respawns', 0)} respawns, "
                                  f"changed {liveness(r, n, wt)['idle_min']} min ago) — "
@@ -3299,7 +3358,7 @@ GUARANTEES = [
     ("doctor warns when the Makefile or the rule files name a command the gate lacks", "cmd_doctor -> doc_commands", "! `CLAUDE.md` names `make ci` and the gate does not", True),
     ("doctor lists the repo's hooks and warns when one cannot run", "cmd_doctor -> hook_health", "! the repo's own hooks can run (3): <path>: not executable (chmod +x)", True),
     ("plan refuses a body missing the repo's issue-template sections", "cmd_plan -> template_problems", "plan refused: one lacks the repo template's ## Handoff", True),
-    ("doctor tells an agent at work from a likely dead one, and names the recovery", "cmd_doctor -> liveness", "! no agent likely dead: <worktrees> — SendMessage or `wave dispatch --force N`", True),
+    ("doctor tells an agent at work from a likely dead one, and names the recovery", "cmd_doctor -> worktree_state", "! no agent likely dead: <worktrees> — SendMessage or `wave dispatch --force N`", True),
     ("a likely dead worktree stays `worktree` in next, never `in progress`", "candidates -> liveness", "worktree exists (likely dead, nothing changed for N min)", True),
     ("doctor fails on a crate cargo marked extracted but left half-written", "cmd_doctor -> broken_crates", "✗ cargo cache ...: <crate> is missing N of M files", True),
     ("doctor --fix-cache moves a broken crate to quarantine, never deletes", "cmd_doctor --fix-cache", "moved <crate> to ~/.config/setwave/quarantine/<crate>-<time>", True),
@@ -3309,7 +3368,8 @@ GUARANTEES = [
     ("no dispatch of an issue that is not READY", "cmd_dispatch -> premises_for", "refusal lists the failed premises", False),
     ("an existing worktree is kept, never recreated", "cmd_dispatch", "prints 'worktree exists'", False),
     ("cleanup removes only worktrees that are clean, pushed and merged", "cmd_cleanup", "KEEP lines with the reason", True),
-    ("cleanup decides by the PR, not by `--merged`: a merged PR's worktree goes (a squash merge and a deleted remote included), a closed-without-merge one stays until --include-closed, an open PR, a dispatch stamp, dirt or an unpushed head always stay; every removal prints the disk it reclaims and the total", "cmd_cleanup -> Repo.prs_for_head, du_kb", "removed k-6: PR #40 merged, reclaimed 12 KB (branch feat/6-merged kept); KEEP k-8: PR #42 open (in progress)", True),
+    ("doctor, cleanup and agents read one worktree state (dirty, unpushed, unknown, merged, closed, open, empty, working, quiet, dead) from one cached `gh pr list --state all`; dirt and an unpushed head beat a merged PR, and gh failing is `unknown`, which cleanup never removes and doctor never calls dead", "worktree_state -> derive_state, Repo.pr_states", "KEEP ws-2: dirty; KEEP gf-2: PR state unknown (gh failed); ! every worktree's PR state could be read: gf-1, gf-2 — unknown", True),
+    ("cleanup decides by the PR, not by `--merged`: a merged PR's worktree goes (a squash merge and a deleted remote included), a closed-without-merge one stays until --include-closed, an open PR, a dispatch stamp, dirt or an unpushed head always stay; every removal prints the disk it reclaims and the total", "cmd_cleanup -> worktree_state, du_kb", "removed k-6: PR #40 merged, reclaimed 12 KB (branch feat/6-merged kept); KEEP k-8: PR #42 open (in progress)", True),
     ("cleanup --stale-days N lists kept worktrees with no open PR and nothing newer than N days, with their size, and removes them only with --yes", "cmd_cleanup --stale-days", "STALE k-9: no PR, newest change 40 days ago, 12 KB — `--yes` to remove", True),
     ("doctor reports leftover worktrees with their total size", "cmd_doctor -> du_kb", "! no leftover worktrees (merged or empty): k-20 — 24 KB total — `wave cleanup`", True),
     ("plan refuses to run twice on the same directory or titles", "cmd_plan", "numbers.json / duplicate titles refusal", False),

@@ -1,0 +1,4 @@
+[
+  {"number": 50, "state": "MERGED", "headRefName": "feat/1-squashed"},
+  {"number": 51, "state": "MERGED", "headRefName": "feat/2-dirty"}
+]
