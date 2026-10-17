@@ -497,12 +497,14 @@ class Repo:
         failed (asked once, the failure kept: a state is then `unknown`, never a guess). GitHub is the truth here: a
         squash merge and a remote branch deleted after the merge are both invisible to `git branch --merged`."""
         if self._pr_states is False:
-            ok, out = self.gh_ok(["pr", "list", "-R", self.slug, "--state", "all", "--limit", "1000",
+            ok, out = self.gh_ok(["pr", "list", "-R", self.slug, "--state", "all", "--limit", str(PR_LIST_LIMIT),
                                   "--json", "number,state,headRefName"])
             try:
                 prs = json.loads(out) if ok else None
             except ValueError:
                 prs = None
+            if prs is not None and len(prs) >= PR_LIST_LIMIT:
+                prs = None  # a full page may have been cut short: a missing PR would read as "no PR", so say unknown
             self._pr_states = None if prs is None else {}
             for pr in prs or []:
                 self._pr_states.setdefault(pr["headRefName"], pr)  # newest first
@@ -1422,6 +1424,7 @@ def issue_worktrees(repo: Repo) -> list[tuple[Path, str, int]]:
 
 
 PR_STATES = ("MERGED", "CLOSED", "OPEN")
+PR_LIST_LIMIT = 1000  # a `gh pr list` that returns this many may have been cut short
 
 
 def derive_state(f: dict) -> str:
@@ -2506,7 +2509,7 @@ def cmd_cleanup(default: Repo | None, a):
             elif state == "unpushed":
                 print(f"KEEP {wt.name}: unpushed (origin/{branch} is behind)")
             elif state == "unknown":
-                print(f"KEEP {wt.name}: PR state unknown (gh failed): nothing is removed on a guess")
+                print(f"KEEP {wt.name}: PR state unknown (gh failed or its list was cut short): nothing is removed on a guess")
             elif state == "merged":
                 remove(f"PR #{num} merged")
             elif state == "closed":
@@ -3102,7 +3105,7 @@ def cmd_doctor(default: Repo | None, a) -> None:
         if hbroken:
             hsum += f", broken: {', '.join(hbroken)}"
         checks.append(("guard hooks installed", not (hwhy or hmissing or hgone or hunsafe or hbroken), hsum, False))
-        alive, dead, stale, exhausted, unknown = [], [], [], [], []
+        alive, dead, stale, exhausted, unknown, unsaved = [], [], [], [], [], []
         for wt, branch, n in issue_worktrees(r):
             rec = worktree_state(r, wt, branch, n)
             lv = {**rec, "verdict": agent_verdict(rec)}
@@ -3112,6 +3115,8 @@ def cmd_doctor(default: Repo | None, a) -> None:
                 exhausted.append((wt, n))      # past the retry ceiling: dispatch refuses it, the sweep escalates
             elif lv["verdict"] == "unknown":   # gh failed: neither alive nor dead is known
                 unknown.append(wt.name)
+            elif rec["pr_state"] == "MERGED":  # dirt or an unpushed head behind a merged PR: not an agent, not for dispatch
+                unsaved.append(f"{wt.name} (PR #{rec['pr']} merged, {rec['state']})")
             elif lv["verdict"] != "done":      # unmerged work with no open PR: an agent at work, or one that died
                 (dead if lv["verdict"] == "likely dead" else alive).append((wt.name, n, lv))
         checks.append(("agents at work (unmerged worktree, no PR yet)", True,
@@ -3120,6 +3125,8 @@ def cmd_doctor(default: Repo | None, a) -> None:
                        (", ".join(f"{name} ({lv['idle_min']} min)" for name, _, lv in dead)
                         + " — resume the agent with `SendMessage` to its id, or "
                         + ", ".join(f"`wave dispatch --force {n}`" for _, n, _ in dead) + " to start over on top of what is there") if dead else "none", False))
+        checks.append(("no unsaved work behind a merged PR (dirty or unpushed)", not unsaved,
+                       ", ".join(unsaved) + " — commit and push it, or discard it by hand; `wave cleanup` keeps these" if unsaved else "none", False))
         checks.append(("every worktree's PR state could be read (gh answered)", not unknown,
                        (", ".join(unknown) + " — unknown, so none is called dead and `wave cleanup` removes none; check `gh auth status`") if unknown else "yes", False))
         checks.append((f"no agent past the retry ceiling ({RETRY_CEILING} no-progress dispatches)", not exhausted,

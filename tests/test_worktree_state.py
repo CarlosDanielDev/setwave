@@ -4,12 +4,19 @@ Two repos, each with worktrees named after the case:
   o/ws  (the fake gh lists its PRs: tests/fixtures/pr_list_all_o_ws.json)
     ws-1  squash-merged: PR 50 merged, remote branch gone      -> merged: doctor lists it, cleanup removes it
     ws-2  PR 51 merged, but a file edited since                -> dirty: dirt beats the merged PR
+    ws-4  a commit, pushed, no PR listed                       -> stale for --stale-days 0, unless the PR list may be cut short
+    ws-3  PR 52 merged, pushed, then a local commit            -> unpushed: kept, and named by doctor apart
   o/gf  (no fixture: the fake gh fails, like a gh without network or login)
     gf-1  a commit, no PR visible                              -> unknown, never "likely dead"
     gf-2  an empty seat                                        -> unknown too: cleanup removes nothing
 """
+import contextlib
+import io
 import json
+import os
+import subprocess
 import unittest
+from unittest import mock
 
 from helpers import TMP, gh_calls, git, run_wave, sandbox, wave
 
@@ -46,6 +53,11 @@ def setUpModule():
     worktree(W, "ws-1", "feat/1-squashed", "one.txt")
     worktree(W, "ws-2", "feat/2-dirty", "two.txt", push=True)
     (TMP / "ws-2" / "dirt.txt").write_text("not saved anywhere\n")
+    worktree(W, "ws-3", "feat/3-ahead", "three.txt", push=True)
+    (TMP / "ws-3" / "more.txt").write_text("more\n")
+    git("add", "more.txt", cwd=TMP / "ws-3")
+    git("commit", "-q", "-m", "feat/3-ahead: more", cwd=TMP / "ws-3")
+    worktree(W, "ws-4", "feat/4-nopr", "four.txt", push=True)
     make_repo(G, "o/gf")
     worktree(G, "gf-1", "feat/1-work", "one.txt")
     worktree(G, "gf-2", "feat/2-empty")
@@ -107,6 +119,38 @@ class DirtyBeatsThePr(unittest.TestCase):
         self.assertIn("KEEP ws-2: dirty", out)
         self.assertTrue((TMP / "ws-2" / "dirt.txt").exists())
         self.assertNotIn("ws-2", line(run_wave("doctor", cwd=W).stdout, "leftover worktrees"))
+
+
+class UnpushedBeatsThePr(unittest.TestCase):
+    def test_cleanup_keeps_an_unpushed_worktree_whose_pr_merged(self):
+        p = run_wave("cleanup", "--stale-days", "0", "--yes", cwd=W)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("KEEP ws-3: unpushed (origin/feat/3-ahead is behind)", p.stdout)
+        self.assertTrue((TMP / "ws-3" / "more.txt").exists())
+
+    def test_doctor_names_unsaved_work_behind_a_merged_pr_and_never_suggests_dispatch(self):
+        out = run_wave("doctor", cwd=W).stdout
+        unsaved = line(out, "unsaved work behind a merged PR")
+        for name in ("ws-2", "ws-3"):
+            self.assertIn(name, unsaved)
+        self.assertNotIn("dispatch --force", unsaved)
+        self.assertNotIn("ws-3", line(out, "agents at work"))
+        self.assertNotIn("ws-3", line(out, "no agent likely dead"))
+
+
+class Truncated(unittest.TestCase):
+    def test_a_list_that_fills_the_limit_is_unknown_and_nothing_is_removed(self):
+        out, here = io.StringIO(), os.getcwd()
+        os.chdir(W)
+        try:  # the fixture has as many PRs as the patched limit: gh may have cut the list short
+            with mock.patch.object(wave, "PR_LIST_LIMIT", 3), contextlib.redirect_stdout(out):
+                wave.main(["cleanup", "--stale-days", "0", "--yes"])
+        finally:
+            os.chdir(here)
+        self.assertIn("PR state unknown", out.getvalue())
+        self.assertNotIn("removed ws-", out.getvalue())
+        self.assertIn("KEEP ws-4: PR state unknown", out.getvalue())
+        self.assertTrue((TMP / "ws-4").exists())
 
 
 class GhFailure(unittest.TestCase):
