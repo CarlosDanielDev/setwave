@@ -12,6 +12,7 @@ One git worktree per issue · one agent per worktree · verification before anyt
 [![Python](https://img.shields.io/badge/python-3-3776AB?logo=python&logoColor=white)](https://www.python.org)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Ubuntu-lightgrey)](.github/workflows/ci.yml)
 [![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2)](.claude-plugin/plugin.json)
+[![Showcase](https://img.shields.io/badge/showcase-carlosdanieldev.github.io%2Fsetwave-45d6b8)](https://carlosdanieldev.github.io/setwave/)
 
 In surfing, a *set* is the group of waves that arrives together. That is what this does with issues.
 
