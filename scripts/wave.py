@@ -81,7 +81,9 @@ RETRY_CEILING = 3
 # more parallel agents than this once hit the API rate limit and left a half-extracted crate in the shared cargo cache
 MAX_BATCH = 6
 # the agent skills a handoff names when the repo declares and detects none (`phases.agent_skills` in .wave.json wins)
-DEFAULT_SKILLS = ["caveman (ultra)", "ponytail", "superpowers:test-driven-development"]
+# (the plugin ships the `setwave:*` ones; the rest are host-only and the prompt says to use them only if present)
+DEFAULT_SKILLS = ["setwave:caveman (ultra)", "setwave:ponytail", "setwave:architecture-designer",
+                  "graphify", "team-agent-orchestration", "superpowers:test-driven-development", "poka-yoke"]
 # a registry package in Cargo.lock: name, version, then a registry or sparse-index source (git and path packages are not cached there)
 LOCK_PACKAGE = re.compile(r'\[\[package\]\]\s*\nname = "([^"]+)"\s*\nversion = "([^"]+)"\s*\nsource = "(?:registry|sparse)\+')
 # `order --run-gate` checks each simulated step out into a detached worktree named so; `doctor` reports any it finds
@@ -699,6 +701,16 @@ def profile_skills(p: dict) -> list[str]:
     return skills
 
 
+def agent_skills(repo: "Repo") -> list[str]:
+    """The one list of skills a handoff and the prompt's section 0 both name: the repo's own, else the default stack."""
+    return profile_skills(repo.profile()) or DEFAULT_SKILLS
+
+
+def skill_list(skills: list[str]) -> str:
+    """Skills as the Skill tool names them, backticked; a trailing "(level)" stays outside the name."""
+    return ", ".join(re.sub(r"^(\S+)( \(.*\))?$", r"`\1`\2", s) for s in skills)
+
+
 def profile_prompt(p: dict) -> str:
     """The `{{PROFILE}}` block of the agent prompt: what the repo itself provides for each phase of the
     loop, named so the agent expects it — or the plain default stack when nothing is found. Rule files
@@ -709,7 +721,7 @@ def profile_prompt(p: dict) -> str:
         return ("Nenhuma orquestração própria detectada neste repositório (nada em `.claude/`, nenhum "
                 "CLAUDE.md/AGENTS.md/CONTRIBUTING.md): use a stack padrão acima como está.")
     lines = ["Este repositório tem orquestração própria:",
-             ("- skills dele, nesta ordem, antes da stack padrão: " + ", ".join(f"`{s}`" for s in skills))
+             ("- skills dele, nesta ordem (são as que o §0 lista no lugar da stack padrão): " + ", ".join(f"`{s}`" for s in skills))
              if skills else "- nenhuma skill própria: a stack padrão acima vale."]
     if p["hooks"]:
         lines.append("- hooks que se impõem (o Claude Code os roda; espere tropeçar neles): "
@@ -1449,6 +1461,7 @@ def render_prompt(repo: Repo, iss: dict, branch: str, sha: str, parallel: int) -
                                 else "sem `codegraph` no host: comece por Grep/Read — nada aqui depende dele"),
         "ACCOUNT": f"conta gh `{repo.account}` (use `GH_TOKEN=$(gh auth token --user {repo.account})` nos comandos gh)" if repo.account else "conta gh ativa",
         "PROFILE": profile_prompt(repo.profile()),
+        "SKILLS": skill_list(agent_skills(repo)),
         "PREPARED": prepared_note(iss.get("body") or ""),
         "PARALLEL": str(max(parallel - 1, 0)),
     }
@@ -2670,7 +2683,7 @@ def handoff_block(repo: Repo, iss: dict) -> str:
     gate, skills (`.wave.json`'s `phases.agent_skills`, else the default stack), the non-negotiables and
     `Closes #N`. The judgement — the Done when, the file:line, the ADR — is never written here."""
     n = iss["number"]
-    gate, skills = repo.gate(), profile_skills(repo.profile()) or DEFAULT_SKILLS
+    gate, skills = repo.gate(), agent_skills(repo)
     return "\n".join([
         "## Handoff",
         PREPARE_MARK, "",
@@ -2680,7 +2693,7 @@ def handoff_block(repo: Repo, iss: dict) -> str:
         "```", "",
         f"Base `origin/{repo.base}` at `{repo.origin_sha()}`. Gate:",
         "", "```bash", *gate, "```", "",
-        "Skills: " + ", ".join(f"`{s}`" for s in skills), "",
+        "Skills: " + skill_list(skills), "",
         "Non-negotiables: no AI attribution in commits or PRs; never `git gc --prune`, `git reflog expire`, "
         "`git stash`, `git reset --hard`, `git clean -f`, `git push --force*`, `git branch -D`, `rm -rf`; "
         "never merge — the owner merges; never touch the main checkout or a sibling worktree; "
@@ -3080,7 +3093,8 @@ GUARANTEES = [
     (".wave.json is read from origin/<base> after the fetch, not from a main checkout left behind; doctor names a stale copy", "Repo._load_cfg <- Repo.fetch, cmd_doctor", "facts config_source: origin/main:.wave.json; ! main checkout's `.wave.json` matches origin/main's: differs in gate", True),
     ("doctor names every CI action the gate does not cover", "cmd_doctor -> Repo.ci_gate", "! CI runs `x/y@v1` and the gate does not", True),
     ("the repo's own orchestration is detected per phase, by name and location, and `.wave.json` phases overrides it", "Repo.profile -> detect_profile", "facts profile.phases: provider + detected | declared | default", True),
-    ("the agent prompt carries the profile: repo skills in order before the default stack, hooks enforced, rule files first; nothing found says so", "render_prompt -> profile_prompt", "the {{PROFILE}} block of templates/agent.md", True),
+    ("the agent prompt carries the profile: repo skills in order, replacing the default stack in section 0, hooks enforced, rule files first; nothing found says so", "render_prompt -> profile_prompt", "the {{PROFILE}} block of templates/agent.md", True),
+    ("section 0 of the agent prompt renders its skill list from the same source as the handoff's \"Skills:\" line: the profile's skills, else DEFAULT_SKILLS", "render_prompt SKILLS <- agent_skills; handoff_block", "section 0 of `wave prompt` names every skill `agent_skills` returns; tests/test_commands.py test_section_zero_lists_the_skills_the_handoff_declares fails if the field or the shared source goes", True),
     ("dispatch runs the repo's sync provider before creating worktrees", "cmd_dispatch -> sync_provider", "make sync in <root>; a failure refuses, a `.claude/commands/*` provider is only named", True),
     ("Makefile targets test/check/lint/ci are gate candidates when the manifest falls through", "Repo._manifest_gate -> makefile_targets", "gate_sources: (make test, manifest)", True),
     ("doctor warns when the Makefile or the rule files name a command the gate lacks", "cmd_doctor -> doc_commands", "! `CLAUDE.md` names `make ci` and the gate does not", True),
