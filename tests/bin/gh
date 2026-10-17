@@ -21,6 +21,7 @@ With FAKE_GH_CREATE=N, `issue create -R o/r` answers https://github.com/o/r/issu
 With FAKE_GH_API_WRITE=1, a non-GET api call answers ok: logged, never sent.
 With FAKE_GH_COMMENT=1, `pr comment N -R o/r` answers https://github.com/o/r/pull/N#issuecomment-1: logged, never sent.
 With FAKE_GH_EDIT=1, `issue edit`, `issue comment` and `issue reopen` answer the issue's URL: logged, never sent.
+With FAKE_GH_PR_CREATE=1, `pr create -R o/r ...` answers the new PR's URL: logged, never sent.
 With FAKE_GH_MERGE=1, `pr merge N -R o/r` answers that it merged: logged, never sent.
 With FAKE_GH_TOKEN=fail|two|empty, `auth token` fails (the stale token still hits stdout, the
 reason goes to stderr) / prints two lines on stdout / prints nothing on stdout (issue #27).
@@ -90,6 +91,9 @@ def main(args: list[str]) -> int:
         return 0
     if args[:2] in (["issue", "edit"], ["issue", "comment"], ["issue", "reopen"]) and os.environ.get("FAKE_GH_EDIT"):
         print(f"https://github.com/{args[args.index('-R') + 1]}/issues/{args[2]}")
+        return 0
+    if args[:2] == ["pr", "create"] and os.environ.get("FAKE_GH_PR_CREATE"):
+        print(f"https://github.com/{args[args.index('-R') + 1]}/pull/99")
         return 0
     if args[:2] == ["pr", "merge"] and os.environ.get("FAKE_GH_MERGE"):
         print(f"merged pull request {args[args.index('-R') + 1]}#{args[2]} (fake gh)")
