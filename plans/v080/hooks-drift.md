@@ -13,10 +13,15 @@ A mudança: (1) `wave hooks status` resolve o path gravado no settings e reporta
 - [ ] `hooks install --check` lista alvo + existência por guarda — owner: implementer
 - [ ] testes com settings apontando para path inexistente — owner: implementer
 - [ ] README documenta o modelo e o re-install pós-update — owner: implementer
+- [ ] `hooks status` e `doctor` reconhecem a entrada project-relative `python3 "$CLAUDE_PROJECT_DIR/hooks/guards.py" <guard>` quando ela resolve para o `hooks/guards.py` do próprio projeto, e `hooks install` não duplica entradas já cobertas por ela — owner: implementer
 
 ## ADR stub
 
 Bifurcação: path estável (copiar guards.py para ~/.config/setwave/) vs detectar drift. Contexto: copiar cria segunda fonte de verdade (a guarda do projeto diverge da do plugin); detectar mantém fonte única e o re-install é um comando. Recomendação (para discordar): detectar + documentar — a cópia é o tipo de conveniência que vira dois códigos разных em produção.
+
+## Contexto do #72
+
+O PR do dogfood (#72) descobriu que o `settings.json` commitado não pode carregar o path absoluto do dono: em outro clone o script não existe, `python3` sai com 2 e o hook `PreToolUse` bloqueia todo Bash. A forma project-relative funciona, mas `status`/`doctor` hoje comparam a string absoluta de `guard_command(name)` e a leem como `missing`. O #72 espera este item.
 
 ## Out of scope
 
