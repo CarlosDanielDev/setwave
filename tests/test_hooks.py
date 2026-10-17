@@ -283,15 +283,15 @@ class Install(unittest.TestCase):
         self.assertEqual(p.stdout.count("active"), 4, p.stdout)
         self.assertNotIn("missing", p.stdout)
 
-    def test_status_names_a_hook_whose_target_is_gone_as_broken(self):
+    def test_status_names_a_hook_whose_target_is_gone_as_missing_target(self):
         # the plugin checkout lost its guards.py after the install: the entry is there, the guard cannot answer
         repo = wave.Repo.get("o/r")
         with unittest.mock.patch.object(wave, "HOOKS_SCRIPT", TMP / "gone-35" / "guards.py"):
             with contextlib.redirect_stdout(io.StringIO()) as out:
-                wave.cmd_hooks(repo, types.SimpleNamespace(action="install", dry_run=False))
-                wave.cmd_hooks(repo, types.SimpleNamespace(action="status", dry_run=False))
-        self.assertIn("broken", out.getvalue())
-        self.assertIn("attribution", line(out.getvalue(), "broken"))
+                wave.cmd_hooks(repo, types.SimpleNamespace(action="install", dry_run=False, check=False))
+                wave.cmd_hooks(repo, types.SimpleNamespace(action="status", dry_run=False, check=False))
+        self.assertIn("missing target", out.getvalue())
+        self.assertIn("attribution", line(out.getvalue(), "missing target"))
 
     def test_doctor_carries_one_line(self):
         p = run_wave("doctor")
@@ -304,6 +304,105 @@ class Install(unittest.TestCase):
         ok = line(p.stdout, "guard hooks installed")
         self.assertTrue(ok.startswith("  ✓ "), ok)
         self.assertIn("4/4", ok)
+
+
+STALE = "/gone-76/plugins/cache/setwave/setwave/0.7.0/hooks/guards.py"
+RELATIVE = 'python3 "$CLAUDE_PROJECT_DIR/hooks/guards.py" '
+PROJECT_GUARDS = CLONE / "hooks" / "guards.py"
+
+
+def settings_with(command_for) -> dict:
+    return {"hooks": {"PreToolUse": [
+        {"matcher": m, "hooks": [{"type": "command", "command": command_for(n)}]}
+        for n, m in (("attribution", "Bash"), ("forbidden-git", "Bash"), ("secret-read", "Bash"), ("dispatch-contract", "Task"))]}}
+
+
+class TargetDrift(unittest.TestCase):
+    """The settings entry outlives the file it points at: a plugin update swaps the versioned cache directory."""
+
+    def setUp(self):
+        sandbox()
+        reset_settings()
+        self.addCleanup(self.remove_project_guards)
+
+    def remove_project_guards(self):
+        if PROJECT_GUARDS.exists():
+            PROJECT_GUARDS.unlink()
+            PROJECT_GUARDS.parent.rmdir()
+
+    def project_guards(self):
+        PROJECT_GUARDS.parent.mkdir(exist_ok=True)
+        PROJECT_GUARDS.write_text(GUARDS.read_text())
+
+    def test_status_reports_missing_target_with_the_recorded_path(self):
+        write_settings(settings_with(lambda n: f"python3 {STALE} {n}"))
+        p = run_wave("hooks", "status")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout.count("missing target"), 4, p.stdout)
+        self.assertIn(STALE, line(p.stdout, "attribution"))
+        self.assertNotIn("active", p.stdout)
+
+    def test_doctor_warns_on_a_hook_whose_target_is_gone(self):
+        write_settings(settings_with(lambda n: f"python3 {STALE} {n}"))
+        warn = line(run_wave("doctor").stdout, "guard hooks installed")
+        self.assertTrue(warn.startswith("  ! "), warn)
+        self.assertIn("missing target", warn)
+        self.assertIn("0/4", warn)
+        self.assertIn("`wave hooks install`", warn)
+
+    def test_check_lists_each_guard_with_its_target_and_whether_it_exists(self):
+        write_settings({"hooks": {"PreToolUse": [
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": f"python3 {STALE} attribution"},
+                                          {"type": "command", "command": f"python3 {GUARDS} forbidden-git"}]}]}})
+        before = SETTINGS.read_text()
+        p = run_wave("hooks", "install", "--check")
+        self.assertEqual(p.returncode, 1, "a recorded target is gone: the exit code says so")
+        self.assertIn(STALE, line(p.stdout, "attribution"))
+        self.assertIn("MISSING", line(p.stdout, "attribution"))
+        self.assertIn(str(GUARDS), line(p.stdout, "forbidden-git"))
+        self.assertIn("exists", line(p.stdout, "forbidden-git"))
+        self.assertIn("not installed", line(p.stdout, "secret-read"))
+        self.assertEqual(SETTINGS.read_text(), before, "--check writes nothing")
+        self.assertEqual(backups(), [])
+
+    def test_check_passes_when_every_target_is_there(self):
+        self.assertEqual(run_wave("hooks", "install").returncode, 0)
+        p = run_wave("hooks", "install", "--check")
+        self.assertEqual(p.returncode, 0, p.stdout)
+        self.assertNotIn("MISSING", p.stdout)
+
+    def test_install_replaces_an_entry_whose_target_is_gone(self):
+        write_settings({"model": "opus", **settings_with(lambda n: f"python3 {STALE} {n}")})
+        p = run_wave("hooks", "install")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(SETTINGS.read_text())
+        self.assertEqual(data["model"], "opus")
+        self.assertEqual(len(guard_commands(data)), 4, "the dead entries went, the live ones came")
+        self.assertNotIn(STALE, SETTINGS.read_text())
+
+    def test_the_project_relative_entry_is_active_when_it_resolves_to_the_projects_guards(self):
+        self.project_guards()
+        write_settings(settings_with(lambda n: RELATIVE + n))
+        p = run_wave("hooks", "status")
+        self.assertEqual(p.stdout.count("active"), 4, p.stdout)
+        ok = line(run_wave("doctor").stdout, "guard hooks installed")
+        self.assertTrue(ok.startswith("  ✓ "), ok)
+        self.assertIn("4/4", ok)
+
+    def test_install_does_not_duplicate_what_the_project_relative_entry_covers(self):
+        self.project_guards()
+        write_settings(settings_with(lambda n: RELATIVE + n))
+        before = SETTINGS.read_text()
+        p = run_wave("hooks", "install")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("already installed", p.stdout)
+        self.assertEqual(SETTINGS.read_text(), before)
+
+    def test_the_project_relative_entry_without_the_projects_guards_is_a_missing_target(self):
+        write_settings(settings_with(lambda n: RELATIVE + n))
+        p = run_wave("hooks", "status")
+        self.assertEqual(p.stdout.count("missing target"), 4, p.stdout)
+        self.assertIn("$CLAUDE_PROJECT_DIR/hooks/guards.py", line(p.stdout, "attribution"))
 
 
 class GuaranteesTable(unittest.TestCase):
