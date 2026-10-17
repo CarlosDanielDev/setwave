@@ -5,6 +5,7 @@ the tooling. CI runs the linter on every push on both matrix OSes; these tests p
 refuses, so removing a check fails here first.
 """
 import importlib.util
+import re
 import subprocess
 import sys
 import tempfile
@@ -40,6 +41,14 @@ class Real(unittest.TestCase):
         p = subprocess.run([sys.executable, str(SCRIPTS / "validate_skills.py")], capture_output=True, text=True)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertEqual(load().problems(SKILLS.parent), [])
+
+    def test_architecture_designer_ships_every_reference_it_cites(self):
+        d = SKILLS / "architecture-designer"
+        cited = set(re.findall(r"references/[\w\-./]+\.md", (d / "SKILL.md").read_text()))
+        self.assertEqual(len(cited), 5, cited)
+        for c in cited:
+            self.assertTrue((d / c).is_file(), c)
+        self.assertNotIn("Not shipped", (d / "SKILL.md").read_text())
 
     def test_ci_runs_the_linter(self):
         """The guard lives in CI: the workflow names the step, on the matrix that runs on both OSes."""
@@ -87,6 +96,15 @@ class Refusals(unittest.TestCase):
         dead = [p for p in self.problems() if "no-such-file" in p]
         self.assertEqual(len(dead), 1, self.problems())
         self.assertIn("templates/no-such-file.md", dead[0])
+
+    def test_a_cited_reference_that_does_not_ship_is_refused(self):
+        d = skill(self.tmp, "my-skill", GOOD, body="Load `references/there.md` or `references/gone.md`.\n")
+        (d / "references").mkdir()
+        (d / "references" / "there.md").write_text("here\n")
+        dead = [p for p in self.problems() if "gone.md" in p]
+        self.assertEqual(len(dead), 1, self.problems())
+        self.assertIn("references/gone.md", dead[0])
+        self.assertFalse(any("there.md" in p for p in self.problems()), self.problems())
 
     def test_a_skill_without_frontmatter_is_refused(self):
         d = self.tmp / "skills" / "my-skill"

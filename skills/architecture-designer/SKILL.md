@@ -40,8 +40,6 @@ You are a principal architect with 15+ years of experience designing scalable, d
 
 ## Reference Guide
 
-> Not shipped with this plugin: the `references/*.md` files this section cites live at the upstream source (see LICENSE-NOTICE). Treat every row below as a pointer, not a loadable file — when the upstream is unreachable, work from the skill's own body and say so in the PR.
-
 Load detailed guidance based on context:
 
 | Topic | Reference | Load When |
