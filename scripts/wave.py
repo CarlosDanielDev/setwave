@@ -2910,12 +2910,15 @@ def cmd_release(default: Repo | None, a):
         committed = True
         repo.git(["push", "-u", "origin", branch])
         url = repo.gh(["pr", "create", "-R", repo.slug, "--base", repo.base, "--head", branch, "--title", title, "--body", body]).strip()
-    except SystemExit as e:
+    except (SystemExit, OSError, KeyboardInterrupt) as e:
         err = e
     if not committed:  # take back our own writes (the tree was clean at the start) so nothing dirty rides back to the owner's branch
         repo.git_ok(["restore", "--staged", "--", *[c[0] for c in changes]])
         for rel, old, _ in changes:
-            (repo.root / rel).write_text(old)
+            try:
+                (repo.root / rel).write_text(old)
+            except OSError:  # a file we could not write is a file we did not change
+                pass
     back_ok, back_out = repo.git_ok(back)
     note = "" if back_ok else (f"\nRELEASE-RESTORE-FAILED: could not return to where you started ({back_out.strip()}); "
                                f"you are on {branch}: `git {' '.join(back)}`")
@@ -2924,7 +2927,7 @@ def cmd_release(default: Repo | None, a):
         how = (f"{branch} holds the bump and is kept; finish with `git push -u origin {branch}` then "
                f"`gh pr create -R {repo.slug} --base {repo.base} --head {branch} --title '{title}'`, or drop the branch yourself and re-run" if committed else
                f"nothing was committed and the manifests are back as they were; {branch} is an empty branch: drop it (`git branch -d {branch}`) and re-run once the commit works")
-        release_refuse("RELEASE-INCOMPLETE", f"{err}\n{how}{note}")
+        release_refuse("RELEASE-INCOMPLETE", f"{str(err) or type(err).__name__}\n{how}{note}")
     if note:
         print(note.strip(), file=sys.stderr)
     print(f"{url}\n\nStopped here. Yours: review the notes, merge, then\n  git tag v{v} <merge commit> && git push origin v{v}\n  gh release create v{v} --notes-file <notes>")

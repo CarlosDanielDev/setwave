@@ -136,6 +136,32 @@ class Release(unittest.TestCase):
         self.assertEqual(status, "", "the bump written for the commit is taken back, not left on the owner's tree")
         self.assertEqual([c for c in calls if c[:2] == ["pr", "create"]], [])
 
+    def test_a_restore_that_git_refuses_is_named_after_the_pr_url_with_the_exact_switch(self):
+        hook = REL / ".git" / "hooks" / "pre-push"  # edits a manifest while the push runs: `switch main` then refuses to overwrite it
+        hook.write_text("#!/bin/sh\nprintf ' ' >> .claude-plugin/plugin.json\n")
+        hook.chmod(0o755)
+        self.addCleanup(git, "checkout", "-q", "-f", "main", cwd=REL)
+        self.addCleanup(hook.unlink)
+        p, calls = release("0.8.6", create=True)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("/pull/99", p.stdout, "the PR was opened and its URL printed")
+        self.assertIn("RELEASE-RESTORE-FAILED:", p.stderr)
+        self.assertIn("`git switch main`", p.stderr)
+        self.assertEqual(head(), "release/0.8.6")
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores a read-only file")
+    def test_an_oserror_while_writing_the_bump_takes_the_same_restore_and_incomplete_path(self):
+        plugin = REL / ".claude-plugin" / "plugin.json"
+        plugin.chmod(0o444)
+        self.addCleanup(plugin.chmod, 0o644)
+        p, calls = release("0.8.7", create=True)
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("RELEASE-INCOMPLETE:", p.stderr)
+        self.assertNotIn("Traceback", p.stderr)
+        self.assertEqual(head(), "main")
+        status = subprocess.run(["git", "status", "--porcelain"], cwd=REL, capture_output=True, text=True).stdout
+        self.assertEqual(status, "", "the manifest that was written is taken back")
+
     def refused(self, code, *args, cwd=REL):
         p, calls = release(*args, cwd=cwd, create=True)
         self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
