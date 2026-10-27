@@ -1478,7 +1478,8 @@ def worktree_state(repo: Repo, wt: Path, branch: str, n: int, now: float | None 
     (MERGED | CLOSED | OPEN | None for no PR | "unknown" when gh failed) and pr, commits ahead of origin/<base>,
     the dispatch stamp, and progress (working | stalled | dead) by minutes since the newest change — plus `busy`:
     a live process (ps argv, lsof cwd) sits in the worktree, so a long gate with no file change is still `working`,
-    and quiet with no process is `stalled`, a signal at WORKING_MIN instead of DEAD_MIN."""
+    and quiet with no process is `stalled`, a signal at WORKING_MIN instead of DEAD_MIN; a worktree whose
+    PR is merged, closed or open is `done`, however idle."""
     stamp = stamp_of(wt)
     now = time.time() if now is None else now
     dispatched = _epoch(stamp.get("dispatched_at"))
@@ -1487,16 +1488,17 @@ def worktree_state(repo: Repo, wt: Path, branch: str, n: int, now: float | None 
         busy = bool(worktree_processes(wt))
     except OSError:  # a probe that cannot run is no process: the files' verdict stands
         busy = False
-    seen = {"likely dead": "dead"}.get(verdict(idle, False), verdict(idle, False))
     ok, remote = repo.git_ok(["rev-parse", "--verify", "--quiet", f"origin/{branch}"])
     known, pr = repo.pr_of(branch)
+    has_pr = (pr or {}).get("state") in PR_STATES
+    seen = {"likely dead": "dead"}.get(verdict(idle, has_pr), verdict(idle, has_pr))
     f = {"issue": n, "worktree": str(wt), "branch": branch, "stamp": stamp, "stamped": bool(stamp),
          "dirty": bool(repo.git(["status", "--porcelain"], cwd=wt).strip()),
          "unpushed": ok and remote.strip() != repo.git(["rev-parse", "HEAD"], cwd=wt).strip(),
          "pr_state": (pr or {}).get("state") if known else "unknown", "pr": (pr or {}).get("number"),
          "commits": int(repo.git_ok(["rev-list", "--count", f"origin/{repo.base}..HEAD"], cwd=wt)[1] or 0),
          "idle_min": idle, "age_min": round((now - dispatched) / 60) if dispatched else None,
-         "busy": busy, "progress": "working" if busy else "stalled" if seen == "quiet" else seen}
+         "busy": busy, "progress": "done" if has_pr else "working" if busy else "stalled" if seen == "quiet" else seen}
     return {**f, "state": derive_state(f)}
 
 
@@ -1506,18 +1508,31 @@ def agent_verdict(rec: dict) -> str:
         "likely dead" if rec["progress"] == "dead" else rec["progress"]
 
 
+def inside_worktree(line: str, root: str) -> bool:
+    """True when `line` names `root` itself or a path inside it. The match must end at a path boundary
+    (end of string, `/`, whitespace), so a sibling whose number merely extends the digits — `l-9` inside
+    `l-94` — is never read as this worktree's process."""
+    start = 0
+    while (at := line.find(root, start)) != -1:
+        end = at + len(root)
+        if end == len(line) or line[end] in "/ \t":
+            return True
+        start = end
+    return False
+
+
 def worktree_processes(wt: Path) -> list[str]:
-    """Best-effort probe for live processes inside a worktree: ps matches the command line, lsof the cwd. A
-    failed probe reads as no process, so the verdict falls back to what the files say. Tests inject this —
-    the suite never runs it."""
+    """Best-effort probe for live processes inside a worktree: ps matches the command line, lsof the cwd,
+    both on a path boundary (`inside_worktree`). A failed probe reads as no process, so the verdict falls
+    back to what the files say. Tests inject this — the suite never runs it."""
     lines: list[str] = []
     try:
         rc, out, _ = run(["ps", "-axww", "-o", "command="])
         if rc == 0:
-            lines += [l for l in out.splitlines() if str(wt) in l]
+            lines += [l for l in out.splitlines() if inside_worktree(l, str(wt))]
         rc, out, _ = run(["lsof", "-0", "-w", "-d", "cwd", "-Fn"])
         if rc == 0:
-            lines += [f[1:] for f in out.split("\0") if f.startswith("n") and f[1:].startswith(str(wt))]
+            lines += [f[1:] for f in out.split("\0") if f.startswith("n") and inside_worktree(f[1:], str(wt))]
     except OSError:
         return []
     return lines
@@ -1537,8 +1552,8 @@ def wake_lines(default: Repo, r: dict) -> list[str]:
 def every_seconds(s: str) -> float:
     """`45s` | `5m` | `1h` | bare seconds — the --watch poll interval."""
     m = re.fullmatch(r"(\d+)([smh]?)", s.strip())
-    if not m:
-        raise SystemExit(f"--every {s!r}: use <n>s | <n>m | <n>h | <n>")
+    if not m or int(m.group(1)) == 0:
+        raise SystemExit(f"--every {s!r}: use <n>s | <n>m | <n>h | <n>, n > 0")
     return int(m.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600}[m.group(2)]
 
 
@@ -3258,7 +3273,12 @@ def cmd_agents(default: Repo | None, a):
         raise SystemExit("run inside a repo checkout, or pass --repo")
     if getattr(a, "watch", False):
         while True:  # the watchdog the orchestrator arms in the background: it ends — and so notifies —
-            bad = stalled_agents(default)  # the moment a worktree turns stalled or likely dead
+            try:  # the moment a worktree turns stalled or likely dead
+                bad = stalled_agents(default)
+            except (Exception, SystemExit) as e:  # sh raises SystemExit on a bounced git call; log it and keep polling — never a crash that reads like a stall
+                print(f"  ! probe failed, still watching: {type(e).__name__}: {e}")
+                time.sleep(every_seconds(getattr(a, "every", None) or "5m"))
+                continue
             if bad:
                 for r in bad:
                     print("\n".join(wake_lines(default, r)))
