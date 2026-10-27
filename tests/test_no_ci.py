@@ -17,6 +17,7 @@ from unittest import mock
 from helpers import TMP, WAVE, gh_calls, git, run_wave, sandbox, wave
 
 N = TMP / "n"
+Z = TMP / "z"
 GATE = "echo gate-o-n"
 
 
@@ -41,6 +42,18 @@ def setUpModule():
     reg = json.loads(reg_file.read_text())
     reg["repos"]["o/n"] = {"path": str(N)}
     reg_file.write_text(json.dumps(reg))
+    # o/z: origin/main carries a workflow, the checkout's tree does not — what has_ci_workflows reads (#97)
+    bare_z = TMP / "remote" / "o" / "z.git"
+    bare_z.parent.mkdir(parents=True, exist_ok=True)
+    git("init", "-q", "--bare", str(bare_z), cwd=TMP)
+    git("clone", "-q", str(bare_z), str(Z), cwd=TMP)
+    (Z / ".wave.json").write_text(json.dumps({"base": "main"}))
+    (Z / ".github" / "workflows").mkdir(parents=True)
+    (Z / ".github" / "workflows" / "ci.yml").write_text("name: ci\non: [push]\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n")
+    git("add", ".", cwd=Z)
+    git("commit", "-q", "-m", "base", cwd=Z)
+    git("push", "-q", "origin", "main", cwd=Z)
+    (Z / ".github" / "workflows" / "ci.yml").unlink()  # the stale tree: only origin knows the workflow
 
 
 def writes(*args, log: str):
@@ -135,6 +148,7 @@ class NoCiEvidence(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertIn("--no-ci", p.stdout)
         self.assertIn(GATE, p.stdout, "the acknowledgment names the gate it accepted")
+        self.assertIn("unverified", p.stdout, "the acknowledgment says the paste is unverified")
         self.assertTrue([c for c in calls("noci-body") if c[:2] == ["pr", "merge"]])
 
     def test_without_evidence_no_ci_is_refused(self):
@@ -171,6 +185,62 @@ class EmptyPlans(unittest.TestCase):
         q = run_wave("merge", "--yes")
         self.assertEqual(q.returncode, 1, q.stdout + q.stderr)
         self.assertIn("nothing to merge", q.stderr)
+
+
+class GatePaste(unittest.TestCase):
+    """The body-paste evidence is anchored: a fenced run, not any mention (#97 review)."""
+
+    def r(self):
+        class R:
+            def gate(self_inner):
+                return ["echo gate-o-n", "cargo test"]
+        return R()
+
+    def test_a_pasted_run_in_a_fenced_block_is_evidence(self):
+        body = "Gate:\n\n```\n$ echo gate-o-n\nok\n```\n"
+        self.assertEqual(wave.gate_output_in_body(self.r(), body), "echo gate-o-n")
+        self.assertEqual(wave.gate_output_in_body(self.r(), "```\necho gate-o-n\nok\n```"), "echo gate-o-n")
+
+    def test_a_bare_mention_outside_a_fence_is_not_evidence(self):
+        self.assertIsNone(wave.gate_output_in_body(self.r(), "we should run echo gate-o-n soon"))
+        self.assertIsNone(wave.gate_output_in_body(self.r(), "```\ncargo test\n```\nthen echo gate-o-n"))
+
+
+class WorkflowSource(unittest.TestCase):
+    def test_workflow_existence_reads_origin_not_the_checkout_tree(self):
+        repo = wave.Repo("o/z", {"path": str(Z)})
+        self.assertTrue(repo.has_ci_workflows(), "origin/main has the workflow; a stale tree must not flip NO-CI")
+
+
+class ChecksError(unittest.TestCase):
+    def test_pr_checks_returns_none_when_gh_cannot_read_them(self):
+        repo = wave.Repo.get("o/n")
+        with mock.patch.object(repo, "gh_ok", lambda args: (False, "gh: exploded")):
+            self.assertIsNone(repo.pr_checks(81), "a tool failure is never an empty checks dict")
+
+    def test_a_gh_failure_is_pending_never_no_ci(self):
+        class R:
+            def pr_checks(self_inner, n):
+                return None  # the tri-state's error arm: gh failed both reads
+            def has_ci_workflows(self_inner):
+                return False
+        self.assertIsNone(wave.ci_verdict(R(), 1), "a tool failure is retried as pending, never NO-CI")
+
+    def test_verify_reports_ci_unknown_instead_of_silent_green_or_no_ci(self):
+        repo = wave.Repo.get("o/n")
+        real = wave.Repo.gh_ok
+        def failing(self, args):
+            if args[:2] == ["pr", "checks"]:
+                return False, "gh: exploded"
+            return real(self, args)
+        out = io.StringIO()
+        with mock.patch.object(wave.Repo, "gh_ok", failing), contextlib.redirect_stdout(out):
+            with self.assertRaises(SystemExit) as ctx:
+                wave.cmd_verify(repo, argparse.Namespace(prs=["o/n#81"], epic=None, json=False))
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertIn("CI-UNKNOWN", out.getvalue())
+        v = json.loads(run_wave("verify", "o/n#81", "--json").stdout)  # sanity, unpatched: the fixture PR is clean
+        self.assertFalse(v[0]["checks_error"])
 
 
 class GuaranteesPinned(unittest.TestCase):
