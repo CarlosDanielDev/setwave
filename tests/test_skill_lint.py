@@ -121,5 +121,29 @@ class Refusals(unittest.TestCase):
         self.assertEqual(self.problems(), [])
 
 
+class JudgeTools(unittest.TestCase):
+    """The judge's tool surface is written once and reads the same everywhere it is promised."""
+
+    REPO = WAVE.parent.parent
+    CANONICAL = "Read, Grep, Glob, Write"
+
+    def test_the_agent_the_template_the_skill_and_the_kernel_name_the_same_tools(self):
+        agent = (self.REPO / "agents" / "judge.md").read_text()
+        self.assertIn("tools: " + self.CANONICAL, agent, "agents/judge.md frontmatter carries the tool surface")
+        for where in ((self.REPO / "templates" / "judge.md").read_text(),
+                      (self.REPO / "skills" / "wave" / "SKILL.md").read_text(),
+                      (self.REPO / "scripts" / "wave.py").read_text()):
+            self.assertIn(self.CANONICAL, where, f"one place does not name {self.CANONICAL}")
+
+    def test_the_template_no_longer_refuses_the_tools_the_agent_needs(self):
+        judge = (self.REPO / "templates" / "judge.md").read_text()
+        self.assertNotIn("no Bash", judge)
+        self.assertNotIn("no Write", judge)
+
+    def test_the_round_template_exists_and_the_kernel_names_it(self):
+        self.assertTrue((self.REPO / "templates" / "judge-round.md").is_file())
+        self.assertIn("judge-round.md", (self.REPO / "scripts" / "wave.py").read_text())
+
+
 if __name__ == "__main__":
     unittest.main()
