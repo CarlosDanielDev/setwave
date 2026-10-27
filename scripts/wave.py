@@ -283,7 +283,6 @@ class Repo:
         self._load_cfg()
         self.handoffs = self.root.parent / f"{self.root.name}-handoffs"
         self._prs: list[dict] | None = None
-        self._ci_expected: bool | None = None  # cached: it cannot change within one command, and merge's CI wait polls it every 15 s
         self._pr_states: dict[str, dict] | None | bool = False  # False: not asked yet; None: gh failed
         self._pr_full = False  # the list filled PR_LIST_LIMIT: a branch it does not name is asked for alone
         self._pr_heads: dict[str, dict | None] = {}
@@ -472,11 +471,11 @@ class Repo:
     def ci_expected(self) -> bool:
         """Whether this repo can produce a check at all: Actions is enabled and origin/<base> carries workflow
         files. Actions off is NO-CI even with the files still on disk — the incident behind #97. A read failure
-        answers True: the wait survives, a tool failure is never classified NO-CI. Cached per instance: the
-        answer cannot change within one command, and merge's CI wait re-asks it on every poll."""
-        if self._ci_expected is None:
-            self._ci_expected = False if self.actions_enabled() is False else self.has_ci_workflows()
-        return self._ci_expected
+        answers True: the wait survives, a tool failure is never classified NO-CI. Deliberately not cached:
+        origin/<base> moves after every merge in the same command, and the workflow state moves with it."""
+        if self.actions_enabled() is False:
+            return False
+        return self.has_ci_workflows()
 
     def profile(self) -> dict:
         """The repo's own orchestration: detect_profile's phases plus the gate and the worktree location,
@@ -2308,7 +2307,7 @@ def cmd_verify(default: Repo | None, a):
             if r["protected_touched"]: flags.append("PROTECTED:" + ",".join(r["protected_touched"]))
             if r["checks_not_green"]: flags.append("CI:" + ",".join(f"{k}={v}" for k, v in r["checks_not_green"].items()))
             if r["checks_error"]: flags.append("CI-UNKNOWN[gh could not read the PR's checks: a tool failure is never green or NO-CI — fix gh and re-run]")
-            if r["no_ci"]: flags.append("NO-CI[" + no_ci_reason(repo.base) + "]")
+            if r["no_ci"]: flags.append("NO-CI[" + no_ci_reason() + "]")
             if r["mergeable"] == "CONFLICTING": flags.append("CONFLICT")
             if r["worktree"] and (r["worktree"]["dirty"] or r["worktree"]["unpushed"]): flags.append("WORKTREE-NOT-CLEAN")
             for c in r["contradictions"]: flags.append("CONTRADICTION[" + c + "]")
