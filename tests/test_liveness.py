@@ -1,10 +1,11 @@
 """Agent liveness: a running agent told from a dead one by what its work leaves on disk.
 
-A third repo, o/l, gets one worktree per verdict. Nothing is inspected but files and git: every
-mtime and commit date is set by the test, so no real process of the machine is looked at.
+A third repo, o/l, gets one worktree per verdict. Nothing is inspected but files and git, and the
+process probe (`wave.worktree_processes`) is injected: every mtime and commit date is set by the test,
+so no real process of the machine is looked at.
   l-9   likely dead: dispatched 90 min ago, newest edit 45 min ago, no PR
   l-10  working:     newest edit 2 min ago
-  l-11  quiet:       newest edit 20 min ago
+  l-11  stalled:     newest edit 20 min ago, probe injected as no process
   l-12  likely dead: no stamp, one commit 50 min ago
   l-4   done:        PR 20 closes #4
 """
@@ -132,11 +133,12 @@ class Liveness(unittest.TestCase):
 
 class Agents(unittest.TestCase):
     def test_every_worktree_is_listed_with_its_verdict(self):
-        p = wave_at_now("agents", cwd=L)
+        with mock.patch.object(wave, "worktree_processes", return_value=[]):
+            p = wave_at_now("agents", cwd=L)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         rows = {int(l.split()[0].split("#")[1]): l for l in p.stdout.splitlines() if l.startswith("  o/l#")}
         self.assertTrue({4, 9, 10, 11, 12} <= set(rows), p.stdout)
-        for n, v in {9: "likely dead", 10: "working", 11: "quiet", 12: "likely dead", 4: "done"}.items():
+        for n, v in {9: "likely dead", 10: "working", 11: "stalled", 12: "likely dead", 4: "done"}.items():
             with self.subTest(n=n):
                 self.assertTrue(rows[n].rstrip().endswith(v), rows[n])
         self.assertIn("dispatched 90 min ago", rows[9])
@@ -144,7 +146,8 @@ class Agents(unittest.TestCase):
         self.assertIn("PR #20", rows[4])
 
     def test_inside_a_worktree_it_lists_the_siblings_too(self):
-        p = wave_at_now("agents", cwd=TMP / "l-9")
+        with mock.patch.object(wave, "worktree_processes", return_value=[]):
+            p = wave_at_now("agents", cwd=TMP / "l-9")
         self.assertEqual(p.returncode, 0, p.stderr)
         rows = {int(l.split()[0].split("#")[1]) for l in p.stdout.splitlines() if l.startswith("  o/l#")}
         self.assertTrue({4, 9, 10, 11, 12} <= rows, p.stdout)
@@ -152,7 +155,8 @@ class Agents(unittest.TestCase):
 
 class Doctor(unittest.TestCase):
     def test_likely_dead_agents_are_named_with_the_recovery(self):
-        p = wave_at_now("doctor", cwd=L)
+        with mock.patch.object(wave, "worktree_processes", return_value=[]):
+            p = wave_at_now("doctor", cwd=L)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         dead = next(l for l in p.stdout.splitlines() if "likely dead" in l and l.startswith("  !"))
         for name in ("l-9", "l-12"):
@@ -163,7 +167,7 @@ class Doctor(unittest.TestCase):
         self.assertIn("`wave dispatch --force 9`", dead)
         alive = next(l for l in p.stdout.splitlines() if "agents at work" in l)
         self.assertIn("l-10 working", alive)
-        self.assertIn("l-11 quiet", alive)
+        self.assertIn("l-11 stalled", alive)
         self.assertNotIn("l-10", next(l for l in p.stdout.splitlines() if "leftover" in l),
                          "an agent that has not committed yet is not a leftover")
 
@@ -180,6 +184,7 @@ class Dispatch(unittest.TestCase):
     def test_the_stamp_is_written_and_excluded(self):
         p = run_wave("dispatch", "8", "--force", cwd=L)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("wave agents --watch", p.stdout, "dispatch ends by printing the stall watchdog to arm")
         wt = TMP / "l-8"
         stamp = json.loads((wt / ".setwave.json").read_text())
         self.assertEqual({k: stamp[k] for k in ("issue", "repo")}, {"issue": 8, "repo": "o/l"})
@@ -209,3 +214,101 @@ class Next(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Stalled(unittest.TestCase):
+    """`worktree_state` reads the process probe injected here: quiet with no process is `stalled` — a
+    signal at WORKING_MIN, before DEAD_MIN — and busy is `working` however long the gate runs without
+    touching a tracked file."""
+
+    def test_no_process_is_stalled_before_dead_min(self):
+        with mock.patch.object(wave, "worktree_processes", return_value=[]):
+            at_25 = wave.worktree_state(repo(), TMP / "l-11", "feat/11-quiet", 11, now=NOW + 5 * 60)
+            at_20 = wave.worktree_state(repo(), TMP / "l-11", "feat/11-quiet", 11, now=NOW)
+        self.assertFalse(at_20["busy"])
+        self.assertEqual(at_20["progress"], "stalled")
+        self.assertEqual(at_25["progress"], "stalled", "idle 25 min, no process: already a signal, still before DEAD_MIN")
+
+    def test_a_live_gate_is_working_without_file_changes(self):
+        with mock.patch.object(wave, "worktree_processes", side_effect=lambda wt: [f"xcodebuild {wt}"]):
+            rec = wave.worktree_state(repo(), TMP / "l-11", "feat/11-quiet", 11, now=NOW + 5 * 60)
+        self.assertTrue(rec["busy"])
+        self.assertEqual(rec["progress"], "working")
+
+    def test_a_failed_probe_falls_back_to_the_files_verdict(self):
+        def boom(wt):
+            raise OSError("ps exploded")
+        with mock.patch.object(wave, "worktree_processes", side_effect=boom):
+            rec = wave.worktree_state(repo(), TMP / "l-11", "feat/11-quiet", 11, now=NOW)
+        self.assertFalse(rec["busy"])
+        self.assertEqual(rec["progress"], "stalled")
+
+
+class Check(unittest.TestCase):
+    def test_stalled_and_likely_dead_exit_1_naming_the_recovery(self):
+        with mock.patch.object(wave, "worktree_processes", return_value=[]):
+            p = wave_at_now("agents", "--check", cwd=L)
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("stalled", p.stdout)
+        self.assertIn('SendMessage <agentId> "run the gate in foreground', p.stdout)
+        self.assertIn("likely dead", p.stdout)
+        self.assertIn("--force --respawn", p.stdout)
+
+    def test_everyone_busy_exits_0(self):
+        with mock.patch.object(wave, "worktree_processes", side_effect=lambda wt: [f"gate {wt}"]):
+            p = wave_at_now("agents", "--check", cwd=L)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("no stalled or likely dead agent", p.stdout)
+
+
+class WatchStopped(Exception):
+    pass
+
+
+class Watch(unittest.TestCase):
+    def watch(self, *args, probe, clock, sleep) -> tuple[str, int | None]:
+        """`agents --watch` in-process with the clock, the sleep and the probe injected."""
+        out, code = io.StringIO(), None
+        here = os.getcwd()
+        os.chdir(L)
+        try:
+            with mock.patch.object(wave.time, "time", side_effect=lambda: clock["now"]), \
+                 mock.patch.object(wave.time, "sleep", side_effect=sleep), \
+                 mock.patch.object(wave, "worktree_processes", side_effect=probe), \
+                 contextlib.redirect_stdout(out):
+                try:
+                    wave.main(["agents", "--watch", *args])
+                except SystemExit as e:
+                    code = 0 if e.code is None else e.code
+        finally:
+            os.chdir(here)
+        return out.getvalue(), code
+
+    def test_watch_blocks_until_a_worktree_stalls_then_exits_1(self):
+        clock = {"now": NOW}
+
+        def tick(seconds):
+            clock["now"] += seconds
+
+        def probe(wt):
+            return [f"xcodebuild {wt}"] if wt.name in ("l-9", "l-11", "l-12") else []  # only l-10 is left to stall
+
+        out, code = self.watch("--every", "5m", probe=probe, clock=clock, sleep=tick)
+        self.assertEqual(code, 1, out)
+        self.assertIn("o/l#10", out)
+        self.assertIn("stalled", out)
+        self.assertGreaterEqual(clock["now"] - NOW, 10 * 60, "it polled on the injected clock until the stall")
+
+    def test_watch_with_everyone_busy_keeps_polling_on_the_default_interval(self):
+        clock = {"now": NOW}
+        ticks = []
+
+        def stop(seconds):
+            ticks.append(seconds)
+            if len(ticks) == 3:
+                raise WatchStopped  # how the harness kills an armed watchdog; the test stops it here
+            clock["now"] += seconds
+
+        with self.assertRaises(WatchStopped):
+            self.watch(probe=lambda wt: [f"gate {wt}"], clock=clock, sleep=stop)
+        self.assertEqual(ticks, [300, 300, 300], "the default --every is 5m")
