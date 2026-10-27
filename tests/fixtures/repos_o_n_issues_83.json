@@ -1,0 +1,10 @@
+{
+  "id": 1083,
+  "number": 83,
+  "title": "Leaf with a gate-in-body PR",
+  "state": "open",
+  "body": "## Done when\n\n- [ ] n2.txt exists\n",
+  "labels": [],
+  "html_url": "https://github.com/o/n/issues/83",
+  "repository_url": "https://api.github.com/repos/o/n"
+}

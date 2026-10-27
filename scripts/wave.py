@@ -448,6 +448,11 @@ class Repo:
     def has_codegraph(self) -> bool:
         return (self.root / ".codegraph").exists()
 
+    def has_ci_workflows(self) -> bool:
+        """Any workflow file under .github/workflows: this repo's PRs are expected to carry checks."""
+        d = self.root / ".github" / "workflows"
+        return d.is_dir() and any(d.glob("*.y*ml"))
+
     def profile(self) -> dict:
         """The repo's own orchestration: detect_profile's phases plus the gate and the worktree location,
         which read the config and CI that only this class sees."""
@@ -1954,6 +1959,8 @@ def verify_one(repo: Repo, pr: dict, epic_nodes: dict | None = None) -> dict:
     version_bumps = [] if (pr.get("title") or "").startswith("Release") else manifest_version_changes(repo, head)
     checks = repo.pr_checks(pr["number"])
     bad = {k: v for k, v in checks.items() if v.lower() not in ("pass", "success", "skipping", "skipped", "neutral")}
+    # no check at all on a repo with no workflow is NO-CI, never a silent green (#97)
+    no_ci = not checks and not repo.has_ci_workflows()
     # sibling issues that cite a file this PR touched: the next wave inherits this change
     touched_files = repo.git(["diff", "--name-only", f"origin/{repo.base}...origin/{head}"]).split()
     siblings = []
@@ -2001,10 +2008,11 @@ def verify_one(repo: Repo, pr: dict, epic_nodes: dict | None = None) -> dict:
           and not (wt_state and (wt_state["dirty"] or wt_state["unpushed"])) and not closes_other and not closes_only_in_commit
           and not ledger and not version_bumps)
     return {"repo": repo.slug, "pr": pr["number"], "issue": n_issue, "head": head, "attribution": attribution,
-            "protected_touched": touched, "checks_not_green": bad, "mergeable": pr.get("mergeable"),
+            "protected_touched": touched, "checks_not_green": bad, "no_ci": no_ci, "ok_beyond_ci": ok,
+            "mergeable": pr.get("mergeable"),
             "worktree": wt_state, "notify_issues": siblings, "contradictions": contradictions,
             "closes_other": closes_other, "closes_only_in_commit": closes_only_in_commit, "ledger": ledger,
-            "version_bumps": version_bumps, "ledger_issue": own, "ok": ok}
+            "version_bumps": version_bumps, "ledger_issue": own, "ok": ok and not no_ci}
 
 
 VERDICTS = ("pass", "fail", "concerns")
@@ -2166,6 +2174,8 @@ def cmd_verify(default: Repo | None, a):
             if r["attribution"]: flags.append("AI-ATTRIBUTION")
             if r["protected_touched"]: flags.append("PROTECTED:" + ",".join(r["protected_touched"]))
             if r["checks_not_green"]: flags.append("CI:" + ",".join(f"{k}={v}" for k, v in r["checks_not_green"].items()))
+            if r["no_ci"]: flags.append("NO-CI[no check on the PR and no workflow in .github/workflows/: there is nothing to wait for;"
+                                        " merge stops at once, --no-ci acknowledges a green `order --run-gate` chain_gate or the gate output in this body]")
             if r["mergeable"] == "CONFLICTING": flags.append("CONFLICT")
             if r["worktree"] and (r["worktree"]["dirty"] or r["worktree"]["unpushed"]): flags.append("WORKTREE-NOT-CLEAN")
             for c in r["contradictions"]: flags.append("CONTRADICTION[" + c + "]")
@@ -2183,6 +2193,8 @@ def cmd_verify(default: Repo | None, a):
     sys.exit(0 if results and all(r["ok"] for r in results) else 1)
 
 
+# ---------------------------------------------------------------- order / merge / resolve
+
 def merge_tree_conflicts(repo: Repo, a_ref: str, b_ref: str) -> list[str]:
     rc, out, err = run(["git", "merge-tree", "--write-tree", a_ref, b_ref], cwd=repo.root, env=repo.env)
     if rc == 0:
@@ -2192,6 +2204,14 @@ def merge_tree_conflicts(repo: Repo, a_ref: str, b_ref: str) -> list[str]:
 
 def cmd_order(default: Repo | None, a):
     selected = select_prs(default, a.prs, a.epic)
+    if a.plan and not selected:
+        # an empty plan must never be written: `--epic <leaf>` is almost always a wrong number, so it gets its own answer (#97)
+        if a.epic and not a.prs:
+            repo, n = parse_ref(a.epic, default)
+            root = tree(repo, n).get(key(repo, n), {})
+            if root and not root["children"]:
+                raise SystemExit(f"{key(repo, n)} is a leaf: use `order <PR>`")
+        raise SystemExit(f"nothing to order: no open PR matched — no plan written to {a.plan}")
     by_repo: dict[str, list[dict]] = {}
     for r, p in selected:
         by_repo.setdefault(r.slug, []).append(p)
@@ -2344,6 +2364,31 @@ def gate_chain(repo: Repo, base_sha: str, order: list[int], trees: list[str | No
     return {"gate": gate, "steps": steps, "first_failure": culprit, "base_red": base_red, "base": base}
 
 
+def ci_verdict(repo: Repo, n: int) -> str | None:
+    """PASS | FAILED | NO-CI | None (still pending). NO-CI is not pending: no check on the PR at all and no
+    workflow in .github/workflows/ — waiting cannot change that, so the caller stops instead of running out the clock."""
+    states = {v.lower() for v in repo.pr_checks(n).values()}
+    if any(s in ("fail", "failure", "error", "cancelled", "timed_out") for s in states):
+        return "FAILED"
+    if states and states <= {"pass", "success", "skipping", "skipped", "neutral"}:
+        return "PASS"
+    if not states and not repo.has_ci_workflows():
+        return "NO-CI"
+    return None
+
+
+def plan_gate_green(pl: dict | None, n: int) -> bool:
+    """The plan's chain gate ran (`order --run-gate`) and passed on PR n's own step."""
+    cg = (pl or {}).get("chain_gate")
+    return bool(cg) and not cg["first_failure"] and not cg["base_red"] and any(s["pr"] == n and s["ok"] for s in cg["steps"])
+
+
+def gate_output_in_body(repo: Repo, body: str) -> str | None:
+    """The repo's first declared gate command the body names — a paste the owner can point at, not proof of a run;
+    `--no-ci`'s acknowledgment names it. A placeholder gate (`<no gate found...>`) is never evidence."""
+    return next((c for c in repo.gate() if not c.startswith("<") and c in body), None)
+
+
 def wait_for(fn, timeout: int, every: int = 10):
     t0 = time.time()
     while time.time() - t0 < timeout:
@@ -2417,6 +2462,7 @@ def cmd_tick(default: Repo | None, a):
 
 def cmd_merge(default: Repo | None, a):
     targets = [parse_ref(r, default) for r in a.prs]
+    plans: dict[str, dict] = {}
     if a.plan:
         plan = json.loads(Path(a.plan).read_text())
         planned = []
@@ -2442,7 +2488,11 @@ def cmd_merge(default: Repo | None, a):
                     if jc["flag"]:
                         raise SystemExit(f"{slug}#{n}: {jc['flag']}[{jc['detail']}] — the OK was for a judged delta: `wave judge` and ask again, or --force and say why in the PR.")
                 planned.append((repo, n))
+            plans[slug] = pl
         targets = planned or targets
+    if not targets:
+        where = "the plan has no PR in `repos`" if a.plan else "no PR was named"
+        raise SystemExit(f"merge refused: nothing to merge — {where}; an empty plan is never success")
     if not a.force:
         for repo, n in targets:
             pr = next((x for x in repo.open_prs() if x["number"] == n), None)
@@ -2462,9 +2512,10 @@ def cmd_merge(default: Repo | None, a):
         if pr is None:
             print(f"{key(repo, n)}: not an open PR any more. Stopping."); sys.exit(2)
         v = verify_one(repo, pr)
-        if not v["ok"] and not a.force:
+        if not v["ok"] and not (a.no_ci and v["no_ci"] and v["ok_beyond_ci"]) and not a.force:
             print(f"{key(repo, n)}: verify says NOT OK — attribution={v['attribution']} protected={v['protected_touched']} ci={v['checks_not_green']} contradictions={v['contradictions']} closes_other={v['closes_other']} closes_only_in_commit={v['closes_only_in_commit']} ledger={v['ledger']} version_bumps={v['version_bumps']} worktree={v['worktree']}. Not merging."
-                  + (f" It conflicts with {repo.base}: run `wave resolve` on PR {key(repo, n)}, then rerun merge from here." if v["mergeable"] == "CONFLICTING" else ""))
+                  + (f" It conflicts with {repo.base}: run `wave resolve` on PR {key(repo, n)}, then rerun merge from here." if v["mergeable"] == "CONFLICTING" else "")
+                  + (" — NO-CI: no check on the PR and no workflow in .github/workflows/: nothing to wait for; pass --no-ci, with a green `order --run-gate` chain_gate or the gate's output in the PR body" if v["no_ci"] else ""))
             sys.exit(2)
 
         def mergeable():
@@ -2486,15 +2537,24 @@ def cmd_merge(default: Repo | None, a):
                 sys.exit(2)
 
         def ci():
-            states = {v.lower() for v in repo.pr_checks(n).values()}
-            if any(s in ("fail", "failure", "error", "cancelled", "timed_out") for s in states):
-                return "FAILED"
-            if states and states <= {"pass", "success", "skipping", "skipped", "neutral"}:
-                return "PASS"
-            return None
+            return ci_verdict(repo, n)
 
         c = wait_for(ci, a.ci_timeout, 15)
-        if c != "PASS":
+        if c == "NO-CI":
+            if not a.no_ci:
+                print(f"{key(repo, n)}: NO-CI — no check on the PR and no workflow in .github/workflows/: there is nothing to wait for. "
+                      f"To merge without CI pass --no-ci, with a green `order --run-gate` chain_gate in the plan or the gate's output in the PR body.")
+                sys.exit(3)
+            if plan_gate_green(plans.get(repo.slug), n):
+                print(f"{key(repo, n)}: merging without CI (--no-ci): the plan's chain gate is green for this PR.")
+            else:
+                named = gate_output_in_body(repo, pr.get("body") or "")
+                if not named:
+                    print(f"{key(repo, n)}: NO-CI and no evidence: --no-ci needs a green chain gate (`order --run-gate`) in the plan "
+                          f"or the gate's output in the PR body. Not merging.")
+                    sys.exit(3)
+                print(f"{key(repo, n)}: merging without CI (--no-ci): the PR body names the gate `{named}` and is accepted as its output.")
+        elif c != "PASS":
             print(f"{key(repo, n)}: CI {c}. Stopping.")
             sys.exit(3)
         print(repo.gh(["pr", "merge", str(n), "-R", repo.slug, "--squash" if a.squash else "--merge"]).strip() or "merged")
@@ -3558,6 +3618,8 @@ GUARANTEES = [
     ("no merge of a PR whose issue still has an open blocker", "cmd_merge", "refusal names the blockers", True),
     ("no merge of a PR that verify rejects", "cmd_merge -> verify_one", "attribution, protected, CI, contradictions re-checked at merge time", False),
     ("no merge before CI is green, one PR at a time", "cmd_merge", "waits for checks, stops on FAILED", False),
+    ("merge never waits for CI that does not exist: no check on the PR and no workflow in .github/workflows/ stops it at once with NO-CI (--no-ci acknowledges a green `order --run-gate` chain_gate or the gate's output in the PR body)", "cmd_merge -> ci_verdict (+ verify_one)", "exit 3 at once, naming --no-ci; verify reports NO-CI instead of a silent green", True),
+    ("an empty plan is never success: `order --plan` refuses to write a plan with no PR (a leaf gets `#N is a leaf: use `order <PR>``) and `merge` refuses when nothing is targeted", "cmd_order (--plan), cmd_merge", "exit != 0: nothing to order / merge refused: nothing to merge", True),
     ("base CI red after a merge stops the queue", "cmd_merge --wait-base-ci", "exit 4 with the semantic-conflict note", False),
     (".wave.json is read from origin/<base> after the fetch, not from a main checkout left behind; doctor names a stale copy", "Repo._load_cfg <- Repo.fetch, cmd_doctor", "facts config_source: origin/main:.wave.json; ! main checkout's `.wave.json` matches origin/main's: differs in gate", True),
     ("doctor names every CI action the gate does not cover", "cmd_doctor -> Repo.ci_gate", "! CI runs `x/y@v1` and the gate does not", True),
@@ -3961,7 +4023,7 @@ def main(argv=None):
     x = s.add_parser("verify", help="check PRs: attribution, protected paths, CI, mergeability, worktree"); x.add_argument("prs", nargs="*"); x.add_argument("--epic"); x.add_argument("--json", action="store_true")
     x = s.add_parser("judge", help="write a PR's scoped patch for the judge agent, validate the verdict it writes (merge refuses without a pass at the head)"); x.add_argument("prs", nargs="+"); x.add_argument("--since", action="store_true", help="a round: read the previous judge-<PR>.json, write judge-<PR>.delta.patch (<previous head>..<head>) and print the round prompt with the previous findings in it")
     x = s.add_parser("order", help="pairwise merge-tree -> merge order, per repo"); x.add_argument("prs", nargs="*"); x.add_argument("--epic"); x.add_argument("--json", action="store_true"); x.add_argument("--plan", help="write the approved delta (base sha + PR heads + order) to this file"); x.add_argument("--run-gate", action="store_true", help="run the repo's gate on the tree after each step of the chain, in a throwaway worktree: names the PR that turns it red")
-    x = s.add_parser("merge", help="merge PRs in order, one at a time, CI green before each"); x.add_argument("prs", nargs="*"); x.add_argument("--yes", action="store_true"); x.add_argument("--plan", help="plan file from `order --plan`: refuses if the base or any PR head moved since"); x.add_argument("--force", action="store_true"); x.add_argument("--squash", action="store_true"); x.add_argument("--ci-timeout", type=int, default=1200); x.add_argument("--wait-base-ci", action="store_true")
+    x = s.add_parser("merge", help="merge PRs in order, one at a time, CI green before each"); x.add_argument("prs", nargs="*"); x.add_argument("--yes", action="store_true"); x.add_argument("--plan", help="plan file from `order --plan`: refuses if the base or any PR head moved since"); x.add_argument("--force", action="store_true"); x.add_argument("--squash", action="store_true"); x.add_argument("--ci-timeout", type=int, default=1200); x.add_argument("--wait-base-ci", action="store_true"); x.add_argument("--no-ci", action="store_true", help="merge a PR with no CI at all (no check on the PR, no workflow in .github/workflows/): needs a green `order --run-gate` chain_gate in the plan or the gate's output in the PR body")
     x = s.add_parser("resolve", help="merge the base into a conflicting PR's branch in its worktree, gate, push (never --force), comment; a conflict is left for you, then --continue"); x.add_argument("pr"); x.add_argument("--continue", dest="cont", action="store_true")
     x = s.add_parser("close-parents", help="close parents whose sub-issues are all closed"); x.add_argument("epic"); x.add_argument("--include-epic", action="store_true"); x.add_argument("--dry-run", action="store_true")
     x = s.add_parser("cleanup", help="remove worktrees whose work lives elsewhere (a merged PR, an empty seat), printing the disk each removal reclaims; branches stay"); x.add_argument("slugs", nargs="*"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--include-closed", action="store_true", help="also remove worktrees whose PR closed without merging"); x.add_argument("--stale-days", type=int, metavar="N", help="also list kept worktrees with no open PR and nothing newer than N days, with their size; with --yes, remove those too"); x.add_argument("--yes", action="store_true", help="with --stale-days: remove the stale worktrees as well")

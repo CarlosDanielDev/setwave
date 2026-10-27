@@ -1,0 +1,10 @@
+{
+  "id": 1080,
+  "number": 80,
+  "title": "Leaf with a no-CI PR",
+  "state": "open",
+  "body": "## Done when\n\n- [ ] n.txt exists\n",
+  "labels": [],
+  "html_url": "https://github.com/o/n/issues/80",
+  "repository_url": "https://api.github.com/repos/o/n"
+}
