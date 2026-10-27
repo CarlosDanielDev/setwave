@@ -1507,8 +1507,7 @@ def worktree_state(repo: Repo, wt: Path, branch: str, n: int, now: float | None 
     the dispatch stamp, and progress (working | stalled | dead) by minutes since the newest change — plus `busy`:
     a live process (ps argv, lsof cwd) sits in the worktree, so a long gate with no file change is still `working`,
     and quiet with no process is `stalled`, a signal at WORKING_MIN instead of DEAD_MIN; a worktree whose
-    PR is merged, closed or open is `done`, however idle. `tables` is a pre-fetched (ps, lsof) pair shared across
-    the worktrees of one poll; None probes here."""
+    PR is merged, closed or open is `done`, however idle."""
     stamp = stamp_of(wt)
     now = time.time() if now is None else now
     dispatched = _epoch(stamp.get("dispatched_at"))
@@ -3789,7 +3788,7 @@ GUARANTEES = [
     ("doctor warns when the Makefile or the rule files name a command the gate lacks", "cmd_doctor -> doc_commands", "! `CLAUDE.md` names `make ci` and the gate does not", True),
     ("doctor lists the repo's hooks and warns when one cannot run", "cmd_doctor -> hook_health", "! the repo's own hooks can run (3): <path>: not executable (chmod +x)", True),
     ("plan refuses a body missing the repo's issue-template sections", "cmd_plan -> template_problems", "plan refused: one lacks the repo template's ## Handoff", True),
-    ("doctor tells an agent at work from a likely dead one, and names the recovery", "cmd_doctor -> worktree_state", "! no agent likely dead: <worktrees> — SendMessage or `wave dispatch --force N`", True),
+    ("doctor tells an agent at work from a likely dead one, and names the recovery", "cmd_doctor -> worktree_state", "! no agent likely dead: <worktrees> — SendMessage or `wave dispatch N --force --respawn`", True),
     ("a likely dead worktree stays `worktree` in next, never `in progress`", "candidates -> liveness", "worktree exists (likely dead, nothing changed for N min)", True),
     ("a stalled agent signals before DEAD_MIN: worktree_state reads a process probe (injected in tests; a probe failure falls back to the files' verdict), busy keeps the verdict working, quiet with no process past WORKING_MIN is stalled, and agents --check/--watch exit 1 naming SendMessage / dispatch --force --respawn", "worktree_state -> worktree_processes, cmd_agents --check/--watch", "tests/test_liveness.py: stalled at idle 25 min; busy works without file changes; --watch wakes on the injected clock; dispatch prints `wave agents --watch`", True),
     ("doctor fails on a crate cargo marked extracted but left half-written", "cmd_doctor -> broken_crates", "✗ cargo cache ...: <crate> is missing N of M files", True),
