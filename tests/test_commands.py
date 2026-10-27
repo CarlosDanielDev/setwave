@@ -14,7 +14,7 @@ import subprocess
 import unittest
 from unittest import mock
 
-from helpers import CLONE, TMP, TESTS, WAVE, gh_calls, run_wave, sandbox, wave
+from helpers import CLONE, ONE, TMP, TESTS, TWO, WAVE, cross_repos, gh_calls, run_wave, sandbox, wave
 
 
 def setUpModule():
@@ -468,6 +468,34 @@ class Dispatch(unittest.TestCase):
         self.assertEqual(two.returncode, 0, two.stdout + two.stderr)
         self.assertIn("! batch of 2 over a gate that pins a simulator destination", two.stdout)
         self.assertIn("id={SIMULATOR}", two.stdout, "the warning names the seat way out")
+
+    def test_seats_are_keyed_by_full_ref_across_repos(self):
+        cross_repos()
+        self._registry = self.REG.read_text()  # the cross-repo registration stays: test_cross_repo builds on it
+        seats: dict = {}
+        # Repo(...) built by hand — no account, so nothing reaches gh and no other test's log is touched
+        for slug, clone, pool in (("a/one", ONE, ["UDID-A1", "UDID-A2"]), ("b/two", TWO, ["UDID-B1", "UDID-B2"])):
+            repo = wave.Repo(slug, {"path": str(clone), "base": "main"})
+            repo.resources = {"SIMULATOR": pool}
+            seats.update(wave.seat_plan(repo, [2]))
+        self.assertEqual(sorted(seats), ["a/one#2", "b/two#2"],
+                         "a seat belongs to owner/name#N, not to a bare issue number")
+        self.assertEqual(seats["a/one#2"]["SIMULATOR"], "UDID-A1", "each ref resolves to its own repo's pool")
+        self.assertEqual(seats["b/two#2"]["SIMULATOR"], "UDID-B1", "a/one's seat never answers for b/two")
+
+    def test_doctor_stays_silent_when_the_gate_carries_the_seat_placeholder(self):
+        self.declare(gate=["xcodebuild -destination 'platform=iOS Simulator,id={SIMULATOR}' "
+                           "-derivedDataPath {WORKTREE}/build/DD-{N} test"])
+        two = run_wave("doctor", "--batch", "2")
+        self.assertEqual(two.returncode, 0, two.stdout + two.stderr)
+        self.assertNotIn("pins a simulator destination", two.stdout)
+
+    def test_a_pool_with_duplicate_values_is_refused(self):
+        self.declare(resources={"SIMULATOR": ["UDID-AAAA", "UDID-AAAA"]})
+        p = run_wave("dispatch", "2", "7", "--force", "--no-prepare")
+        self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("DUPLICATE-SEAT", p.stderr)
+        self.assertFalse((TMP / "r-handoffs" / "2.md").exists(), "the refusal precedes every prompt")
 
     def test_the_seat_guarantee_is_declared_and_pinned(self):
         row = next(r for r in wave.GUARANTEES if "mesmo recurso" in r[0])

@@ -1600,17 +1600,22 @@ def seat_sub(text: str, seat: dict[str, str]) -> str:
     return text
 
 
-def seat_plan(repo: Repo, ns: list[int]) -> dict[int, dict[str, str]]:
+def seat_plan(repo: Repo, ns: list[int]) -> dict[str, dict[str, str]]:
     """A seat (one value per declared resource) for every issue of the batch: a worktree keeps the seat its
     stamp records — same tree, same simulator across --force and --respawn — a seat another worktree's
-    stamp holds is not free, and a pool that cannot seat every issue refuses the dispatch with the count."""
+    stamp holds is not free, a pool that cannot seat every issue refuses the dispatch with the
+    count, and seats are keyed by the full ref (owner/name#N) — two repos dispatching the same
+    issue number never trade seats."""
     for name, values in repo.resources.items():
         if not (isinstance(name, str) and name.isupper() and isinstance(values, list) and values
                 and all(isinstance(v, str) and v for v in values)):
             raise SystemExit(f'{repo.slug}: `resources` must be {{"NAME": ["value", ...]}} — '
                              f"an UPPERCASE name and a non-empty list of values; `{name}` is not")
+        if len(set(values)) != len(values):
+            raise SystemExit(f"{repo.slug}: `resources.{name}` repeats a value (DUPLICATE-SEAT) — "
+                             "one entry is one seat")
     free = {name: list(values) for name, values in repo.resources.items()}
-    seats: dict[int, dict[str, str]] = {}
+    seats: dict[str, dict[str, str]] = {}
     for line in repo.git(["worktree", "list", "--porcelain"]).splitlines():
         if not line.startswith("worktree "):
             continue
@@ -1623,15 +1628,15 @@ def seat_plan(repo: Repo, ns: list[int]) -> dict[int, dict[str, str]]:
             if value in free.get(name, []):
                 free[name].remove(value)  # a seat another worktree's stamp holds is spoken for
         if n in ns:
-            seats[n] = {k: str(v) for k, v in res.items()}  # re-dispatch: the tree keeps its own seat
-    pending = [n for n in ns if n not in seats]
+            seats[key(repo, n)] = {k: str(v) for k, v in res.items()}  # re-dispatch: the tree keeps its own seat
+    pending = [n for n in ns if key(repo, n) not in seats]
     for name in repo.resources:
         if len(pending) > len(free[name]):
             raise SystemExit(f"dispatch refused: {len(pending)} issue{'s' if len(pending) > 1 else ''}, "
                              f"{len(free[name])} {name} free — enlarge the pool in `.wave.json` `resources`, "
                              "dispatch fewer issues, or `wave cleanup` a worktree that no longer needs its seat")
     for n in pending:
-        seats[n] = {name: values.pop(0) for name, values in free.items()}
+        seats[key(repo, n)] = {name: values.pop(0) for name, values in free.items()}
     return seats
 
 
@@ -1813,7 +1818,7 @@ def cmd_dispatch(default: Repo | None, a):
             bad = [t for t, ok, _ in premises_for(repo, n) if not ok]
             if bad:
                 raise SystemExit(f"dispatch refused: {key(repo, n)} is not ready — {'; '.join(bad)}. `wave why {key(repo, n)}`")
-    seats: dict[int, dict[str, str]] = {}
+    seats: dict[str, dict[str, str]] = {}
     for repo in {r for r, _ in targets}:
         repo.fetch()
         sync_provider(repo, a.dry_run)
@@ -1868,12 +1873,12 @@ def cmd_dispatch(default: Repo | None, a):
         if addendum_file and not addendum_file.is_file():
             raise SystemExit(f"dispatch refused: addendum {addendum_file} is not a file")
         addendum = addendum_file.read_text() if addendum_file else ""
-        path.write_text(render_prompt(repo, iss, branch, sha, len(targets), seats.get(n)) + addendum)
+        path.write_text(render_prompt(repo, iss, branch, sha, len(targets), seats.get(key(repo, n))) + addendum)
         if not a.dry_run:  # the stamp `agents`, `doctor` and the retry ceiling read; a re-dispatch (--force) is a new agent, so a new stamp
             stamp = {"issue": n, "repo": repo.slug, "dispatched_at": now_iso(), "prompt": str(path),
                      "resumes": resumes, "respawns": respawns}
-            if seats.get(n):
-                stamp["resources"] = seats[n]
+            if seats.get(key(repo, n)):
+                stamp["resources"] = seats[key(repo, n)]
             if addendum_file:
                 stamp["addendum"] = str(addendum_file)
             (wt / STAMP).write_text(json.dumps(stamp, indent=2) + "\n")
@@ -3275,6 +3280,14 @@ def cmd_agents(default: Repo | None, a):
               f"{'PR #' + str(r['pr']) if r['pr'] else 'no PR':<8} {r['state']:<9} {agent_verdict(r)}")
 
 
+def pinned_destination(g: str) -> bool:
+    """A literal simulator pin: `id=` or `-destination` naming a concrete device, not a `{SEAT}` placeholder."""
+    if re.search(r"\bid=(?!\s*\{)", g):
+        return True
+    arg = re.search(r"-destination\s+(\"[^\"]*\"|'[^']*'|\S+)", g)
+    return bool(arg and "{" not in arg.group(1))
+
+
 def cmd_doctor(default: Repo | None, a) -> None:
     """Preflight. Every ✗ is a mistake that dispatch would otherwise let happen."""
     checks: list[tuple[str, bool, str, bool]] = []  # (text, ok, evidence, hard)
@@ -3336,11 +3349,11 @@ def cmd_doctor(default: Repo | None, a) -> None:
                 checks.append((f"`{where}` names `{cmd}` and the gate does not", False,
                                "if it is a gate step, declare it in `.wave.json`'s gate", False))
         if getattr(a, "batch", 1) > 1:
-            pinned = [g for g in r.gate() if re.search(r"\bid=|-destination", g)]
-            if pinned:
+            pins = [g for g in r.gate() if pinned_destination(g)]
+            if pins:
                 checks.append((f"batch of {getattr(a, 'batch', 1)} over a gate that pins a simulator destination",
                                False,
-                               "; ".join(g.strip() for g in pinned)
+                               "; ".join(g.strip() for g in pins)
                                + " — two agents would share one simulator; declare `resources` in `.wave.json` "
                                "and write the gate as `… id={SIMULATOR} …` — dispatch substitutes each agent's own seat",
                                False))
