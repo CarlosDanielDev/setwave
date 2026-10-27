@@ -1922,6 +1922,8 @@ def verdict_problems(v) -> list[str]:
                 bad.append(f"findings[{i}].line must be a 1-based line")
             elif not isinstance(f.get("note"), str) or not f["note"]:
                 bad.append(f"findings[{i}].note must say what is wrong")
+            elif f.get("severity") not in ("blocking", "nit"):
+                bad.append(f"findings[{i}].severity must be blocking|nit")
         if v.get("verdict") in ("fail", "concerns") and not fs:
             bad.append(f"a {v.get('verdict')} names at least one finding")
     return bad
@@ -1941,20 +1943,41 @@ def judge_check(repo: Repo, n: int, head_sha: str) -> dict:
     bad = verdict_problems(v)
     if bad:
         return {"flag": "JUDGE-MISSING", "detail": f"{path.name}: " + "; ".join(bad)}
-    if v["verdict"] != "pass":
-        where = "; ".join(f"{f['file']}:{f['line']} {f['note']}" for f in v["findings"][:3])
+    blocking = [f for f in v["findings"] if f["severity"] == "blocking"]
+    if v["verdict"] == "fail" or blocking:
+        where = "; ".join(f"{f['file']}:{f['line']} {f['note']}" for f in (blocking or v["findings"])[:3])
         return {"flag": "JUDGE-FAIL", "detail": f"verdict {v['verdict']}: {where}",
                 "verdict": v["verdict"], "head_sha": v["head_sha"], "findings": v["findings"]}
     if v["head_sha"] != head_sha:
         return {"flag": "JUDGE-STALE", "detail": f"the verdict is for {v['head_sha'][:7]}, the head is {head_sha[:7]}: a push invalidates it, judge again",
                 "verdict": "pass", "head_sha": v["head_sha"], "findings": []}
-    return {"flag": None, "detail": f"pass at {head_sha[:7]}", "verdict": "pass", "head_sha": head_sha, "findings": []}
+    nits = sum(1 for f in v["findings"] if f["severity"] == "nit")
+    detail = (f"pass at {head_sha[:7]}" if v["verdict"] == "pass"
+              else f"concerns at {head_sha[:7]}: {nits} nit(s) only, not blocking — the owner reads them in {path.name}")
+    return {"flag": None, "detail": detail, "verdict": v["verdict"], "head_sha": head_sha, "findings": v["findings"]}
+
+
+JUDGE_TOOLS = "Read, Grep, Glob, Write"  # the one place the judge's tool surface is named in code (agents/judge.md carries it to the host)
+
+
+def render_round_prompt(repo: Repo, n: int, issue: int | None, prev: dict, sha: str, delta: Path) -> str:
+    """templates/judge-round.md with the previous findings in it: the round re-judges the delta against them."""
+    tpl = (TEMPLATES / "judge-round.md").read_text()
+    findings = "\n".join(f"- `{f['file']}:{f['line']}` [{f['severity']}] {f['note']}" for f in prev["findings"]) or "- (the previous verdict named no findings)"
+    fields = {"PR": str(n), "REPO": repo.slug, "ISSUE": f"#{issue}" if issue else "(the PR body names no issue)",
+              "PREV_SHA": prev["head_sha"], "SHA": sha, "DELTA": str(delta),
+              "OUT": str(repo.handoffs / f"judge-{n}.json"), "PREV_FINDINGS": findings}
+    for k, v in fields.items():
+        tpl = tpl.replace("{{" + k + "}}", v)
+    return tpl
 
 
 def cmd_judge(default: Repo | None, a):
-    """The producer never judges its own PR: write the scoped diff into the handoffs dir, have a read-only agent
-    (templates/judge.md is its prompt) judge it, and validate the verdict it writes. Exit 0 only when every PR
-    named has a fresh pass verdict; `merge` re-checks the sha at merge time whatever this said."""
+    """The producer never judges its own PR: write the scoped diff into the handoffs dir, have the plugin's judge
+    agent (templates/judge.md is its prompt) judge it, and validate the verdict it writes. With --since the round
+    re-judges only the delta since the previous verdict, against the findings that verdict named. Exit 0 only when
+    every PR named has a fresh verdict that does not block (no `fail`, no `blocking` finding); `merge` re-checks the
+    sha at merge time whatever this said."""
     bad = 0
     for ref in a.prs:
         repo, n = parse_ref(ref, default)
@@ -1966,25 +1989,53 @@ def cmd_judge(default: Repo | None, a):
         repo.fetch()
         head = f"origin/{pr['headRefName']}"
         sha = repo.git(["rev-parse", head]).strip()
-        files = repo.git(["diff", "--name-only", f"origin/{repo.base}...{head}"]).split()
         repo.handoffs.mkdir(parents=True, exist_ok=True)
-        patch = repo.handoffs / f"judge-{n}.patch"
-        patch.write_text(repo.git(["diff", f"origin/{repo.base}...{head}"]))  # base...head is by construction the diff of the files the PR touches
+        prev = None
+        if a.since:
+            prev_path = repo.handoffs / f"judge-{n}.json"
+            try:
+                prev = json.loads(prev_path.read_text())
+            except (OSError, json.JSONDecodeError) as e:
+                print(f"{key(repo, n)}: --since needs a previous verdict at {prev_path} — it re-judges the delta since that verdict — and found none ({e}); run a whole-diff `wave judge` first")
+                bad += 1
+                continue
+            problems = verdict_problems(prev)
+            if problems:
+                print(f"{key(repo, n)}: {prev_path.name} is not a valid previous verdict: " + "; ".join(problems)
+                      + " — write a fresh whole-diff verdict first (`wave judge` without --since)")
+                bad += 1
+                continue
+            delta = repo.handoffs / f"judge-{n}.delta.patch"
+            delta.write_text(repo.git(["diff", prev["head_sha"], sha]))  # the round judges <previous head>..<head>, nothing else
+            files = repo.git(["diff", "--name-only", prev["head_sha"], sha]).split()
+            patch = delta
+            ancestry = "" if repo.git_ok(["merge-base", "--is-ancestor", prev["head_sha"], sha])[0] \
+                else " — NOTE: the previous head is not an ancestor of the current head (a rebase?): this delta is the whole diff, so convergence is not measured; prefer a whole-diff round"
+        else:
+            patch = repo.handoffs / f"judge-{n}.patch"
+            patch.write_text(repo.git(["diff", f"origin/{repo.base}...{head}"]))  # base...head is by construction the diff of the files the PR touches
+            files = repo.git(["diff", "--name-only", f"origin/{repo.base}...{head}"]).split()
         n_issue = next((int(num) for _, num in CLOSES.findall(pr.get("body") or "")), None)
         print(f"{key(repo, n)}: patch {patch} ({len(files)} file(s): {', '.join(files) or 'none'})"
-              + (f"; its issue is #{n_issue}" if n_issue else "; its PR body names no issue"))
+              + (f"; its issue is #{n_issue}" if n_issue else "; its PR body names no issue") + (ancestry if a.since else ""))
+        if a.since:
+            print(render_round_prompt(repo, n, n_issue, prev, sha, patch))
         jc = judge_check(repo, n, sha)
         if jc["flag"] is None:
-            print(f"  verdict pass at {sha[:7]} — fresh; `merge` re-checks the sha before merging")
-        elif jc["flag"] == "JUDGE-FAIL":
-            print(f"  {jc['flag']}[{jc['detail']}]")
+            fresh = "fresh" if jc["verdict"] == "pass" else f"fresh ({jc['detail'].split(': ', 1)[1]})"
+            print(f"  verdict {jc['verdict']} at {sha[:7]} — {fresh}; `merge` re-checks the sha before merging")
+        elif jc["flag"] in ("JUDGE-FAIL", "JUDGE-STALE"):
+            print(f"  {jc['flag']}[{jc['detail']}]" + (" — judge again at this head" if jc["flag"] == "JUDGE-STALE" else ""))
         else:
-            print(f"  no valid verdict yet — spawn ONE read-only agent (Read/Grep/Glob only; it edits nothing, writes only the verdict;"
-                  f" {TEMPLATES / 'judge.md'} is its prompt) with the patch above, head sha {sha}, and the issue body")
+            print(f"  no valid verdict yet — spawn the plugin's `judge` agent (tools {JUDGE_TOOLS} — the Write is the verdict file only;"
+                  f" {TEMPLATES / 'judge.md'} is its prompt{'; ' + TEMPLATES.name + '/judge-round.md for a --since round' if a.since else ''})"
+                  f" with the patch above, head sha {sha}, and the issue body")
             print(f'  it writes {repo.handoffs / f"judge-{n}.json"}:' +
-                  ' {"verdict": "pass|fail|concerns", "head_sha": "<the 40-hex sha above>", "findings": [{"file": "<path>", "line": <N>, "note": "<what is wrong>"}]}')
+                  ' {"verdict": "pass|fail|concerns", "head_sha": "<the 40-hex sha above>",'
+                  ' "findings": [{"file": "<path>", "line": <N>, "severity": "blocking|nit", "note": "<what is wrong>"}]}'
+                  + (' — a round adds "recheck": [{"file": "<path>", "line": <N>, "status": "fixed|not fixed"}], one entry per previous finding' if a.since else ''))
             print(f"  then re-run this command; `merge` refuses a PR without a pass verdict at the head it merges"
-                  f" (JUDGE-MISSING / JUDGE-FAIL / JUDGE-STALE)")
+                  f" (JUDGE-MISSING / JUDGE-FAIL / JUDGE-STALE); only `fail` or a `blocking` finding blocks — nits ride to the owner")
         if jc["flag"]:
             bad += 1
     sys.exit(1 if bad else 0)
@@ -3423,6 +3474,7 @@ GUARANTEES = [
     ("no merge of a PR the judge never judged: the producer is never the judge of its own PR", "cmd_merge -> judge_check (cmd_judge writes the patch)", "JUDGE-MISSING[no verdict at <handoffs>/judge-<PR>.json]", True),
     ("no merge of a PR the judge failed or held concerns on", "cmd_merge -> judge_check", "JUDGE-FAIL[verdict fail: <file:line, ...>]", True),
     ("no merge on a verdict whose head_sha is not the head being merged: any push invalidates the judgement", "cmd_merge -> judge_check", "JUDGE-STALE[the verdict is for abc1234, the head is def5678]", True),
+    ("a judge round re-judges the delta against the previous findings — `judge <PR> --since` writes `judge-<PR>.delta.patch` (`<previous head>..<head>`) and the round prompt cites each earlier finding; only `fail` or a `blocking` finding refuses a merge, a `concerns` carrying nits alone never does", "judge_check + cmd_judge --since <- cmd_merge", "JUDGE-FAIL names the blocking finding; nits-only concerns is fresh with its nit count; the round prompt lists every previous finding", True),
     ("tick changes only the open lines it names, every other byte kept; a body without `## Done when` is refused", "tick_body (cmd_tick, apply_ledger)", "exit 2: tick refused: ...", True),
     ("verify names sibling issues that cite files the PR touched", "verify_one --epic", "notify lines", False),
     ("order predicts pairwise and chained textual conflicts", "cmd_order", "pairs + chain ✗", True),
@@ -3767,7 +3819,7 @@ def main(argv=None):
     x = s.add_parser("agents", help="every issue worktree: age since dispatch, minutes since the newest change, PR, verdict (working | quiet | likely dead | done)")
     x = s.add_parser("prompt", help="print the agent prompt for one issue"); x.add_argument("issue"); x.add_argument("--parallel", type=int, default=4)
     x = s.add_parser("verify", help="check PRs: attribution, protected paths, CI, mergeability, worktree"); x.add_argument("prs", nargs="*"); x.add_argument("--epic"); x.add_argument("--json", action="store_true")
-    x = s.add_parser("judge", help="write a PR's scoped patch for a read-only judge agent, validate the verdict it writes (merge refuses without a pass at the head)"); x.add_argument("prs", nargs="+")
+    x = s.add_parser("judge", help="write a PR's scoped patch for the judge agent, validate the verdict it writes (merge refuses without a pass at the head)"); x.add_argument("prs", nargs="+"); x.add_argument("--since", action="store_true", help="a round: read the previous judge-<PR>.json, write judge-<PR>.delta.patch (<previous head>..<head>) and print the round prompt with the previous findings in it")
     x = s.add_parser("order", help="pairwise merge-tree -> merge order, per repo"); x.add_argument("prs", nargs="*"); x.add_argument("--epic"); x.add_argument("--json", action="store_true"); x.add_argument("--plan", help="write the approved delta (base sha + PR heads + order) to this file"); x.add_argument("--run-gate", action="store_true", help="run the repo's gate on the tree after each step of the chain, in a throwaway worktree: names the PR that turns it red")
     x = s.add_parser("merge", help="merge PRs in order, one at a time, CI green before each"); x.add_argument("prs", nargs="*"); x.add_argument("--yes", action="store_true"); x.add_argument("--plan", help="plan file from `order --plan`: refuses if the base or any PR head moved since"); x.add_argument("--force", action="store_true"); x.add_argument("--squash", action="store_true"); x.add_argument("--ci-timeout", type=int, default=1200); x.add_argument("--wait-base-ci", action="store_true")
     x = s.add_parser("resolve", help="merge the base into a conflicting PR's branch in its worktree, gate, push (never --force), comment; a conflict is left for you, then --continue"); x.add_argument("pr"); x.add_argument("--continue", dest="cont", action="store_true")
