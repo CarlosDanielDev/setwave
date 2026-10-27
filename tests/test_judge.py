@@ -13,7 +13,7 @@ import sys
 import unittest
 from pathlib import Path
 
-from helpers import TMP, WAVE, gh_calls, git, judge_pass, run_wave, sandbox, wave
+from helpers import TMP, WAVE, gh_calls, git, judge_pass, run_wave, sandbox, wave, writes_allowed
 
 HANDOFFS = TMP / "r-handoffs"
 CLONE_PATH = TMP / "r"
@@ -26,14 +26,6 @@ def setUpModule():
 
 def head_sha(branch: str = "feat/4-x") -> str:
     return wave.Repo.get("o/r").git(["rev-parse", f"origin/{branch}"]).strip()
-
-
-def writes_allowed(*args, log: str):
-    """`wave.py <args>` with the fake gh accepting PR merges and issue edits, logged to their own file."""
-    env = {**os.environ, "FAKE_GH_EDIT": "1", "FAKE_GH_MERGE": "1", "FAKE_GH_LOG": str(TMP / f"gh-{log}.log")}
-    p = subprocess.run([sys.executable, str(WAVE), *args], cwd=sandbox(), capture_output=True, text=True, env=env)
-    calls = [json.loads(l) for l in (TMP / f"gh-{log}.log").read_text().splitlines()] if (TMP / f"gh-{log}.log").exists() else []
-    return p, calls
 
 
 class JudgeCmd(unittest.TestCase):
@@ -320,7 +312,6 @@ class Round(unittest.TestCase):
         self.assertIn("recheck does not answer previous finding g2.txt:1", p.stdout)
 
     def test_a_non_object_previous_entry_is_a_typed_refusal_not_a_crash(self):
-        judge_pass(20)
         push_new_commit("g2.txt")
         f = judge_pass(20)
         body = json.loads(f.read_text())
@@ -333,7 +324,6 @@ class Round(unittest.TestCase):
         self.assertIn("previous[0] must be a finding", p.stdout)
 
     def test_a_round_verdict_without_previous_is_refused(self):
-        judge_pass(20)
         push_new_commit("g2.txt")
         f = judge_pass(20)
         body = json.loads(f.read_text())
@@ -351,7 +341,6 @@ class Round(unittest.TestCase):
         self.assertIn("JUDGE-STALE[", p.stdout)
 
     def test_a_round_verdict_without_the_recheck_evidence_is_refused(self):
-        judge_pass(20)
         push_new_commit("g2.txt")
         judge_pass(20)  # fresh at this head, but no recheck: the round never answered the previous findings
         p = run_wave("judge", "20", "--since")
@@ -359,7 +348,6 @@ class Round(unittest.TestCase):
         self.assertIn("recheck", p.stdout)
 
     def test_a_nonsense_recheck_is_refused(self):
-        judge_pass(20)
         push_new_commit("g2.txt")
         f = judge_pass(20)
         body = json.loads(f.read_text())

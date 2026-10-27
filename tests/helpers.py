@@ -131,11 +131,12 @@ def run_wave(*args, cwd=None) -> subprocess.CompletedProcess:
     return subprocess.run([sys.executable, str(WAVE), *args], cwd=cwd or sandbox(), capture_output=True, text=True)
 
 
-def judge_pass(pr: int, verdict: str = "pass", sha: str | None = None, severity: str = "blocking") -> Path:
+def judge_pass(pr: int, verdict: str = "pass", sha: str | None = None, severity: str = "blocking",
+               slug: str = "o/r") -> Path:
     """Seed the judge verdict for `pr` the way the read-only judge agent would write it: at its head (or `sha`)."""
-    repo = wave.Repo.get("o/r")
+    repo = wave.Repo.get(slug)
     branch = next(x["headRefName"] for x in repo.open_prs() if x["number"] == pr)
-    d = CLONE.parent / f"{CLONE.name}-handoffs"
+    d = repo.handoffs
     d.mkdir(parents=True, exist_ok=True)
     f = d / f"judge-{pr}.json"
     f.write_text(json.dumps({
@@ -143,6 +144,18 @@ def judge_pass(pr: int, verdict: str = "pass", sha: str | None = None, severity:
         "findings": [] if verdict == "pass"
         else [{"file": "g.txt", "line": 1, "severity": severity, "note": "the seeded fault"}]}))
     return f
+
+
+def writes_allowed(*args, log: str, comment: bool = False):
+    """`wave.py <args>` with the fake gh accepting PR merges and issue edits, logged to their own file so the
+    no-writes audit of the rest of the suite never sees them. `comment=True` also accepts issue comments
+    (the ledger application comments its issue). Returns (process, gh calls recorded in that log)."""
+    env = {**os.environ, "FAKE_GH_EDIT": "1", "FAKE_GH_MERGE": "1",
+           **({"FAKE_GH_COMMENT": "1"} if comment else {}), "FAKE_GH_LOG": str(TMP / f"gh-{log}.log")}
+    p = subprocess.run([sys.executable, str(WAVE), *args], cwd=sandbox(), capture_output=True, text=True, env=env)
+    calls = [json.loads(l) for l in (TMP / f"gh-{log}.log").read_text().splitlines()] \
+        if (TMP / f"gh-{log}.log").exists() else []
+    return p, calls
 
 
 def gh_calls() -> list[list[str]]:

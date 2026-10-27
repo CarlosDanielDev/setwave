@@ -164,7 +164,7 @@ class Doctor(unittest.TestCase):
         for name in ("l-10", "l-11", "l-4"):
             self.assertNotIn(name + " ", dead)
         self.assertIn("SendMessage", dead)
-        self.assertIn("`wave dispatch --force 9`", dead)
+        self.assertIn("`wave dispatch 9 --force --respawn`", dead)
         alive = next(l for l in p.stdout.splitlines() if "agents at work" in l)
         self.assertIn("l-10 working", alive)
         self.assertIn("l-11 stalled", alive)
