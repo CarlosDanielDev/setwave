@@ -2193,6 +2193,8 @@ def cmd_verify(default: Repo | None, a):
     sys.exit(0 if results and all(r["ok"] for r in results) else 1)
 
 
+# ---------------------------------------------------------------- order / merge / resolve
+
 def merge_tree_conflicts(repo: Repo, a_ref: str, b_ref: str) -> list[str]:
     rc, out, err = run(["git", "merge-tree", "--write-tree", a_ref, b_ref], cwd=repo.root, env=repo.env)
     if rc == 0:
