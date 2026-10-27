@@ -76,7 +76,7 @@ IGNORE_ACTIONS = ["actions/checkout", "actions/setup-*", "actions/cache", "actio
 # not DEAD_MIN — and busy is `working` however long the gate runs without touching a tracked file
 WORKING_MIN = 10
 DEAD_MIN = 30
-STAMP = ".setwave.json"  # written by dispatch into each worktree, excluded from git: issue, repo, dispatched_at, prompt, resumes, respawns
+STAMP = ".setwave.json"  # written by dispatch into each worktree, excluded from git: issue, repo, dispatched_at, prompt, resumes, respawns, resources, addendum
 # dispatches over a worktree without a new commit on its branch — a plain resume and a respawn with a new strategy
 # count alike: at RETRY_CEILING of them, the agent is agent-exhausted — dispatch refuses a further one and
 # `wave sweep --fix` escalates to the owner; nothing is ever closed by itself
@@ -300,6 +300,7 @@ class Repo:
                  f"registry ({', '.join(sorted(self.entry))})" if self.entry else ""]
         self.cfg_source = " + ".join(w for w in where if w) or "none (defaults)"
         self.protected: list[str] = list(self.cfg.get("protected", []))
+        self.resources: dict[str, list[str]] = dict(self.cfg.get("resources") or {})
 
     def _env(self) -> dict:
         env = dict(os.environ)
@@ -1587,15 +1588,58 @@ def remaining(body: str) -> str:
             + "".join(f"- [ ] {i['text']}\n" for i in left))
 
 
-def render_prompt(repo: Repo, iss: dict, branch: str, sha: str, parallel: int) -> str:
+def seat_sub(text: str, seat: dict[str, str]) -> str:
+    """`{KEY}` for every seat key — `N`, `WORKTREE` and each declared resource — becomes this agent's own value."""
+    for key, value in seat.items():
+        text = text.replace("{" + key + "}", value)
+    return text
+
+
+def seat_plan(repo: Repo, ns: list[int]) -> dict[int, dict[str, str]]:
+    """A seat (one value per declared resource) for every issue of the batch: a worktree keeps the seat its
+    stamp records — same tree, same simulator across --force and --respawn — a seat another worktree's
+    stamp holds is not free, and a pool that cannot seat every issue refuses the dispatch with the count."""
+    for name, values in repo.resources.items():
+        if not (isinstance(name, str) and name.isupper() and isinstance(values, list) and values
+                and all(isinstance(v, str) and v for v in values)):
+            raise SystemExit(f'{repo.slug}: `resources` must be {{"NAME": ["value", ...]}} — '
+                             f"an UPPERCASE name and a non-empty list of values; `{name}` is not")
+    free = {name: list(values) for name, values in repo.resources.items()}
+    seats: dict[int, dict[str, str]] = {}
+    for line in repo.git(["worktree", "list", "--porcelain"]).splitlines():
+        if not line.startswith("worktree "):
+            continue
+        stamp = stamp_of(Path(line[len("worktree "):]))
+        res = stamp.get("resources")
+        if not (isinstance(res, dict) and res):
+            continue
+        n = stamp.get("issue")
+        for name, value in [(k, str(v)) for k, v in res.items()]:
+            if value in free.get(name, []):
+                free[name].remove(value)  # a seat another worktree's stamp holds is spoken for
+        if n in ns:
+            seats[n] = {k: str(v) for k, v in res.items()}  # re-dispatch: the tree keeps its own seat
+    pending = [n for n in ns if n not in seats]
+    for name in repo.resources:
+        if len(pending) > len(free[name]):
+            raise SystemExit(f"dispatch refused: {len(pending)} issue{'s' if len(pending) > 1 else ''}, "
+                             f"{len(free[name])} {name} free — enlarge the pool in `.wave.json` `resources`, "
+                             "dispatch fewer issues, or `wave cleanup` a worktree that no longer needs its seat")
+    for n in pending:
+        seats[n] = {name: values.pop(0) for name, values in free.items()}
+    return seats
+
+
+def render_prompt(repo: Repo, iss: dict, branch: str, sha: str, parallel: int, seat: dict[str, str] | None = None) -> str:
     tpl = (TEMPLATES / "agent.md").read_text()
     n = iss["number"]
+    gate = [seat_sub(g, {"N": str(n), "WORKTREE": str(repo.worktree(n)), **(seat or {})}) for g in repo.gate()]
     fields = {
         "WAVE": str(Path(__file__).resolve()), "REMAINING": remaining(iss.get("body") or "").rstrip("\n"),
         "N": str(n), "TITLE": iss["title"], "URL": iss["html_url"], "REPO": repo.slug,
         "ROOT": str(repo.root), "WORKTREE": str(repo.worktree(n)), "BRANCH": branch,
         "BASE": repo.base, "SHA": sha, "DATE": datetime.now().strftime("%Y-%m-%d"),
-        "GATE": "\n".join(repo.gate()), "GATE_ONE_LINE": " && ".join(repo.gate()),
+        "GATE": "\n".join(gate), "GATE_ONE_LINE": " && ".join(gate),
         "PROTECTED": ", ".join(f"`{p}`" for p in repo.protected) or "(nenhum declarado em .wave.json / registro)",
         "CODEGRAPH_QUERY": codegraph_query(iss),
         # the single owner of the CodeGraph policy: the template keeps only the invariant tail
@@ -1764,10 +1808,12 @@ def cmd_dispatch(default: Repo | None, a):
             bad = [t for t, ok, _ in premises_for(repo, n) if not ok]
             if bad:
                 raise SystemExit(f"dispatch refused: {key(repo, n)} is not ready — {'; '.join(bad)}. `wave why {key(repo, n)}`")
+    seats: dict[int, dict[str, str]] = {}
     for repo in {r for r, _ in targets}:
         repo.fetch()
         sync_provider(repo, a.dry_run)
         repo.handoffs.mkdir(exist_ok=True)
+        seats.update(seat_plan(repo, [n for rr, n in targets if rr.slug == repo.slug]))
         if a.warm:  # archives downloaded once, here, so the worktrees' parallel builds only extract
             if not (repo.root / "Cargo.toml").exists():
                 print(f"{repo.slug}: --warm: no Cargo.toml, nothing to fetch")
@@ -1812,10 +1858,20 @@ def cmd_dispatch(default: Repo | None, a):
                 if sh_ok(["which", "codegraph"])[0]:
                     sh_ok(["codegraph", "init", "."], cwd=wt)
         path = repo.handoffs / f"{n}.md"
-        path.write_text(render_prompt(repo, iss, branch, sha, len(targets)))
+        addendum_src = a.addendum or (stamp_of(wt).get("addendum") if wt.exists() else None)
+        addendum_file = Path(addendum_src).expanduser() if addendum_src else None
+        if addendum_file and not addendum_file.is_file():
+            raise SystemExit(f"dispatch refused: addendum {addendum_file} is not a file")
+        addendum = addendum_file.read_text() if addendum_file else ""
+        path.write_text(render_prompt(repo, iss, branch, sha, len(targets), seats.get(n)) + addendum)
         if not a.dry_run:  # the stamp `agents`, `doctor` and the retry ceiling read; a re-dispatch (--force) is a new agent, so a new stamp
-            (wt / STAMP).write_text(json.dumps({"issue": n, "repo": repo.slug, "dispatched_at": now_iso(), "prompt": str(path),
-                                                "resumes": resumes, "respawns": respawns}, indent=2) + "\n")
+            stamp = {"issue": n, "repo": repo.slug, "dispatched_at": now_iso(), "prompt": str(path),
+                     "resumes": resumes, "respawns": respawns}
+            if seats.get(n):
+                stamp["resources"] = seats[n]
+            if addendum_file:
+                stamp["addendum"] = str(addendum_file)
+            (wt / STAMP).write_text(json.dumps(stamp, indent=2) + "\n")
             totals = getattr(a, "stamp_totals", {"resumes": 0, "respawns": 0})  # logged for `wave stats`: the waves' escalation mix
             a.stamp_totals = {"resumes": totals["resumes"] + resumes, "respawns": totals["respawns"] + respawns}
             ok, excl = repo.git_ok(["rev-parse", "--git-path", "info/exclude"], cwd=wt)  # shared by every worktree
@@ -1975,6 +2031,8 @@ def verdict_problems(v) -> list[str]:
                 bad.append(f"findings[{i}].line must be a 1-based line")
             elif not isinstance(f.get("note"), str) or not f["note"]:
                 bad.append(f"findings[{i}].note must say what is wrong")
+            elif f.get("severity") not in ("blocking", "nit"):
+                bad.append(f"findings[{i}].severity must be blocking|nit")
         if v.get("verdict") in ("fail", "concerns") and not fs:
             bad.append(f"a {v.get('verdict')} names at least one finding")
     return bad
@@ -1994,20 +2052,41 @@ def judge_check(repo: Repo, n: int, head_sha: str) -> dict:
     bad = verdict_problems(v)
     if bad:
         return {"flag": "JUDGE-MISSING", "detail": f"{path.name}: " + "; ".join(bad)}
-    if v["verdict"] != "pass":
-        where = "; ".join(f"{f['file']}:{f['line']} {f['note']}" for f in v["findings"][:3])
+    blocking = [f for f in v["findings"] if f["severity"] == "blocking"]
+    if v["verdict"] == "fail" or blocking:
+        where = "; ".join(f"{f['file']}:{f['line']} {f['note']}" for f in (blocking or v["findings"])[:3])
         return {"flag": "JUDGE-FAIL", "detail": f"verdict {v['verdict']}: {where}",
                 "verdict": v["verdict"], "head_sha": v["head_sha"], "findings": v["findings"]}
     if v["head_sha"] != head_sha:
         return {"flag": "JUDGE-STALE", "detail": f"the verdict is for {v['head_sha'][:7]}, the head is {head_sha[:7]}: a push invalidates it, judge again",
                 "verdict": "pass", "head_sha": v["head_sha"], "findings": []}
-    return {"flag": None, "detail": f"pass at {head_sha[:7]}", "verdict": "pass", "head_sha": head_sha, "findings": []}
+    nits = sum(1 for f in v["findings"] if f["severity"] == "nit")
+    detail = (f"pass at {head_sha[:7]}" if v["verdict"] == "pass"
+              else f"concerns at {head_sha[:7]}: {nits} nit(s) only, not blocking — the owner reads them in {path.name}")
+    return {"flag": None, "detail": detail, "verdict": v["verdict"], "head_sha": head_sha, "findings": v["findings"]}
+
+
+JUDGE_TOOLS = "Read, Grep, Glob, Write"  # the one place the judge's tool surface is named in code (agents/judge.md carries it to the host)
+
+
+def render_round_prompt(repo: Repo, n: int, issue: int | None, prev: dict, sha: str, delta: Path) -> str:
+    """templates/judge-round.md with the previous findings in it: the round re-judges the delta against them."""
+    tpl = (TEMPLATES / "judge-round.md").read_text()
+    findings = "\n".join(f"- `{f['file']}:{f['line']}` [{f['severity']}] {f['note']}" for f in prev["findings"]) or "- (the previous verdict named no findings)"
+    fields = {"PR": str(n), "REPO": repo.slug, "ISSUE": f"#{issue}" if issue else "(the PR body names no issue)",
+              "PREV_SHA": prev["head_sha"], "SHA": sha, "DELTA": str(delta),
+              "OUT": str(repo.handoffs / f"judge-{n}.json"), "PREV_FINDINGS": findings}
+    for k, v in fields.items():
+        tpl = tpl.replace("{{" + k + "}}", v)
+    return tpl
 
 
 def cmd_judge(default: Repo | None, a):
-    """The producer never judges its own PR: write the scoped diff into the handoffs dir, have a read-only agent
-    (templates/judge.md is its prompt) judge it, and validate the verdict it writes. Exit 0 only when every PR
-    named has a fresh pass verdict; `merge` re-checks the sha at merge time whatever this said."""
+    """The producer never judges its own PR: write the scoped diff into the handoffs dir, have the plugin's judge
+    agent (templates/judge.md is its prompt) judge it, and validate the verdict it writes. With --since the round
+    re-judges only the delta since the previous verdict, against the findings that verdict named. Exit 0 only when
+    every PR named has a fresh verdict that does not block (no `fail`, no `blocking` finding); `merge` re-checks the
+    sha at merge time whatever this said."""
     bad = 0
     for ref in a.prs:
         repo, n = parse_ref(ref, default)
@@ -2019,25 +2098,53 @@ def cmd_judge(default: Repo | None, a):
         repo.fetch()
         head = f"origin/{pr['headRefName']}"
         sha = repo.git(["rev-parse", head]).strip()
-        files = repo.git(["diff", "--name-only", f"origin/{repo.base}...{head}"]).split()
         repo.handoffs.mkdir(parents=True, exist_ok=True)
-        patch = repo.handoffs / f"judge-{n}.patch"
-        patch.write_text(repo.git(["diff", f"origin/{repo.base}...{head}"]))  # base...head is by construction the diff of the files the PR touches
+        prev = None
+        if a.since:
+            prev_path = repo.handoffs / f"judge-{n}.json"
+            try:
+                prev = json.loads(prev_path.read_text())
+            except (OSError, json.JSONDecodeError) as e:
+                print(f"{key(repo, n)}: --since needs a previous verdict at {prev_path} — it re-judges the delta since that verdict — and found none ({e}); run a whole-diff `wave judge` first")
+                bad += 1
+                continue
+            problems = verdict_problems(prev)
+            if problems:
+                print(f"{key(repo, n)}: {prev_path.name} is not a valid previous verdict: " + "; ".join(problems)
+                      + " — write a fresh whole-diff verdict first (`wave judge` without --since)")
+                bad += 1
+                continue
+            delta = repo.handoffs / f"judge-{n}.delta.patch"
+            delta.write_text(repo.git(["diff", prev["head_sha"], sha]))  # the round judges <previous head>..<head>, nothing else
+            files = repo.git(["diff", "--name-only", prev["head_sha"], sha]).split()
+            patch = delta
+            ancestry = "" if repo.git_ok(["merge-base", "--is-ancestor", prev["head_sha"], sha])[0] \
+                else " — NOTE: the previous head is not an ancestor of the current head (a rebase?): this delta is the whole diff, so convergence is not measured; prefer a whole-diff round"
+        else:
+            patch = repo.handoffs / f"judge-{n}.patch"
+            patch.write_text(repo.git(["diff", f"origin/{repo.base}...{head}"]))  # base...head is by construction the diff of the files the PR touches
+            files = repo.git(["diff", "--name-only", f"origin/{repo.base}...{head}"]).split()
         n_issue = next((int(num) for _, num in CLOSES.findall(pr.get("body") or "")), None)
         print(f"{key(repo, n)}: patch {patch} ({len(files)} file(s): {', '.join(files) or 'none'})"
-              + (f"; its issue is #{n_issue}" if n_issue else "; its PR body names no issue"))
+              + (f"; its issue is #{n_issue}" if n_issue else "; its PR body names no issue") + (ancestry if a.since else ""))
+        if a.since:
+            print(render_round_prompt(repo, n, n_issue, prev, sha, patch))
         jc = judge_check(repo, n, sha)
         if jc["flag"] is None:
-            print(f"  verdict pass at {sha[:7]} — fresh; `merge` re-checks the sha before merging")
-        elif jc["flag"] == "JUDGE-FAIL":
-            print(f"  {jc['flag']}[{jc['detail']}]")
+            fresh = "fresh" if jc["verdict"] == "pass" else f"fresh ({jc['detail'].split(': ', 1)[1]})"
+            print(f"  verdict {jc['verdict']} at {sha[:7]} — {fresh}; `merge` re-checks the sha before merging")
+        elif jc["flag"] in ("JUDGE-FAIL", "JUDGE-STALE"):
+            print(f"  {jc['flag']}[{jc['detail']}]" + (" — judge again at this head" if jc["flag"] == "JUDGE-STALE" else ""))
         else:
-            print(f"  no valid verdict yet — spawn ONE read-only agent (Read/Grep/Glob only; it edits nothing, writes only the verdict;"
-                  f" {TEMPLATES / 'judge.md'} is its prompt) with the patch above, head sha {sha}, and the issue body")
+            print(f"  no valid verdict yet — spawn the plugin's `judge` agent (tools {JUDGE_TOOLS} — the Write is the verdict file only;"
+                  f" {TEMPLATES / 'judge.md'} is its prompt{'; ' + TEMPLATES.name + '/judge-round.md for a --since round' if a.since else ''})"
+                  f" with the patch above, head sha {sha}, and the issue body")
             print(f'  it writes {repo.handoffs / f"judge-{n}.json"}:' +
-                  ' {"verdict": "pass|fail|concerns", "head_sha": "<the 40-hex sha above>", "findings": [{"file": "<path>", "line": <N>, "note": "<what is wrong>"}]}')
+                  ' {"verdict": "pass|fail|concerns", "head_sha": "<the 40-hex sha above>",'
+                  ' "findings": [{"file": "<path>", "line": <N>, "severity": "blocking|nit", "note": "<what is wrong>"}]}'
+                  + (' — a round adds "recheck": [{"file": "<path>", "line": <N>, "status": "fixed|not fixed"}], one entry per previous finding' if a.since else ''))
             print(f"  then re-run this command; `merge` refuses a PR without a pass verdict at the head it merges"
-                  f" (JUDGE-MISSING / JUDGE-FAIL / JUDGE-STALE)")
+                  f" (JUDGE-MISSING / JUDGE-FAIL / JUDGE-STALE); only `fail` or a `blocking` finding blocks — nits ride to the owner")
         if jc["flag"]:
             bad += 1
     sys.exit(1 if bad else 0)
@@ -3168,6 +3275,15 @@ def cmd_doctor(default: Repo | None, a) -> None:
             if cmd not in gate:
                 checks.append((f"`{where}` names `{cmd}` and the gate does not", False,
                                "if it is a gate step, declare it in `.wave.json`'s gate", False))
+        if getattr(a, "batch", 1) > 1:
+            pinned = [g for g in r.gate() if re.search(r"\bid=|-destination", g)]
+            if pinned:
+                checks.append((f"batch of {getattr(a, 'batch', 1)} over a gate that pins a simulator destination",
+                               False,
+                               "; ".join(g.strip() for g in pinned)
+                               + " — two agents would share one simulator; declare `resources` in `.wave.json` "
+                               "and write the gate as `… id={SIMULATOR} …` — dispatch substitutes each agent's own seat",
+                               False))
         hooks = r.profile()["hooks"]
         if hooks:
             broken = [h for h in hooks if not h["ok"]]
@@ -3493,6 +3609,7 @@ GUARANTEES = [
     ("no merge of a PR the judge never judged: the producer is never the judge of its own PR", "cmd_merge -> judge_check (cmd_judge writes the patch)", "JUDGE-MISSING[no verdict at <handoffs>/judge-<PR>.json]", True),
     ("no merge of a PR the judge failed or held concerns on", "cmd_merge -> judge_check", "JUDGE-FAIL[verdict fail: <file:line, ...>]", True),
     ("no merge on a verdict whose head_sha is not the head being merged: any push invalidates the judgement", "cmd_merge -> judge_check", "JUDGE-STALE[the verdict is for abc1234, the head is def5678]", True),
+    ("a judge round re-judges the delta against the previous findings — `judge <PR> --since` writes `judge-<PR>.delta.patch` (`<previous head>..<head>`) and the round prompt cites each earlier finding; only `fail` or a `blocking` finding refuses a merge, a `concerns` carrying nits alone never does", "judge_check + cmd_judge --since <- cmd_merge", "JUDGE-FAIL names the blocking finding; nits-only concerns is fresh with its nit count; the round prompt lists every previous finding", True),
     ("tick changes only the open lines it names, every other byte kept; a body without `## Done when` is refused", "tick_body (cmd_tick, apply_ledger)", "exit 2: tick refused: ...", True),
     ("verify names sibling issues that cite files the PR touched", "verify_one --epic", "notify lines", False),
     ("order predicts pairwise and chained textual conflicts", "cmd_order", "pairs + chain ✗", True),
@@ -3540,6 +3657,8 @@ GUARANTEES = [
     ("no Agent dispatch whose prompt lacks the contract sections — where, task, gate, delivery, Done when; a fork is exempt (fail open: a broken guard exits 0)", "hooks/guards.py dispatch-contract <- settings PreToolUse[Task]", "exit 2: dispatch-contract-guard: it lacks the dispatch contract: the gate to run, ...", True),
     # the skill-lint (scripts/validate_skills.py): a skill whose frontmatter is broken silently stops being offered to the tooling
     ("no skill whose frontmatter is broken — name kebab matching its directory, a description of at least 40 chars, no dead template link", "ci.yml skill-lint <- validate_skills.py", "CI red: skills/<dir>/SKILL.md: name `X` differs from its directory ...", True),
+    ("dois agentes do mesmo lote nunca recebem o mesmo recurso", "cmd_dispatch -> seat_plan",
+     "dispatch refused: 3 issues, 2 SIMULATOR free; each prompt of the batch carries its own `id={SIMULATOR}`", True),
 ]
 
 
@@ -3828,7 +3947,7 @@ def main(argv=None):
     x.add_argument("--again", action="store_true", help="re-propose for a repo already answered (a `.wave.json` or a confirmed entry)")
     x = s.add_parser("next", help="leaf issues ready to dispatch"); x.add_argument("epic"); x.add_argument("--batch", type=int, default=4); x.add_argument("--json", action="store_true")
     x = s.add_parser("epics", help="every open epic across the registry's repos (--slug / --repo for one), readiest first: leaves, closed, ready, blocked, in progress, last status comment"); x.add_argument("--slug", help="owner/name: scan that repo instead of the whole registry"); x.add_argument("--repo", default=argparse.SUPPRESS, help="path inside a repo: scan that repo instead of the whole registry"); x.add_argument("--json", action="store_true", help="one object per epic, for the SKILL's step 0")
-    x = s.add_parser("dispatch", help="create worktrees + prompt files (runs doctor and refuses issues that are not READY)"); x.add_argument("issues", nargs="+"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--force", action="store_true"); x.add_argument("--warm", action="store_true", help="Rust: `cargo fetch` in the main checkout first, so parallel builds only extract"); x.add_argument("--respawn", action="store_true", help="this dispatch returns with a new strategy after the same failure twice: the stamp counts a respawn, not a plain resume"); x.add_argument("--no-prepare", action="store_true", help="do not run `wave prepare` on an issue whose body has no `## Handoff`")
+    x = s.add_parser("dispatch", help="create worktrees + prompt files (runs doctor and refuses issues that are not READY)"); x.add_argument("issues", nargs="+"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--force", action="store_true"); x.add_argument("--warm", action="store_true", help="Rust: `cargo fetch` in the main checkout first, so parallel builds only extract"); x.add_argument("--addendum", metavar="FILE", help="append this file verbatim to the end of every prompt of the batch and record it in the stamp — a --force/--respawn re-applies the recorded one"); x.add_argument("--respawn", action="store_true", help="this dispatch returns with a new strategy after the same failure twice: the stamp counts a respawn, not a plain resume"); x.add_argument("--no-prepare", action="store_true", help="do not run `wave prepare` on an issue whose body has no `## Handoff`")
     x = s.add_parser("prepare", help="write the facts of a handoff (branch, worktree, base, gate, skills, non-negotiables, Closes #N) into the issue's `## Handoff` — appended, or an existing one replaced in place — and print the judgement it cannot write, one question per gap, for the orchestrator to ask"); x.add_argument("issues", nargs="+")
     x = s.add_parser("amend", help="write the owner's answered criteria into the issue once: --done-when <file>, one `- [ ] item` per line, written before the Handoff, never over one that exists"); x.add_argument("issue"); x.add_argument("--done-when", metavar="FILE", required=True)
     x = s.add_parser("release", help="prepare a release and stop: bump both manifests on release/<version>, open the `Release <version>` PR with one note per PR since the last tag; --dry-run prints the branch, the diff and the notes. Merge, tag and gh release stay yours"); x.add_argument("version"); x.add_argument("--dry-run", action="store_true")
@@ -3840,7 +3959,7 @@ def main(argv=None):
     x.add_argument("--every", default="5m", metavar="N", help="watch poll interval: 45s | 5m | 1h | bare seconds (default 5m)")
     x = s.add_parser("prompt", help="print the agent prompt for one issue"); x.add_argument("issue"); x.add_argument("--parallel", type=int, default=4)
     x = s.add_parser("verify", help="check PRs: attribution, protected paths, CI, mergeability, worktree"); x.add_argument("prs", nargs="*"); x.add_argument("--epic"); x.add_argument("--json", action="store_true")
-    x = s.add_parser("judge", help="write a PR's scoped patch for a read-only judge agent, validate the verdict it writes (merge refuses without a pass at the head)"); x.add_argument("prs", nargs="+")
+    x = s.add_parser("judge", help="write a PR's scoped patch for the judge agent, validate the verdict it writes (merge refuses without a pass at the head)"); x.add_argument("prs", nargs="+"); x.add_argument("--since", action="store_true", help="a round: read the previous judge-<PR>.json, write judge-<PR>.delta.patch (<previous head>..<head>) and print the round prompt with the previous findings in it")
     x = s.add_parser("order", help="pairwise merge-tree -> merge order, per repo"); x.add_argument("prs", nargs="*"); x.add_argument("--epic"); x.add_argument("--json", action="store_true"); x.add_argument("--plan", help="write the approved delta (base sha + PR heads + order) to this file"); x.add_argument("--run-gate", action="store_true", help="run the repo's gate on the tree after each step of the chain, in a throwaway worktree: names the PR that turns it red")
     x = s.add_parser("merge", help="merge PRs in order, one at a time, CI green before each"); x.add_argument("prs", nargs="*"); x.add_argument("--yes", action="store_true"); x.add_argument("--plan", help="plan file from `order --plan`: refuses if the base or any PR head moved since"); x.add_argument("--force", action="store_true"); x.add_argument("--squash", action="store_true"); x.add_argument("--ci-timeout", type=int, default=1200); x.add_argument("--wait-base-ci", action="store_true")
     x = s.add_parser("resolve", help="merge the base into a conflicting PR's branch in its worktree, gate, push (never --force), comment; a conflict is left for you, then --continue"); x.add_argument("pr"); x.add_argument("--continue", dest="cont", action="store_true")
