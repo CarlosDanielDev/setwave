@@ -74,7 +74,7 @@ IGNORE_ACTIONS = ["actions/checkout", "actions/setup-*", "actions/cache", "actio
 # changed less than WORKING_MIN minutes ago = working, up to DEAD_MIN = quiet, more and no PR = likely dead
 WORKING_MIN = 10
 DEAD_MIN = 30
-STAMP = ".setwave.json"  # written by dispatch into each worktree, excluded from git: issue, repo, dispatched_at, prompt, resumes, respawns
+STAMP = ".setwave.json"  # written by dispatch into each worktree, excluded from git: issue, repo, dispatched_at, prompt, resumes, respawns, resources, addendum
 # dispatches over a worktree without a new commit on its branch — a plain resume and a respawn with a new strategy
 # count alike: at RETRY_CEILING of them, the agent is agent-exhausted — dispatch refuses a further one and
 # `wave sweep --fix` escalates to the owner; nothing is ever closed by itself
@@ -298,6 +298,7 @@ class Repo:
                  f"registry ({', '.join(sorted(self.entry))})" if self.entry else ""]
         self.cfg_source = " + ".join(w for w in where if w) or "none (defaults)"
         self.protected: list[str] = list(self.cfg.get("protected", []))
+        self.resources: dict[str, list[str]] = dict(self.cfg.get("resources") or {})
 
     def _env(self) -> dict:
         env = dict(os.environ)
@@ -1535,15 +1536,58 @@ def remaining(body: str) -> str:
             + "".join(f"- [ ] {i['text']}\n" for i in left))
 
 
-def render_prompt(repo: Repo, iss: dict, branch: str, sha: str, parallel: int) -> str:
+def seat_sub(text: str, seat: dict[str, str]) -> str:
+    """`{KEY}` for every seat key — `N`, `WORKTREE` and each declared resource — becomes this agent's own value."""
+    for key, value in seat.items():
+        text = text.replace("{" + key + "}", value)
+    return text
+
+
+def seat_plan(repo: Repo, ns: list[int]) -> dict[int, dict[str, str]]:
+    """A seat (one value per declared resource) for every issue of the batch: a worktree keeps the seat its
+    stamp records — same tree, same simulator across --force and --respawn — a seat another worktree's
+    stamp holds is not free, and a pool that cannot seat every issue refuses the dispatch with the count."""
+    for name, values in repo.resources.items():
+        if not (isinstance(name, str) and name.isupper() and isinstance(values, list) and values
+                and all(isinstance(v, str) and v for v in values)):
+            raise SystemExit(f'{repo.slug}: `resources` must be {{"NAME": ["value", ...]}} — '
+                             f"an UPPERCASE name and a non-empty list of values; `{name}` is not")
+    free = {name: list(values) for name, values in repo.resources.items()}
+    seats: dict[int, dict[str, str]] = {}
+    for line in repo.git(["worktree", "list", "--porcelain"]).splitlines():
+        if not line.startswith("worktree "):
+            continue
+        stamp = stamp_of(Path(line[len("worktree "):]))
+        res = stamp.get("resources")
+        if not (isinstance(res, dict) and res):
+            continue
+        n = stamp.get("issue")
+        for name, value in [(k, str(v)) for k, v in res.items()]:
+            if value in free.get(name, []):
+                free[name].remove(value)  # a seat another worktree's stamp holds is spoken for
+        if n in ns:
+            seats[n] = {k: str(v) for k, v in res.items()}  # re-dispatch: the tree keeps its own seat
+    pending = [n for n in ns if n not in seats]
+    for name in repo.resources:
+        if len(pending) > len(free[name]):
+            raise SystemExit(f"dispatch refused: {len(pending)} issue{'s' if len(pending) > 1 else ''}, "
+                             f"{len(free[name])} {name} free — enlarge the pool in `.wave.json` `resources`, "
+                             "dispatch fewer issues, or `wave cleanup` a worktree that no longer needs its seat")
+    for n in pending:
+        seats[n] = {name: values.pop(0) for name, values in free.items()}
+    return seats
+
+
+def render_prompt(repo: Repo, iss: dict, branch: str, sha: str, parallel: int, seat: dict[str, str] | None = None) -> str:
     tpl = (TEMPLATES / "agent.md").read_text()
     n = iss["number"]
+    gate = [seat_sub(g, {"N": str(n), "WORKTREE": str(repo.worktree(n)), **(seat or {})}) for g in repo.gate()]
     fields = {
         "WAVE": str(Path(__file__).resolve()), "REMAINING": remaining(iss.get("body") or "").rstrip("\n"),
         "N": str(n), "TITLE": iss["title"], "URL": iss["html_url"], "REPO": repo.slug,
         "ROOT": str(repo.root), "WORKTREE": str(repo.worktree(n)), "BRANCH": branch,
         "BASE": repo.base, "SHA": sha, "DATE": datetime.now().strftime("%Y-%m-%d"),
-        "GATE": "\n".join(repo.gate()), "GATE_ONE_LINE": " && ".join(repo.gate()),
+        "GATE": "\n".join(gate), "GATE_ONE_LINE": " && ".join(gate),
         "PROTECTED": ", ".join(f"`{p}`" for p in repo.protected) or "(nenhum declarado em .wave.json / registro)",
         "CODEGRAPH_QUERY": codegraph_query(iss),
         # the single owner of the CodeGraph policy: the template keeps only the invariant tail
@@ -1712,10 +1756,12 @@ def cmd_dispatch(default: Repo | None, a):
             bad = [t for t, ok, _ in premises_for(repo, n) if not ok]
             if bad:
                 raise SystemExit(f"dispatch refused: {key(repo, n)} is not ready — {'; '.join(bad)}. `wave why {key(repo, n)}`")
+    seats: dict[int, dict[str, str]] = {}
     for repo in {r for r, _ in targets}:
         repo.fetch()
         sync_provider(repo, a.dry_run)
         repo.handoffs.mkdir(exist_ok=True)
+        seats.update(seat_plan(repo, [n for rr, n in targets if rr.slug == repo.slug]))
         if a.warm:  # archives downloaded once, here, so the worktrees' parallel builds only extract
             if not (repo.root / "Cargo.toml").exists():
                 print(f"{repo.slug}: --warm: no Cargo.toml, nothing to fetch")
@@ -1760,10 +1806,20 @@ def cmd_dispatch(default: Repo | None, a):
                 if sh_ok(["which", "codegraph"])[0]:
                     sh_ok(["codegraph", "init", "."], cwd=wt)
         path = repo.handoffs / f"{n}.md"
-        path.write_text(render_prompt(repo, iss, branch, sha, len(targets)))
+        addendum_src = a.addendum or (stamp_of(wt).get("addendum") if wt.exists() else None)
+        addendum_file = Path(addendum_src).expanduser() if addendum_src else None
+        if addendum_file and not addendum_file.is_file():
+            raise SystemExit(f"dispatch refused: addendum {addendum_file} is not a file")
+        addendum = addendum_file.read_text() if addendum_file else ""
+        path.write_text(render_prompt(repo, iss, branch, sha, len(targets), seats.get(n)) + addendum)
         if not a.dry_run:  # the stamp `agents`, `doctor` and the retry ceiling read; a re-dispatch (--force) is a new agent, so a new stamp
-            (wt / STAMP).write_text(json.dumps({"issue": n, "repo": repo.slug, "dispatched_at": now_iso(), "prompt": str(path),
-                                                "resumes": resumes, "respawns": respawns}, indent=2) + "\n")
+            stamp = {"issue": n, "repo": repo.slug, "dispatched_at": now_iso(), "prompt": str(path),
+                     "resumes": resumes, "respawns": respawns}
+            if seats.get(n):
+                stamp["resources"] = seats[n]
+            if addendum_file:
+                stamp["addendum"] = str(addendum_file)
+            (wt / STAMP).write_text(json.dumps(stamp, indent=2) + "\n")
             totals = getattr(a, "stamp_totals", {"resumes": 0, "respawns": 0})  # logged for `wave stats`: the waves' escalation mix
             a.stamp_totals = {"resumes": totals["resumes"] + resumes, "respawns": totals["respawns"] + respawns}
             ok, excl = repo.git_ok(["rev-parse", "--git-path", "info/exclude"], cwd=wt)  # shared by every worktree
@@ -3099,6 +3155,15 @@ def cmd_doctor(default: Repo | None, a) -> None:
             if cmd not in gate:
                 checks.append((f"`{where}` names `{cmd}` and the gate does not", False,
                                "if it is a gate step, declare it in `.wave.json`'s gate", False))
+        if getattr(a, "batch", 1) > 1:
+            pinned = [g for g in r.gate() if re.search(r"\bid=|-destination", g)]
+            if pinned:
+                checks.append((f"batch of {getattr(a, 'batch', 1)} over a gate that pins a simulator destination",
+                               False,
+                               "; ".join(g.strip() for g in pinned)
+                               + " — two agents would share one simulator; declare `resources` in `.wave.json` "
+                               "and write the gate as `… id={SIMULATOR} …` — dispatch substitutes each agent's own seat",
+                               False))
         hooks = r.profile()["hooks"]
         if hooks:
             broken = [h for h in hooks if not h["ok"]]
@@ -3470,6 +3535,8 @@ GUARANTEES = [
     ("no Agent dispatch whose prompt lacks the contract sections — where, task, gate, delivery, Done when; a fork is exempt (fail open: a broken guard exits 0)", "hooks/guards.py dispatch-contract <- settings PreToolUse[Task]", "exit 2: dispatch-contract-guard: it lacks the dispatch contract: the gate to run, ...", True),
     # the skill-lint (scripts/validate_skills.py): a skill whose frontmatter is broken silently stops being offered to the tooling
     ("no skill whose frontmatter is broken — name kebab matching its directory, a description of at least 40 chars, no dead template link", "ci.yml skill-lint <- validate_skills.py", "CI red: skills/<dir>/SKILL.md: name `X` differs from its directory ...", True),
+    ("dois agentes do mesmo lote nunca recebem o mesmo recurso", "cmd_dispatch -> seat_plan",
+     "dispatch refused: 3 issues, 2 SIMULATOR free; each prompt of the batch carries its own `id={SIMULATOR}`", True),
 ]
 
 
@@ -3758,7 +3825,7 @@ def main(argv=None):
     x.add_argument("--again", action="store_true", help="re-propose for a repo already answered (a `.wave.json` or a confirmed entry)")
     x = s.add_parser("next", help="leaf issues ready to dispatch"); x.add_argument("epic"); x.add_argument("--batch", type=int, default=4); x.add_argument("--json", action="store_true")
     x = s.add_parser("epics", help="every open epic across the registry's repos (--slug / --repo for one), readiest first: leaves, closed, ready, blocked, in progress, last status comment"); x.add_argument("--slug", help="owner/name: scan that repo instead of the whole registry"); x.add_argument("--repo", default=argparse.SUPPRESS, help="path inside a repo: scan that repo instead of the whole registry"); x.add_argument("--json", action="store_true", help="one object per epic, for the SKILL's step 0")
-    x = s.add_parser("dispatch", help="create worktrees + prompt files (runs doctor and refuses issues that are not READY)"); x.add_argument("issues", nargs="+"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--force", action="store_true"); x.add_argument("--warm", action="store_true", help="Rust: `cargo fetch` in the main checkout first, so parallel builds only extract"); x.add_argument("--respawn", action="store_true", help="this dispatch returns with a new strategy after the same failure twice: the stamp counts a respawn, not a plain resume"); x.add_argument("--no-prepare", action="store_true", help="do not run `wave prepare` on an issue whose body has no `## Handoff`")
+    x = s.add_parser("dispatch", help="create worktrees + prompt files (runs doctor and refuses issues that are not READY)"); x.add_argument("issues", nargs="+"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--force", action="store_true"); x.add_argument("--warm", action="store_true", help="Rust: `cargo fetch` in the main checkout first, so parallel builds only extract"); x.add_argument("--addendum", metavar="FILE", help="append this file verbatim to the end of every prompt of the batch and record it in the stamp — a --force/--respawn re-applies the recorded one"); x.add_argument("--respawn", action="store_true", help="this dispatch returns with a new strategy after the same failure twice: the stamp counts a respawn, not a plain resume"); x.add_argument("--no-prepare", action="store_true", help="do not run `wave prepare` on an issue whose body has no `## Handoff`")
     x = s.add_parser("prepare", help="write the facts of a handoff (branch, worktree, base, gate, skills, non-negotiables, Closes #N) into the issue's `## Handoff` — appended, or an existing one replaced in place — and print the judgement it cannot write, one question per gap, for the orchestrator to ask"); x.add_argument("issues", nargs="+")
     x = s.add_parser("amend", help="write the owner's answered criteria into the issue once: --done-when <file>, one `- [ ] item` per line, written before the Handoff, never over one that exists"); x.add_argument("issue"); x.add_argument("--done-when", metavar="FILE", required=True)
     x = s.add_parser("release", help="prepare a release and stop: bump both manifests on release/<version>, open the `Release <version>` PR with one note per PR since the last tag; --dry-run prints the branch, the diff and the notes. Merge, tag and gh release stay yours"); x.add_argument("version"); x.add_argument("--dry-run", action="store_true")
