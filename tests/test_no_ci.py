@@ -17,6 +17,7 @@ from unittest import mock
 from helpers import TMP, WAVE, gh_calls, git, run_wave, sandbox, wave
 
 N = TMP / "n"
+Z = TMP / "z"
 GATE = "echo gate-o-n"
 
 
@@ -41,6 +42,18 @@ def setUpModule():
     reg = json.loads(reg_file.read_text())
     reg["repos"]["o/n"] = {"path": str(N)}
     reg_file.write_text(json.dumps(reg))
+    # o/z: origin/main carries a workflow, the checkout's tree does not — what has_ci_workflows reads (#97)
+    bare_z = TMP / "remote" / "o" / "z.git"
+    bare_z.parent.mkdir(parents=True, exist_ok=True)
+    git("init", "-q", "--bare", str(bare_z), cwd=TMP)
+    git("clone", "-q", str(bare_z), str(Z), cwd=TMP)
+    (Z / ".wave.json").write_text(json.dumps({"base": "main"}))
+    (Z / ".github" / "workflows").mkdir(parents=True)
+    (Z / ".github" / "workflows" / "ci.yml").write_text("name: ci\non: [push]\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n")
+    git("add", ".", cwd=Z)
+    git("commit", "-q", "-m", "base", cwd=Z)
+    git("push", "-q", "origin", "main", cwd=Z)
+    (Z / ".github" / "workflows" / "ci.yml").unlink()  # the stale tree: only origin knows the workflow
 
 
 def writes(*args, log: str):
@@ -68,16 +81,16 @@ def judge_pass_n(pr: int) -> None:
 class CiVerdict(unittest.TestCase):
     """The distinction the issue asks for: no checks anywhere is NO-CI, not pending."""
 
-    def test_no_checks_and_no_workflow_is_no_ci(self):
+    def test_no_checks_and_no_expected_ci_is_no_ci(self):
         class R:
-            def __init__(self, checks, workflows):
-                self.c, self.w = checks, workflows
+            def __init__(self, checks, ci_expected):
+                self.c, self.e = checks, ci_expected
             def pr_checks(self, n):
                 return self.c
-            def has_ci_workflows(self):
-                return self.w
+            def ci_expected(self):
+                return self.e
         self.assertEqual(wave.ci_verdict(R({}, False), 1), "NO-CI")
-        self.assertIsNone(wave.ci_verdict(R({}, True), 1), "a workflow exists: the checks may still come (pending)")
+        self.assertIsNone(wave.ci_verdict(R({}, True), 1), "CI is expected: the checks may still come (pending)")
         self.assertEqual(wave.ci_verdict(R({"ci": "pass"}, False), 1), "PASS")
         self.assertEqual(wave.ci_verdict(R({"ci": "fail"}, True), 1), "FAILED")
 
@@ -111,7 +124,10 @@ class VerifyReports(unittest.TestCase):
         p = run_wave("verify", "o/n#81", "--json")
         r = json.loads(p.stdout)[0]
         self.assertEqual((p.returncode, r["ok"], r["no_ci"]), (1, False, True), r)
-        self.assertIn("NO-CI", run_wave("verify", "o/n#81").stdout)
+        out = run_wave("verify", "o/n#81").stdout
+        self.assertIn("NO-CI", out)
+        self.assertIn("unverified", out, "the flag carries the fenced/unverified wording, not 'the gate output'")
+        self.assertIn("chain_gate", out, "the flag names the machine-verifiable alternative")
 
     def test_a_pr_with_checks_is_not_no_ci(self):
         r = json.loads(run_wave("verify", "20", "--json").stdout)[0]
@@ -135,6 +151,7 @@ class NoCiEvidence(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertIn("--no-ci", p.stdout)
         self.assertIn(GATE, p.stdout, "the acknowledgment names the gate it accepted")
+        self.assertIn("unverified", p.stdout, "the acknowledgment says the paste is unverified")
         self.assertTrue([c for c in calls("noci-body") if c[:2] == ["pr", "merge"]])
 
     def test_without_evidence_no_ci_is_refused(self):
@@ -172,12 +189,102 @@ class EmptyPlans(unittest.TestCase):
         self.assertEqual(q.returncode, 1, q.stdout + q.stderr)
         self.assertIn("nothing to merge", q.stderr)
 
+    def test_bare_order_refuses_a_leaf_too(self):
+        p = run_wave("order", "--epic", "2")
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("is a leaf: use `order <PR>`", p.stderr)
+
+    def test_bare_order_refuses_an_empty_selection_too(self):
+        p = run_wave("order", "99")
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("nothing to order", p.stderr)
+
+    def test_the_no_ci_help_carries_the_current_policy(self):
+        p = run_wave("merge", "--help")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("--no-ci", p.stdout)
+        self.assertIn("Actions", p.stdout, "the help is Actions-aware, not files-only")
+        self.assertIn("unverified", p.stdout, "the help says the body paste is an unverified paste")
+
+
+class GatePaste(unittest.TestCase):
+    """The body-paste evidence is anchored: a fenced run, not any mention (#97 review)."""
+
+    def r(self):
+        class R:
+            def gate(self_inner):
+                return ["echo gate-o-n", "cargo test"]
+        return R()
+
+    def test_a_pasted_run_in_a_fenced_block_is_evidence(self):
+        body = "Gate:\n\n```\n$ echo gate-o-n\nok\n```\n"
+        self.assertEqual(wave.gate_output_in_body(self.r(), body), "echo gate-o-n")
+        self.assertEqual(wave.gate_output_in_body(self.r(), "```\necho gate-o-n\nok\n```"), "echo gate-o-n")
+
+    def test_a_bare_mention_outside_a_fence_is_not_evidence(self):
+        self.assertIsNone(wave.gate_output_in_body(self.r(), "we should run echo gate-o-n soon"))
+        self.assertIsNone(wave.gate_output_in_body(self.r(), "```\ncargo test\n```\nthen echo gate-o-n"))
+
+
+class WorkflowSource(unittest.TestCase):
+    def test_workflow_existence_reads_origin_not_the_checkout_tree(self):
+        repo = wave.Repo("o/z", {"path": str(Z)})
+        self.assertTrue(repo.has_ci_workflows(), "origin/main has the workflow; a stale tree must not flip NO-CI")
+
+    def test_actions_disabled_is_no_ci_even_with_workflow_files(self):
+        # the incident behind #97: Actions off (billing), files still on disk — the merge spun the whole clock
+        repo = wave.Repo("o/z", {"path": str(Z)})
+        self.assertTrue(repo.has_ci_workflows(), "premise: origin/main carries the workflow files")
+        self.assertIs(repo.actions_enabled(), False, "premise: the fixture says Actions is disabled")
+        with mock.patch.object(repo, "pr_checks", lambda n: {}):
+            self.assertEqual(wave.ci_verdict(repo, 1), "NO-CI", "no check can ever run: files or not, this is NO-CI")
+
+    def test_an_actions_read_failure_keeps_pending_when_files_exist(self):
+        repo = wave.Repo("o/z", {"path": str(Z)})  # origin has the files; the fixture says Actions is disabled
+        with mock.patch.object(repo, "actions_enabled", lambda: None):
+            self.assertTrue(repo.ci_expected(), "Actions unreadable + files on origin: keep waiting")
+            self.assertIsNone(wave.ci_verdict(repo, 1), "the verdict retries as pending, never NO-CI")
+        with mock.patch.object(repo, "actions_enabled", lambda: None), \
+             mock.patch.object(repo, "has_ci_workflows", lambda: False):
+            self.assertFalse(repo.ci_expected(), "Actions unreadable but truly no workflow: the files arm decides, NO-CI stands")
+
+
+class ChecksError(unittest.TestCase):
+    def test_pr_checks_returns_none_when_gh_cannot_read_them(self):
+        repo = wave.Repo.get("o/n")
+        with mock.patch.object(repo, "gh_ok", lambda args: (False, "gh: exploded")):
+            self.assertIsNone(repo.pr_checks(81), "a tool failure is never an empty checks dict")
+
+    def test_a_gh_failure_is_pending_never_no_ci(self):
+        class R:
+            def pr_checks(self_inner, n):
+                return None  # the tri-state's error arm: gh failed both reads
+            def has_ci_workflows(self_inner):
+                return False
+        self.assertIsNone(wave.ci_verdict(R(), 1), "a tool failure is retried as pending, never NO-CI")
+
+    def test_verify_reports_ci_unknown_instead_of_silent_green_or_no_ci(self):
+        repo = wave.Repo.get("o/n")
+        real = wave.Repo.gh_ok
+        def failing(self, args):
+            if args[:2] == ["pr", "checks"]:
+                return False, "gh: exploded"
+            return real(self, args)
+        out = io.StringIO()
+        with mock.patch.object(wave.Repo, "gh_ok", failing), contextlib.redirect_stdout(out):
+            with self.assertRaises(SystemExit) as ctx:
+                wave.cmd_verify(repo, argparse.Namespace(prs=["o/n#81"], epic=None, json=False))
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertIn("CI-UNKNOWN", out.getvalue())
+        v = json.loads(run_wave("verify", "o/n#81", "--json").stdout)  # sanity, unpatched: the fixture PR is clean
+        self.assertFalse(v[0]["checks_error"])
+
 
 class GuaranteesPinned(unittest.TestCase):
     def test_the_two_new_guarantees_are_listed_and_pinned(self):
         p = run_wave("guarantees", "--json")
         rows = json.loads(p.stdout)
-        for frag in ("never waits for CI that does not exist", "an empty plan is never success"):
+        for frag in ("never waits for CI that does not exist", "an empty selection is never success"):
             row = next(r for r in rows if frag in r["guard"])
             self.assertTrue(row["tested"], frag)
 
