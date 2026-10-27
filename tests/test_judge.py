@@ -153,6 +153,15 @@ class Schema(unittest.TestCase):
             {"verdict": "concerns", "head_sha": "0" * 40,
              "findings": [{"file": "a.py", "line": 3, "severity": "nit", "note": "x"}]}), [])
 
+    def test_problems_of_a_recheck(self):
+        good = {"verdict": "pass", "head_sha": "0" * 40, "findings": []}
+        for rc in ([], [{"file": "a.py", "line": 1, "status": "fixed"}], [{"file": "a.py", "line": 2, "status": "not fixed"}]):
+            self.assertEqual(wave.verdict_problems({**good, "recheck": rc}), [])
+        for rc in ("yes", [{"file": "a.py", "line": 1}], [{"file": "a.py", "line": 0, "status": "fixed"}],
+                   [{"file": "a.py", "line": 1, "status": "maybe"}]):
+            self.assertTrue(wave.verdict_problems({**good, "recheck": rc}), rc)
+        self.assertTrue(wave.verdict_problems(dict(good), round_=True), "a round verdict without recheck is refused")
+
     def test_problems_of_a_bad_verdict(self):
         for body in ({}, "pass", {"verdict": "pass"}, {"verdict": "pass", "head_sha": "0" * 40, "findings": "all"},
                      {"verdict": "pass", "head_sha": "0" * 40, "findings": [{"file": "a.py", "line": 0, "note": "x"}]},
@@ -270,9 +279,43 @@ class Round(unittest.TestCase):
     def test_a_round_verdict_at_the_current_head_is_fresh(self):
         judge_pass(20)
         push_new_commit("g2.txt")  # the seeded verdict goes stale
-        judge_pass(20)  # the judge rewrote the verdict at the new head
+        f = judge_pass(20)  # the judge rewrote the verdict at the new head
+        body = json.loads(f.read_text())
+        body["recheck"] = [{"file": "g.txt", "line": 1, "status": "fixed"}]
+        f.write_text(json.dumps(body))
         p = run_wave("judge", "20", "--since")
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
+    def test_a_round_verdict_answers_every_previous_finding(self):
+        judge_pass(20, "concerns", severity="nit")
+        push_new_commit("g2.txt")
+        f = judge_pass(20)
+        body = json.loads(f.read_text())
+        body["recheck"] = [{"file": "g.txt", "line": 1, "status": "not fixed"}]
+        f.write_text(json.dumps(body))
+        p = run_wave("judge", "20", "--since")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
+    def test_a_round_verdict_without_the_recheck_evidence_is_refused(self):
+        judge_pass(20)
+        push_new_commit("g2.txt")
+        judge_pass(20)  # fresh at this head, but no recheck: the round never answered the previous findings
+        p = run_wave("judge", "20", "--since")
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("recheck", p.stdout)
+
+    def test_a_nonsense_recheck_is_refused(self):
+        judge_pass(20)
+        push_new_commit("g2.txt")
+        f = judge_pass(20)
+        body = json.loads(f.read_text())
+        body["recheck"] = [{"file": "g.txt", "line": 1, "status": "maybe"}]
+        f.write_text(json.dumps(body))
+        p = run_wave("judge", "20", "--since")
+        # prev and verdict share one file: the refusal may come from the previous-verdict check or the round
+        # verdict check, but both name the same broken entry and both refuse
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("recheck[0].status must be fixed|not fixed", p.stdout)
 
     def test_a_round_verdict_for_an_older_head_is_stale(self):
         judge_pass(20)  # a pass at the previous head: only the sha can refuse it now

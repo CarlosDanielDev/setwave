@@ -1901,9 +1901,10 @@ def verify_one(repo: Repo, pr: dict, epic_nodes: dict | None = None) -> dict:
 VERDICTS = ("pass", "fail", "concerns")
 
 
-def verdict_problems(v) -> list[str]:
+def verdict_problems(v, round_: bool = False) -> list[str]:
     """What disqualifies `v` as a judge verdict: the enum, a full 40-hex sha, findings that cite file and a 1-based
-    line; fail and concerns must name at least one finding. Extra keys are tolerated."""
+    line; fail and concerns must name at least one finding. A round verdict (`round_`, or any verdict carrying one)
+    answers every previous finding in `recheck`: a list of file, line and `fixed | not fixed`. Extra keys are tolerated."""
     if not isinstance(v, dict):
         return ["the verdict is not a JSON object"]
     bad = []
@@ -1926,21 +1927,33 @@ def verdict_problems(v) -> list[str]:
                 bad.append(f"findings[{i}].severity must be blocking|nit")
         if v.get("verdict") in ("fail", "concerns") and not fs:
             bad.append(f"a {v.get('verdict')} names at least one finding")
+    rc = v.get("recheck")
+    if rc is not None or round_:
+        if not isinstance(rc, list):
+            bad.append("a round verdict answers every previous finding in `recheck`, a list of {file, line, status}")
+        else:
+            for i, r in enumerate(rc):
+                if not isinstance(r, dict) or not isinstance(r.get("file"), str) or not r["file"]:
+                    bad.append(f"recheck[{i}].file must be a path")
+                elif not isinstance(r.get("line"), int) or isinstance(r.get("line"), bool) or r["line"] < 1:
+                    bad.append(f"recheck[{i}].line must be a 1-based line")
+                elif r.get("status") not in ("fixed", "not fixed"):
+                    bad.append(f"recheck[{i}].status must be fixed|not fixed")
     return bad
 
 
-def judge_check(repo: Repo, n: int, head_sha: str) -> dict:
+def judge_check(repo: Repo, n: int, head_sha: str, round_: bool = False) -> dict:
     """The judge's verdict for PR `n`, re-validated by the kernel: `flag` is None only when a schema-valid verdict
     says `pass` at exactly `head_sha`; anything else is one of the three JUDGE refusals (merge never trusts the
     file, the plan, or this command's earlier answer — the sha is re-checked where the merge happens)."""
     path = repo.handoffs / f"judge-{n}.json"
     if not path.exists():
-        return {"flag": "JUDGE-MISSING", "detail": f"no verdict at {path}: `wave judge` writes the patch, a read-only agent writes the verdict"}
+        return {"flag": "JUDGE-MISSING", "detail": f"no verdict at {path}: `wave judge` writes the patch, the plugin's judge agent writes the verdict"}
     try:
         v = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as e:
         return {"flag": "JUDGE-MISSING", "detail": f"{path.name} is not a readable verdict ({e})"}
-    bad = verdict_problems(v)
+    bad = verdict_problems(v, round_=round_)
     if bad:
         return {"flag": "JUDGE-MISSING", "detail": f"{path.name}: " + "; ".join(bad)}
     blocking = [f for f in v["findings"] if f["severity"] == "blocking"]
@@ -2020,7 +2033,7 @@ def cmd_judge(default: Repo | None, a):
               + (f"; its issue is #{n_issue}" if n_issue else "; its PR body names no issue") + (ancestry if a.since else ""))
         if a.since:
             print(render_round_prompt(repo, n, n_issue, prev, sha, patch))
-        jc = judge_check(repo, n, sha)
+        jc = judge_check(repo, n, sha, round_=a.since)
         if jc["flag"] is None:
             fresh = "fresh" if jc["verdict"] == "pass" else f"fresh ({jc['detail'].split(': ', 1)[1]})"
             print(f"  verdict {jc['verdict']} at {sha[:7]} — {fresh}; `merge` re-checks the sha before merging")
@@ -2147,7 +2160,7 @@ def cmd_order(default: Repo | None, a):
             unjudged = {n: j for n, j in result[slug]["judges"].items() if j["flag"]}
             if unjudged:
                 print("  judge: " + " ".join(f"#{n} {j['flag']}" for n, j in unjudged.items())
-                      + f"  — `wave judge {slug}#<PR>` and let the read-only agent write the verdict; `merge` refuses without a pass at the head")
+                      + f"  — `wave judge {slug}#<PR>` and let the judge agent write the verdict; `merge` refuses without a pass at the head")
             cg = result[slug].get("chain_gate")
             if cg:
                 skipped = sorted({st["skipped"] for st in cg["steps"] if st.get("skipped")})
@@ -2373,7 +2386,7 @@ def cmd_merge(default: Repo | None, a):
         if not a.force:
             jc = judge_check(repo, n, repo.git(["rev-parse", f"origin/{pr['headRefName']}"]).strip())
             if jc["flag"]:
-                print(f"{key(repo, n)}: {jc['flag']}[{jc['detail']}]. Not merging — `wave judge {key(repo, n)}` and let the read-only agent write the verdict.")
+                print(f"{key(repo, n)}: {jc['flag']}[{jc['detail']}]. Not merging — `wave judge {key(repo, n)}` and let the judge agent write the verdict.")
                 sys.exit(2)
 
         def ci():
@@ -3472,7 +3485,7 @@ GUARANTEES = [
     ("dispatch prepares an issue whose body has no `## Handoff` itself, so a bare issue works end to end; --no-prepare opts out and a failed write dispatches anyway", "cmd_dispatch -> prepare_issue", "no `## Handoff` in the body — prepare wrote it", True),
     ("the agent prompt names the sections the tool wrote and the ones the issue still lacks, so the agent verifies its premises harder where the issue is thin", "render_prompt -> prepared_note", "the {{PREPARED}} block of templates/agent.md", True),
     ("no merge of a PR the judge never judged: the producer is never the judge of its own PR", "cmd_merge -> judge_check (cmd_judge writes the patch)", "JUDGE-MISSING[no verdict at <handoffs>/judge-<PR>.json]", True),
-    ("no merge of a PR the judge failed or held concerns on", "cmd_merge -> judge_check", "JUDGE-FAIL[verdict fail: <file:line, ...>]", True),
+    ("no merge of a PR the judge failed, or where a blocking finding stands — nits and a nits-only concerns never refuse", "cmd_merge -> judge_check", "JUDGE-FAIL[verdict fail: <file:line, ...>]", True),
     ("no merge on a verdict whose head_sha is not the head being merged: any push invalidates the judgement", "cmd_merge -> judge_check", "JUDGE-STALE[the verdict is for abc1234, the head is def5678]", True),
     ("a judge round re-judges the delta against the previous findings — `judge <PR> --since` writes `judge-<PR>.delta.patch` (`<previous head>..<head>`) and the round prompt cites each earlier finding; only `fail` or a `blocking` finding refuses a merge, a `concerns` carrying nits alone never does", "judge_check + cmd_judge --since <- cmd_merge", "JUDGE-FAIL names the blocking finding; nits-only concerns is fresh with its nit count; the round prompt lists every previous finding", True),
     ("tick changes only the open lines it names, every other byte kept; a body without `## Done when` is refused", "tick_body (cmd_tick, apply_ledger)", "exit 2: tick refused: ...", True),
