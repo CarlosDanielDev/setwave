@@ -212,8 +212,6 @@ class Next(unittest.TestCase):
         self.assertIn("likely dead, nothing changed for 120 min", p.stdout)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class Stalled(unittest.TestCase):
@@ -234,6 +232,13 @@ class Stalled(unittest.TestCase):
             rec = wave.worktree_state(repo(), TMP / "l-11", "feat/11-quiet", 11, now=NOW + 5 * 60)
         self.assertTrue(rec["busy"])
         self.assertEqual(rec["progress"], "working")
+
+    def test_a_merged_pr_is_done_never_stalled(self):
+        with mock.patch.object(wave.Repo, "pr_of", return_value=(True, {"number": 21, "state": "MERGED"})):
+            rec = wave.worktree_state(repo(), TMP / "l-11", "feat/11-quiet", 11, now=NOW)
+        self.assertEqual(rec["pr_state"], "MERGED")
+        self.assertEqual(rec["progress"], "done", "merged work is done however idle: never a stall signal")
+        self.assertEqual(wave.agent_verdict(rec), "done")
 
     def test_a_failed_probe_falls_back_to_the_files_verdict(self):
         def boom(wt):
@@ -312,3 +317,56 @@ class Watch(unittest.TestCase):
         with self.assertRaises(WatchStopped):
             self.watch(probe=lambda wt: [f"gate {wt}"], clock=clock, sleep=stop)
         self.assertEqual(ticks, [300, 300, 300], "the default --every is 5m")
+
+    def test_every_zero_never_spins_the_watchdog(self):
+        for bad in ("0", "0m", "0s", "0h"):
+            with self.assertRaises(SystemExit):
+                wave.every_seconds(bad)
+
+    def test_watch_survives_a_transient_failure_and_keeps_polling(self):
+        clock = {"now": NOW}
+        polls = {"n": 0}
+
+        def tick(seconds):
+            clock["now"] += seconds
+
+        def flaky(wt):
+            polls["n"] += 1
+            if polls["n"] == 2:
+                raise RuntimeError("git exploded")
+            return [f"gate {wt}"] if wt.name in ("l-9", "l-11", "l-12") else []
+
+        out, code = self.watch("--every", "5m", probe=flaky, clock=clock, sleep=tick)
+        self.assertEqual(code, 1)
+        self.assertIn("git exploded", out, "a transient failure is logged, never silent")
+        self.assertIn("o/l#10", out, "the watchdog still fires for the real stall")
+
+
+class ProcessProbe(unittest.TestCase):
+    """The probe matches the worktree path on a path boundary: a sibling whose number merely extends the
+    digits (`l-9` inside `l-94`) is another agent's worktree, never this one's process."""
+
+    def test_a_digit_prefix_sibling_is_not_this_worktrees_process(self):
+        ps = (f"xcodebuild -project {TMP}/l-94 -destination x\n"
+              f"/usr/bin/make -C {TMP}/l-9\n"
+              f"tail -f {TMP}/l-9/build.log\n"
+              f"tail -f {TMP}/l-9x/build.log\n")
+        with mock.patch.object(wave, "run", return_value=(0, ps, "")):
+            got = wave.worktree_processes(TMP / "l-9")
+        self.assertIn(f"/usr/bin/make -C {TMP}/l-9", got, "the worktree root itself matches")
+        self.assertIn(f"tail -f {TMP}/l-9/build.log", got, "a child path matches")
+        self.assertNotIn(f"xcodebuild -project {TMP}/l-94 -destination x", got,
+                         "l-94 is a sibling: a digit-prefix read would keep l-9 quiet forever")
+        self.assertNotIn(f"tail -f {TMP}/l-9x/build.log", got)
+
+    def test_the_lsof_cwd_respects_the_boundary_too(self):
+        lsof = f"p42\0n{TMP}/l-94\0p7\0n{TMP}/l-9\0p9\0n{TMP}/l-9/build\0"
+        with mock.patch.object(wave, "run", return_value=(0, lsof, "")):
+            got = wave.worktree_processes(TMP / "l-9")
+        self.assertIn(f"{TMP}/l-9", got)
+        self.assertIn(f"{TMP}/l-9/build", got)
+        self.assertNotIn(f"{TMP}/l-94", got)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -250,6 +250,7 @@ class EscalationPolicy(unittest.TestCase):
         for fragment in ("wave agents", "SendMessage", "foreground"):
             self.assertIn(fragment, skill, f"an interim report reads as a stall, resumed by hand: {fragment}")
         self.assertIn("--watch", skill, "step 3 arms the stall watchdog")
+        self.assertNotIn("`quiet`", skill, "quiet is no longer a verdict `wave agents` prints: stalled replaced it")
 
     def test_stats_reports_resumes_against_respawns(self):
         log = wave.CONFIG_DIR / "log.jsonl"
