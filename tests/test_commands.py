@@ -8,10 +8,13 @@ The epic o/r#1 has seven leaves, one per state:
 import contextlib
 import io
 import json
+import re
+import shutil
+import subprocess
 import unittest
 from unittest import mock
 
-from helpers import TMP, TESTS, WAVE, gh_calls, run_wave, sandbox, wave
+from helpers import CLONE, TMP, TESTS, WAVE, gh_calls, run_wave, sandbox, wave
 
 
 def setUpModule():
@@ -341,6 +344,117 @@ class TypedLint(unittest.TestCase):
             body = wave.fill_refs((TESTS / "e2e-plan" / f"{k}.md").read_text().replace("{{run}}", "20260101000000"),
                                   {"e": 1, "a": 2, "b": 3, "c": 4})
             self.assertEqual(wave.lint_body(body, n, None), [], f"{k}.md")
+
+
+class Dispatch(unittest.TestCase):
+    """One seat per agent: `resources` gives every prompt of a batch its own simulator ({N} and
+    {WORKTREE} substitute too), the seat is stamped on the worktree and kept across --force/--respawn,
+    a short pool or a taken seat refuses with the count, and --addendum closes every prompt verbatim."""
+
+    REG = TMP / "config" / "repos.json"
+
+    def setUp(self):
+        self._registry = self.REG.read_text()
+
+    def tearDown(self):
+        self.REG.write_text(self._registry)
+        for n in (2, 7):
+            wt = TMP / f"r-{n}"
+            if wt.exists():
+                head = subprocess.run(["git", "-C", str(wt), "rev-parse", "--abbrev-ref", "HEAD"],
+                                      capture_output=True, text=True).stdout.strip()
+                subprocess.run(["git", "-C", str(CLONE), "worktree", "remove", "--force", str(wt)],
+                               capture_output=True, text=True)
+                if head and head != "HEAD":
+                    # the branch only ever existed inside this test's throwaway sandbox
+                    subprocess.run(["git", "-C", str(CLONE), "branch", "-D", head],
+                                   capture_output=True, text=True)
+            shutil.rmtree(wt, ignore_errors=True)
+            prompt = TMP / "r-handoffs" / f"{n}.md"
+            if prompt.exists():
+                prompt.unlink()
+
+    def declare(self, **entry):
+        reg = json.loads(self.REG.read_text())
+        reg["repos"]["o/r"] = {**reg["repos"]["o/r"], **entry}
+        self.REG.write_text(json.dumps(reg))
+
+    def stamp(self, n):
+        return json.loads((TMP / f"r-{n}" / ".setwave.json").read_text())
+
+    def test_two_prompts_of_one_dispatch_get_different_udids(self):
+        self.declare(resources={"SIMULATOR": ["UDID-AAAA", "UDID-BBBB"]},
+                     gate=["xcrun simctl boot {SIMULATOR} && xcodebuild -destination 'id={SIMULATOR}' "
+                           "-derivedDataPath {WORKTREE}/build/DD-{N} test"])
+        p = run_wave("dispatch", "2", "7", "--force", "--no-prepare")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        seats = {}
+        for n in (2, 7):
+            text = (TMP / "r-handoffs" / f"{n}.md").read_text()
+            udid = re.findall(r"id=([A-Z-]+)'", text)
+            self.assertTrue(udid, f"{n}.md carries the gate's simulator seat")
+            self.assertEqual(len(set(udid)), 1, f"every seat reference in {n}.md agrees")
+            seats[n] = udid[0]
+            self.assertIn(f"/build/DD-{n} test", text, "{N} is the prompt's own issue")
+            self.assertIn(f"{TMP}/r-{n}/build/DD-{n}", text, "{WORKTREE} is the prompt's own tree")
+        self.assertNotEqual(seats[2], seats[7], "two agents of one batch never share a seat")
+        self.assertEqual(self.stamp(2)["resources"]["SIMULATOR"], seats[2], "the seat is stamped")
+        self.assertEqual(self.stamp(7)["resources"]["SIMULATOR"], seats[7], "the seat is stamped")
+
+    def test_a_worktree_keeps_its_seat_over_force_and_respawn(self):
+        self.declare(resources={"SIMULATOR": ["UDID-AAAA", "UDID-BBBB"]})
+        p = run_wave("dispatch", "2", "--force", "--no-prepare")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        seat = self.stamp(2)["resources"]["SIMULATOR"]
+        p = run_wave("dispatch", "2", "--force", "--respawn", "--no-prepare")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(self.stamp(2)["resources"]["SIMULATOR"], seat,
+                         "same worktree, same seat: a resume or respawn does not steal another simulator")
+
+    def test_a_short_pool_refuses_with_the_count(self):
+        self.declare(resources={"SIMULATOR": ["UDID-AAAA"]})
+        p = run_wave("dispatch", "2", "7", "--force", "--no-prepare")
+        self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("2 issues, 1 SIMULATOR free", p.stderr)
+        self.assertFalse((TMP / "r-handoffs" / "2.md").exists(), "the refusal precedes every prompt")
+
+    def test_a_seat_another_worktree_holds_is_not_free(self):
+        self.declare(resources={"SIMULATOR": ["UDID-AAAA"]})
+        p = run_wave("dispatch", "7", "--force", "--no-prepare")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        p = run_wave("dispatch", "2", "--force", "--no-prepare")
+        self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("1 issue, 0 SIMULATOR free", p.stderr)
+
+    def test_the_addendum_rides_every_prompt_and_survives_a_respawn(self):
+        add = TMP / "addendum-95.md"
+        add.write_text("Always run `xcodegen generate` before the first build.\n")
+        p = run_wave("dispatch", "2", "7", "--force", "--no-prepare", "--addendum", str(add))
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        tail = "Always run `xcodegen generate` before the first build.\n"
+        for n in (2, 7):
+            self.assertTrue((TMP / "r-handoffs" / f"{n}.md").read_text().endswith(tail),
+                            f"the addendum closes {n}.md verbatim")
+            self.assertEqual(self.stamp(n)["addendum"], str(add), "the stamp names the addendum")
+        p = run_wave("dispatch", "2", "--force", "--respawn", "--no-prepare")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertTrue((TMP / "r-handoffs" / "2.md").read_text().endswith(tail),
+                        "a respawn re-applies the addendum the stamp records")
+
+    def test_doctor_warns_when_a_batch_is_pinned_to_one_simulator(self):
+        self.declare(gate=["xcodebuild -destination 'platform=iOS Simulator,id=SIM-1' test"])
+        one = run_wave("doctor", "--batch", "1")
+        self.assertEqual(one.returncode, 0, one.stdout + one.stderr)
+        self.assertNotIn("pins a simulator destination", one.stdout)
+        two = run_wave("doctor", "--batch", "2")
+        self.assertEqual(two.returncode, 0, two.stdout + two.stderr)
+        self.assertIn("! batch of 2 over a gate that pins a simulator destination", two.stdout)
+        self.assertIn("id={SIMULATOR}", two.stdout, "the warning names the seat way out")
+
+    def test_the_seat_guarantee_is_declared_and_pinned(self):
+        row = next(r for r in wave.GUARANTEES if "mesmo recurso" in r[0])
+        self.assertEqual(row[1], "cmd_dispatch -> seat_plan")
+        self.assertTrue(row[3], "the tests above pin it: removing the guard must fail them")
 
 
 class NoWrites(unittest.TestCase):
