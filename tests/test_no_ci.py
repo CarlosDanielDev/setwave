@@ -124,7 +124,10 @@ class VerifyReports(unittest.TestCase):
         p = run_wave("verify", "o/n#81", "--json")
         r = json.loads(p.stdout)[0]
         self.assertEqual((p.returncode, r["ok"], r["no_ci"]), (1, False, True), r)
-        self.assertIn("NO-CI", run_wave("verify", "o/n#81").stdout)
+        out = run_wave("verify", "o/n#81").stdout
+        self.assertIn("NO-CI", out)
+        self.assertIn("unverified", out, "the flag carries the fenced/unverified wording, not 'the gate output'")
+        self.assertIn("chain_gate", out, "the flag names the machine-verifiable alternative")
 
     def test_a_pr_with_checks_is_not_no_ci(self):
         r = json.loads(run_wave("verify", "20", "--json").stdout)[0]
@@ -195,6 +198,13 @@ class EmptyPlans(unittest.TestCase):
         p = run_wave("order", "99")
         self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
         self.assertIn("nothing to order", p.stderr)
+
+    def test_the_no_ci_help_carries_the_current_policy(self):
+        p = run_wave("merge", "--help")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("--no-ci", p.stdout)
+        self.assertIn("Actions", p.stdout, "the help is Actions-aware, not files-only")
+        self.assertIn("unverified", p.stdout, "the help says the body paste is an unverified paste")
 
 
 class GatePaste(unittest.TestCase):
