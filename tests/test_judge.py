@@ -160,7 +160,12 @@ class Schema(unittest.TestCase):
         for rc in ("yes", [{"file": "a.py", "line": 1}], [{"file": "a.py", "line": 0, "status": "fixed"}],
                    [{"file": "a.py", "line": 1, "status": "maybe"}]):
             self.assertTrue(wave.verdict_problems({**good, "recheck": rc}), rc)
-        self.assertTrue(wave.verdict_problems(dict(good), round_=True), "a round verdict without recheck is refused")
+        self.assertTrue(wave.round_problems(dict(good)), "a round verdict without previous/recheck is refused")
+        covered = {"verdict": "pass", "head_sha": "0" * 40, "findings": [],
+                   "previous": [{"file": "a.py", "line": 3, "severity": "nit", "note": "x"}],
+                   "recheck": [{"file": "a.py", "line": 3, "status": "fixed"}]}
+        self.assertEqual(wave.round_problems(covered), [])
+        self.assertTrue(wave.round_problems({**covered, "recheck": []}), "an empty recheck skips a named finding")
 
     def test_problems_of_a_bad_verdict(self):
         for body in ({}, "pass", {"verdict": "pass"}, {"verdict": "pass", "head_sha": "0" * 40, "findings": "all"},
@@ -171,6 +176,16 @@ class Schema(unittest.TestCase):
                       "findings": [{"file": "a.py", "line": 1, "severity": "meh", "note": "x"}]}):
             with self.subTest(body=body):
                 self.assertTrue(wave.verdict_problems(body))
+
+
+def seed_round(pr: int, previous: list[dict], statuses: list[str]) -> Path:
+    """Seed a round verdict at the current head: it names the findings it was asked to re-check and answers each."""
+    f = judge_pass(pr)
+    body = json.loads(f.read_text())
+    body["previous"] = previous
+    body["recheck"] = [{"file": pf["file"], "line": pf["line"], "status": s} for pf, s in zip(previous, statuses)]
+    f.write_text(json.dumps(body))
+    return f
 
 
 ROUND_COMMITS = 0
@@ -244,7 +259,8 @@ class Round(unittest.TestCase):
         VERDICT.unlink(missing_ok=True)
 
     def test_the_delta_patch_holds_only_the_delta_and_the_prompt_cites_every_previous_finding(self):
-        # concerns carrying a nit only: the refusal is the sha, so the finding text on stdout can only come from the prompt
+        # concerns carrying a nit only, and no recheck: nothing of the round contract can refuse yet, so the
+        # refusal is the sha (JUDGE-STALE) and the finding text on stdout can only come from the prompt
         judge_pass(20, "concerns", severity="nit")  # the previous round's verdict, at the head it judged
         push_new_commit("g2.txt")
         p = run_wave("judge", "20", "--since")
@@ -279,22 +295,47 @@ class Round(unittest.TestCase):
     def test_a_round_verdict_at_the_current_head_is_fresh(self):
         judge_pass(20)
         push_new_commit("g2.txt")  # the seeded verdict goes stale
-        f = judge_pass(20)  # the judge rewrote the verdict at the new head
-        body = json.loads(f.read_text())
-        body["recheck"] = [{"file": "g.txt", "line": 1, "status": "fixed"}]
-        f.write_text(json.dumps(body))
+        seed_round(20, [{"file": "g.txt", "line": 1, "severity": "nit", "note": "the seeded fault"}], ["fixed"])
         p = run_wave("judge", "20", "--since")
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
 
     def test_a_round_verdict_answers_every_previous_finding(self):
         judge_pass(20, "concerns", severity="nit")
         push_new_commit("g2.txt")
-        f = judge_pass(20)
-        body = json.loads(f.read_text())
-        body["recheck"] = [{"file": "g.txt", "line": 1, "status": "not fixed"}]
-        f.write_text(json.dumps(body))
+        seed_round(20, [{"file": "g.txt", "line": 1, "severity": "nit", "note": "the seeded fault"}], ["not fixed"])
         p = run_wave("judge", "20", "--since")
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
+    def test_a_recheck_that_skips_a_previous_finding_is_refused_by_name(self):
+        judge_pass(20, "concerns", severity="nit")
+        push_new_commit("g2.txt")
+        seed_round(20, [{"file": "g.txt", "line": 1, "severity": "nit", "note": "the seeded fault"},
+                        {"file": "g2.txt", "line": 1, "severity": "blocking", "note": "delta fault"}], ["fixed", "fixed"])
+        f = HANDOFFS / "judge-20.json"
+        body = json.loads(f.read_text())
+        body["recheck"] = body["recheck"][:1]  # one answer short
+        f.write_text(json.dumps(body))
+        p = run_wave("judge", "20", "--since")
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("recheck does not answer previous finding g2.txt:1", p.stdout)
+
+    def test_a_round_verdict_without_previous_is_refused(self):
+        judge_pass(20)
+        push_new_commit("g2.txt")
+        f = judge_pass(20)
+        body = json.loads(f.read_text())
+        body["recheck"] = [{"file": "g.txt", "line": 1, "status": "fixed"}]  # answers nobody: no `previous` named
+        f.write_text(json.dumps(body))
+        p = run_wave("judge", "20", "--since")
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("previous", p.stdout)
+
+    def test_staleness_still_wins_over_the_round_contract(self):
+        judge_pass(20)  # a stale whole-diff verdict, no recheck, no previous
+        push_new_commit("g2.txt")
+        p = run_wave("judge", "20", "--since")
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("JUDGE-STALE[", p.stdout)
 
     def test_a_round_verdict_without_the_recheck_evidence_is_refused(self):
         judge_pass(20)
@@ -322,7 +363,8 @@ class Round(unittest.TestCase):
         push_new_commit("g2.txt")
         p = run_wave("judge", "20", "--since")
         self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
-        self.assertIn("JUDGE-STALE", p.stdout)
+        self.assertIn("JUDGE-STALE[", p.stdout,
+                      "the flag branch, not the instruction text that names all three flags: staleness wins over a missing recheck")
         self.assertIn(self.prev_sha[:7], p.stdout, "the refusal names both shas")
         self.assertIn(head_sha()[:7], p.stdout)
 

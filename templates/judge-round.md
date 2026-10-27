@@ -26,10 +26,12 @@ Write `{{OUT}}` with exactly this shape:
   "verdict": "pass | fail | concerns",
   "head_sha": "{{SHA}}",
   "findings": [{"file": "path/relative/to/the/repo", "line": 12, "severity": "blocking | nit", "note": "what is wrong and why it matters"}],
+  "previous": [<the findings listed above, copied verbatim>],
   "recheck": [{"file": "the previous finding's file", "line": 12, "status": "fixed | not fixed"}]
 }
 ```
 
+- `previous` restates the findings you were given, verbatim, in the order above: they are what `recheck` answers, and the kernel refuses a round verdict whose `recheck` does not cover every one of them, by file and line.
 - `recheck` answers every previous finding, one entry each, in the order above: `fixed` or `not fixed`, nothing else. Check each against the delta and the files around it.
 - `findings` carries only new work: a fault the delta introduces (`blocking` when the diff must not merge as it stands, `nit` when the owner should just read it), or a previous `blocking` finding you confirmed still stands — restate it with the same `file`, `line`, `note` and `blocking`. A previous `nit` is never reopened: it was already reported, and it does not block the merge.
 - `fail` only when the delta must not merge: it breaks what the issue asked, or a `blocking` finding — new or standing — remains. `concerns` carries nits only and does not block. `pass` when the delta is clean and every previous finding is `fixed`.

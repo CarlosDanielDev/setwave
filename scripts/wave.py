@@ -1901,10 +1901,10 @@ def verify_one(repo: Repo, pr: dict, epic_nodes: dict | None = None) -> dict:
 VERDICTS = ("pass", "fail", "concerns")
 
 
-def verdict_problems(v, round_: bool = False) -> list[str]:
+def verdict_problems(v) -> list[str]:
     """What disqualifies `v` as a judge verdict: the enum, a full 40-hex sha, findings that cite file and a 1-based
-    line; fail and concerns must name at least one finding. A round verdict (`round_`, or any verdict carrying one)
-    answers every previous finding in `recheck`: a list of file, line and `fixed | not fixed`. Extra keys are tolerated."""
+    line; fail and concerns must name at least one finding. A `recheck` present in any verdict is format-checked
+    here; whether a round verdict must carry one is `round_problems`, judged after staleness. Extra keys are tolerated."""
     if not isinstance(v, dict):
         return ["the verdict is not a JSON object"]
     bad = []
@@ -1928,7 +1928,7 @@ def verdict_problems(v, round_: bool = False) -> list[str]:
         if v.get("verdict") in ("fail", "concerns") and not fs:
             bad.append(f"a {v.get('verdict')} names at least one finding")
     rc = v.get("recheck")
-    if rc is not None or round_:
+    if rc is not None:
         if not isinstance(rc, list):
             bad.append("a round verdict answers every previous finding in `recheck`, a list of {file, line, status}")
         else:
@@ -1939,6 +1939,27 @@ def verdict_problems(v, round_: bool = False) -> list[str]:
                     bad.append(f"recheck[{i}].line must be a 1-based line")
                 elif r.get("status") not in ("fixed", "not fixed"):
                     bad.append(f"recheck[{i}].status must be fixed|not fixed")
+    return bad
+
+
+def round_problems(v) -> list[str]:
+    """The round contract, judged after staleness: a round verdict names the findings it was asked to re-check
+    (`previous`) and its `recheck` answers every one of them, file and line each — a short list is named."""
+    if not isinstance(v, dict):
+        return ["the verdict is not a JSON object"]
+    prev = v.get("previous")
+    bad = []
+    if not isinstance(prev, list) or not prev:
+        return ["a round verdict carries `previous`, the findings it was asked to re-check, and answers each in `recheck`"]
+    for i, f in enumerate(prev):
+        if not isinstance(f, dict) or not isinstance(f.get("file"), str) or not f["file"] \
+                or not isinstance(f.get("line"), int) or isinstance(f.get("line"), bool) or f["line"] < 1:
+            bad.append(f"previous[{i}] must be a finding (file, 1-based line)")
+    rc = v.get("recheck")
+    answered = [(r.get("file"), r.get("line")) for r in rc if isinstance(r, dict)] if isinstance(rc, list) else []
+    for f in prev:
+        if isinstance(f.get("file"), str) and isinstance(f.get("line"), int) and (f["file"], f["line"]) not in answered:
+            bad.append(f"recheck does not answer previous finding {f['file']}:{f['line']}")
     return bad
 
 
@@ -1953,7 +1974,7 @@ def judge_check(repo: Repo, n: int, head_sha: str, round_: bool = False) -> dict
         v = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as e:
         return {"flag": "JUDGE-MISSING", "detail": f"{path.name} is not a readable verdict ({e})"}
-    bad = verdict_problems(v, round_=round_)
+    bad = verdict_problems(v)
     if bad:
         return {"flag": "JUDGE-MISSING", "detail": f"{path.name}: " + "; ".join(bad)}
     blocking = [f for f in v["findings"] if f["severity"] == "blocking"]
@@ -1964,6 +1985,10 @@ def judge_check(repo: Repo, n: int, head_sha: str, round_: bool = False) -> dict
     if v["head_sha"] != head_sha:
         return {"flag": "JUDGE-STALE", "detail": f"the verdict is for {v['head_sha'][:7]}, the head is {head_sha[:7]}: a push invalidates it, judge again",
                 "verdict": "pass", "head_sha": v["head_sha"], "findings": []}
+    if round_:
+        gaps = round_problems(v)
+        if gaps:
+            return {"flag": "JUDGE-MISSING", "detail": f"{path.name}: " + "; ".join(gaps)}
     nits = sum(1 for f in v["findings"] if f["severity"] == "nit")
     detail = (f"pass at {head_sha[:7]}" if v["verdict"] == "pass"
               else f"concerns at {head_sha[:7]}: {nits} nit(s) only, not blocking — the owner reads them in {path.name}")
@@ -2040,13 +2065,15 @@ def cmd_judge(default: Repo | None, a):
         elif jc["flag"] in ("JUDGE-FAIL", "JUDGE-STALE"):
             print(f"  {jc['flag']}[{jc['detail']}]" + (" — judge again at this head" if jc["flag"] == "JUDGE-STALE" else ""))
         else:
+            if (repo.handoffs / f"judge-{n}.json").exists():
+                print(f"  {jc['flag']}[{jc['detail']}]")  # a file is there and the kernel refused it: say why, by name
             print(f"  no valid verdict yet — spawn the plugin's `judge` agent (tools {JUDGE_TOOLS} — the Write is the verdict file only;"
                   f" {TEMPLATES / 'judge.md'} is its prompt{'; ' + TEMPLATES.name + '/judge-round.md for a --since round' if a.since else ''})"
                   f" with the patch above, head sha {sha}, and the issue body")
             print(f'  it writes {repo.handoffs / f"judge-{n}.json"}:' +
                   ' {"verdict": "pass|fail|concerns", "head_sha": "<the 40-hex sha above>",'
                   ' "findings": [{"file": "<path>", "line": <N>, "severity": "blocking|nit", "note": "<what is wrong>"}]}'
-                  + (' — a round adds "recheck": [{"file": "<path>", "line": <N>, "status": "fixed|not fixed"}], one entry per previous finding' if a.since else ''))
+                  + (' — a round adds "previous": [<the findings it was asked to re-check, verbatim>] and "recheck": [{"file": "<path>", "line": <N>, "status": "fixed|not fixed"}], one answer per previous finding' if a.since else ''))
             print(f"  then re-run this command; `merge` refuses a PR without a pass verdict at the head it merges"
                   f" (JUDGE-MISSING / JUDGE-FAIL / JUDGE-STALE); only `fail` or a `blocking` finding blocks — nits ride to the owner")
         if jc["flag"]:
