@@ -71,7 +71,9 @@ GATE_ACTIONS = {
 IGNORE_ACTIONS = ["actions/checkout", "actions/setup-*", "actions/cache", "actions/cache/*", "actions/upload-artifact",
                   "actions/download-artifact", "dtolnay/rust-toolchain", "swatinem/rust-cache"]
 # agent liveness, inferred from the newest trace its work left in the worktree (an agent that dies stops writing):
-# changed less than WORKING_MIN minutes ago = working, up to DEAD_MIN = quiet, more and no PR = likely dead
+# changed less than WORKING_MIN minutes ago = working, up to DEAD_MIN = quiet, more and no PR = likely dead.
+# `worktree_state` adds the process probe: quiet with no live process is `stalled` — a signal at WORKING_MIN,
+# not DEAD_MIN — and busy is `working` however long the gate runs without touching a tracked file
 WORKING_MIN = 10
 DEAD_MIN = 30
 STAMP = ".setwave.json"  # written by dispatch into each worktree, excluded from git: issue, repo, dispatched_at, prompt, resumes, respawns
@@ -1418,8 +1420,9 @@ def next_resume_counts(repo: Repo, wt: Path, stamp: dict, respawn: bool) -> tupl
 
 
 def liveness(repo: Repo, n: int, wt: Path | None = None, now: float | None = None) -> dict:
-    """What an issue's worktree says about its agent. Nothing but files and git is read: no process is looked at.
-    `now` is the epoch the ages are measured against, the wall clock unless a test pins it."""
+    """What an issue's worktree says about its agent, from files and git alone: the process probe lives one level
+    up, in `worktree_state` -> `worktree_processes`, which tests inject. `now` is the epoch the ages are
+    measured against, the wall clock unless a test pins it."""
     wt = wt or repo.worktree(n)
     stamp = stamp_of(wt)
     now = time.time() if now is None else now
@@ -1467,11 +1470,18 @@ def derive_state(f: dict) -> str:
 def worktree_state(repo: Repo, wt: Path, branch: str, n: int, now: float | None = None) -> dict:
     """The facts of one issue worktree plus the `state` derived from them (`derive_state`): dirty, unpushed, pr_state
     (MERGED | CLOSED | OPEN | None for no PR | "unknown" when gh failed) and pr, commits ahead of origin/<base>,
-    the dispatch stamp, and progress (working | quiet | dead) by minutes since the newest change."""
+    the dispatch stamp, and progress (working | stalled | dead) by minutes since the newest change — plus `busy`:
+    a live process (ps argv, lsof cwd) sits in the worktree, so a long gate with no file change is still `working`,
+    and quiet with no process is `stalled`, a signal at WORKING_MIN instead of DEAD_MIN."""
     stamp = stamp_of(wt)
     now = time.time() if now is None else now
     dispatched = _epoch(stamp.get("dispatched_at"))
     idle = round((now - last_activity(repo, wt, dispatched)) / 60)
+    try:
+        busy = bool(worktree_processes(wt))
+    except OSError:  # a probe that cannot run is no process: the files' verdict stands
+        busy = False
+    seen = {"likely dead": "dead"}.get(verdict(idle, False), verdict(idle, False))
     ok, remote = repo.git_ok(["rev-parse", "--verify", "--quiet", f"origin/{branch}"])
     known, pr = repo.pr_of(branch)
     f = {"issue": n, "worktree": str(wt), "branch": branch, "stamp": stamp, "stamped": bool(stamp),
@@ -1480,7 +1490,7 @@ def worktree_state(repo: Repo, wt: Path, branch: str, n: int, now: float | None 
          "pr_state": (pr or {}).get("state") if known else "unknown", "pr": (pr or {}).get("number"),
          "commits": int(repo.git_ok(["rev-list", "--count", f"origin/{repo.base}..HEAD"], cwd=wt)[1] or 0),
          "idle_min": idle, "age_min": round((now - dispatched) / 60) if dispatched else None,
-         "progress": {"likely dead": "dead"}.get(verdict(idle, False), verdict(idle, False))}
+         "busy": busy, "progress": "working" if busy else "stalled" if seen == "quiet" else seen}
     return {**f, "state": derive_state(f)}
 
 
@@ -1488,6 +1498,48 @@ def agent_verdict(rec: dict) -> str:
     """What `agents` and `doctor` say of the agent behind a worktree record: unknown, done (a PR is open), or its progress."""
     return "unknown" if rec["pr_state"] == "unknown" else "done" if rec["pr_state"] == "OPEN" else \
         "likely dead" if rec["progress"] == "dead" else rec["progress"]
+
+
+def worktree_processes(wt: Path) -> list[str]:
+    """Best-effort probe for live processes inside a worktree: ps matches the command line, lsof the cwd. A
+    failed probe reads as no process, so the verdict falls back to what the files say. Tests inject this —
+    the suite never runs it."""
+    lines: list[str] = []
+    try:
+        rc, out, _ = run(["ps", "-axww", "-o", "command="])
+        if rc == 0:
+            lines += [l for l in out.splitlines() if str(wt) in l]
+        rc, out, _ = run(["lsof", "-0", "-w", "-d", "cwd", "-Fn"])
+        if rc == 0:
+            lines += [f[1:] for f in out.split("\0") if f.startswith("n") and f[1:].startswith(str(wt))]
+    except OSError:
+        return []
+    return lines
+
+
+def wake_lines(default: Repo, r: dict) -> list[str]:
+    """The recovery for a stalled or likely dead agent: the gate again in foreground, or a respawn."""
+    k = key(default, r["issue"])
+    if agent_verdict(r) == "likely dead":
+        return [f"  ! {k} likely dead (changed {r['idle_min']} min ago, no PR, no process): "
+                f"`wave dispatch {r['issue']} --force --respawn`, or SendMessage its agent a new strategy"]
+    return [f"  ! {k} stalled (changed {r['idle_min']} min ago, no process): "
+            f"SendMessage <agentId> \"run the gate in foreground, one step per call\" — "
+            f"`wave dispatch {r['issue']} --force --respawn` when the context is gone"]
+
+
+def every_seconds(s: str) -> float:
+    """`45s` | `5m` | `1h` | bare seconds — the --watch poll interval."""
+    m = re.fullmatch(r"(\d+)([smh]?)", s.strip())
+    if not m:
+        raise SystemExit(f"--every {s!r}: use <n>s | <n>m | <n>h | <n>")
+    return int(m.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600}[m.group(2)]
+
+
+def stalled_agents(default: Repo) -> list[dict]:
+    """Worktree records whose agent is stalled or likely dead — what --check reports and --watch waits for."""
+    rows = [worktree_state(default, wt, br, n) for wt, br, n in issue_worktrees(default)]
+    return [r for r in rows if agent_verdict(r) in ("stalled", "likely dead")]
 
 
 def cargo_home() -> Path:
@@ -1774,6 +1826,7 @@ def cmd_dispatch(default: Repo | None, a):
                 excl_path.write_text(text + ("\n" if text and not text.endswith("\n") else "") + f"/{STAMP}\n")
         print(f"{key(repo, n)}: {branch} -> {wt}\n    prompt: {path}   (base origin/{repo.base} = {sha})")
     print("\nDispatch one Agent (general-purpose) per prompt file, all in ONE message; prompt = file content verbatim.")
+    print("Arm the stall watchdog in the background: `wave agents --watch` — it exits 1 with the worktree's line the moment an agent stalls (no process) or dies.")
 
 
 def cmd_prompt(default: Repo | None, a):
@@ -3028,11 +3081,27 @@ def cmd_why(default: Repo | None, a):
 
 
 def cmd_agents(default: Repo | None, a):
-    """Every issue worktree of the repo with what its files say about its agent."""
+    """Every issue worktree of the repo with what its files and its processes say about its agent."""
     if default is None:
         raise SystemExit("run inside a repo checkout, or pass --repo")
+    if getattr(a, "watch", False):
+        while True:  # the watchdog the orchestrator arms in the background: it ends — and so notifies —
+            bad = stalled_agents(default)  # the moment a worktree turns stalled or likely dead
+            if bad:
+                for r in bad:
+                    print("\n".join(wake_lines(default, r)))
+                raise SystemExit(1)
+            time.sleep(every_seconds(getattr(a, "every", None) or "5m"))
     rows = [worktree_state(default, wt, br, n) for wt, br, n in issue_worktrees(default)]
-    print(f"{len(rows)} worktree(s) of {default.slug} — working < {WORKING_MIN} min since the newest change, quiet up to {DEAD_MIN}, then likely dead unless a PR is open")
+    if getattr(a, "check", False):
+        bad = [r for r in rows if agent_verdict(r) in ("stalled", "likely dead")]
+        if not bad:
+            print(f"no stalled or likely dead agent among {len(rows)} worktree(s) — `wave agents --watch` arms this as a watchdog")
+            return
+        for r in bad:
+            print("\n".join(wake_lines(default, r)))
+        raise SystemExit(1)
+    print(f"{len(rows)} worktree(s) of {default.slug} — working < {WORKING_MIN} min since the newest change, quiet turns stalled (no process) up to {DEAD_MIN}, then likely dead unless a PR is open")
     for r in sorted(rows, key=lambda x: x["issue"]):
         print(f"  {key(default, r['issue']):<24} {Path(r['worktree']).name:<20} "
               f"dispatched {'?' if r['age_min'] is None else r['age_min']} min ago   changed {r['idle_min']} min ago   "
@@ -3386,6 +3455,7 @@ GUARANTEES = [
     ("plan refuses a body missing the repo's issue-template sections", "cmd_plan -> template_problems", "plan refused: one lacks the repo template's ## Handoff", True),
     ("doctor tells an agent at work from a likely dead one, and names the recovery", "cmd_doctor -> worktree_state", "! no agent likely dead: <worktrees> — SendMessage or `wave dispatch --force N`", True),
     ("a likely dead worktree stays `worktree` in next, never `in progress`", "candidates -> liveness", "worktree exists (likely dead, nothing changed for N min)", True),
+    ("a stalled agent signals before DEAD_MIN: worktree_state reads a process probe (injected in tests; a probe failure falls back to the files' verdict), busy keeps the verdict working, quiet with no process past WORKING_MIN is stalled, and agents --check/--watch exit 1 naming SendMessage / dispatch --force --respawn", "worktree_state -> worktree_processes, cmd_agents --check/--watch", "tests/test_liveness.py: stalled at idle 25 min; busy works without file changes; --watch wakes on the injected clock; dispatch prints `wave agents --watch`", True),
     ("doctor fails on a crate cargo marked extracted but left half-written", "cmd_doctor -> broken_crates", "✗ cargo cache ...: <crate> is missing N of M files", True),
     ("doctor --fix-cache moves a broken crate to quarantine, never deletes", "cmd_doctor --fix-cache", "moved <crate> to ~/.config/setwave/quarantine/<crate>-<time>", True),
     ("doctor warns on a batch larger than MAX_BATCH", "cmd_doctor", "! batch of N is at most 6: the rate-limit and cache history", True),
@@ -3394,7 +3464,7 @@ GUARANTEES = [
     ("no dispatch of an issue that is not READY", "cmd_dispatch -> premises_for", "refusal lists the failed premises", False),
     ("an existing worktree is kept, never recreated", "cmd_dispatch", "prints 'worktree exists'", False),
     ("cleanup removes only worktrees that are clean, pushed and merged", "cmd_cleanup", "KEEP lines with the reason", True),
-    ("doctor, cleanup and agents read one worktree state (dirty, unpushed, unknown, merged, closed, open, empty, working, quiet, dead) from one cached `gh pr list --state all`; dirt and an unpushed head beat a merged PR, and gh failing is `unknown`, which cleanup never removes and doctor never calls dead", "worktree_state -> derive_state, Repo.pr_states", "KEEP ws-2: dirty; KEEP gf-2: PR state unknown (gh failed); ! every worktree's PR state could be read: gf-1, gf-2 — unknown", True),
+    ("doctor, cleanup and agents read one worktree state (dirty, unpushed, unknown, merged, closed, open, empty, working, stalled, dead) from one cached `gh pr list --state all`; dirt and an unpushed head beat a merged PR, and gh failing is `unknown`, which cleanup never removes and doctor never calls dead", "worktree_state -> derive_state, Repo.pr_states", "KEEP ws-2: dirty; KEEP gf-2: PR state unknown (gh failed); ! every worktree's PR state could be read: gf-1, gf-2 — unknown", True),
     ("cleanup decides by the PR, not by `--merged`: a merged PR's worktree goes (a squash merge and a deleted remote included), a closed-without-merge one stays until --include-closed, an open PR, a dispatch stamp, dirt or an unpushed head always stay; every removal prints the disk it reclaims and the total", "cmd_cleanup -> worktree_state, du_kb", "removed k-6: PR #40 merged, reclaimed 12 KB (branch feat/6-merged kept); KEEP k-8: PR #42 open (in progress)", True),
     ("cleanup --stale-days N lists kept worktrees with no open PR and nothing newer than N days, with their size, and removes them only with --yes", "cmd_cleanup --stale-days", "STALE k-9: no PR, newest change 40 days ago, 12 KB — `--yes` to remove", True),
     ("doctor reports leftover worktrees with their total size", "cmd_doctor -> du_kb", "! no leftover worktrees (merged or empty): k-20 — 24 KB total — `wave cleanup`", True),
@@ -3764,7 +3834,10 @@ def main(argv=None):
     x = s.add_parser("release", help="prepare a release and stop: bump both manifests on release/<version>, open the `Release <version>` PR with one note per PR since the last tag; --dry-run prints the branch, the diff and the notes. Merge, tag and gh release stay yours"); x.add_argument("version"); x.add_argument("--dry-run", action="store_true")
     x = s.add_parser("why", help="the premises behind READY / NOT READY for an issue, with evidence"); x.add_argument("refs", nargs="+")
     x = s.add_parser("doctor", help="preflight: gh, git, clean checkout, gate, protected paths, dead agents, retry ceiling, leftover worktrees, cargo cache, disk, batch size"); x.add_argument("--batch", type=int, default=4); x.add_argument("--fix-cache", action="store_true", help="move each half-extracted crate to ~/.config/setwave/quarantine/ (never deletes)"); x.add_argument("--epic", help="also run the state sweep of this epic as a soft check")
-    x = s.add_parser("agents", help="every issue worktree: age since dispatch, minutes since the newest change, PR, verdict (working | quiet | likely dead | done)")
+    x = s.add_parser("agents", help="every issue worktree: age since dispatch, minutes since the newest change, PR, verdict (working | stalled | likely dead | done); --check exits 1 naming the recovery; --watch blocks until a stall and exits 1 with its line")
+    x.add_argument("--check", action="store_true", help="exit 1 when an agent is stalled or likely dead, printing SendMessage (gate in foreground) or dispatch --force --respawn")
+    x.add_argument("--watch", action="store_true", help="block until a worktree turns stalled or likely dead, then exit 1 with its line — arm it in the background; its ending is the notification")
+    x.add_argument("--every", default="5m", metavar="N", help="watch poll interval: 45s | 5m | 1h | bare seconds (default 5m)")
     x = s.add_parser("prompt", help="print the agent prompt for one issue"); x.add_argument("issue"); x.add_argument("--parallel", type=int, default=4)
     x = s.add_parser("verify", help="check PRs: attribution, protected paths, CI, mergeability, worktree"); x.add_argument("prs", nargs="*"); x.add_argument("--epic"); x.add_argument("--json", action="store_true")
     x = s.add_parser("judge", help="write a PR's scoped patch for a read-only judge agent, validate the verdict it writes (merge refuses without a pass at the head)"); x.add_argument("prs", nargs="+")

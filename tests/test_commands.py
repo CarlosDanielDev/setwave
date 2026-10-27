@@ -230,6 +230,24 @@ class EscalationPolicy(unittest.TestCase):
         self.assertIn("--respawn", skill, "step 4 names the flag that marks a respawn in the stamp")
         self.assertIn("twice", skill, "the rule fires on the same failure twice, not on a hunch")
 
+    def test_the_gate_rule_orders_foreground(self):
+        src = (wave.TEMPLATES / "agent.md").read_text()
+        gate = src.split("## 4. Gate")[1].split("## 5.")[0]
+        self.assertIn("foreground", gate, "section 4 runs the gate in the foreground, one step per call")
+        for banned in ("run_in_background", "Monitor", "sleep"):
+            self.assertIn(banned, gate, f"section 4 names what is banned for the gate: {banned}")
+        self.assertIn("Nunca encerre o turno", gate, "ending the turn on a waiting command is the failure itself")
+        iss = {"number": 2, "title": "t", "html_url": "https://github.com/o/r/issues/2", "body": ""}
+        out = wave.render_prompt(repo(), iss, "feat/2-t", "0" * 40, 2)
+        self.assertIn("foreground", out, "`wave prompt` delivers the foreground rule to every agent")
+
+    def test_the_wave_skill_reads_an_interim_report_as_a_stall(self):
+        skill = (WAVE.parent.parent / "skills" / "wave" / "SKILL.md").read_text()
+        self.assertNotIn("resumes by itself", skill, "an ended turn never resumes by itself: the false promise is gone")
+        for fragment in ("wave agents", "SendMessage", "foreground"):
+            self.assertIn(fragment, skill, f"an interim report reads as a stall, resumed by hand: {fragment}")
+        self.assertIn("--watch", skill, "step 3 arms the stall watchdog")
+
     def test_stats_reports_resumes_against_respawns(self):
         log = wave.CONFIG_DIR / "log.jsonl"
         runs = [json.loads(l) for l in log.read_text().splitlines()] if log.exists() else []
