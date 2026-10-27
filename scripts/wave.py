@@ -1958,7 +1958,8 @@ def round_problems(v) -> list[str]:
     rc = v.get("recheck")
     answered = [(r.get("file"), r.get("line")) for r in rc if isinstance(r, dict)] if isinstance(rc, list) else []
     for f in prev:
-        if isinstance(f.get("file"), str) and isinstance(f.get("line"), int) and (f["file"], f["line"]) not in answered:
+        if isinstance(f, dict) and isinstance(f.get("file"), str) and isinstance(f.get("line"), int) \
+                and (f["file"], f["line"]) not in answered:
             bad.append(f"recheck does not answer previous finding {f['file']}:{f['line']}")
     return bad
 

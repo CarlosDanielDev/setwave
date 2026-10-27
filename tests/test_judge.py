@@ -319,6 +319,19 @@ class Round(unittest.TestCase):
         self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
         self.assertIn("recheck does not answer previous finding g2.txt:1", p.stdout)
 
+    def test_a_non_object_previous_entry_is_a_typed_refusal_not_a_crash(self):
+        judge_pass(20)
+        push_new_commit("g2.txt")
+        f = judge_pass(20)
+        body = json.loads(f.read_text())
+        body["previous"] = ["the delta broke nothing"]
+        body["recheck"] = [{"file": "g.txt", "line": 1, "status": "fixed"}]
+        f.write_text(json.dumps(body))
+        p = run_wave("judge", "20", "--since")
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertNotIn("Traceback", p.stderr, "a malformed verdict is refused, never a crash")
+        self.assertIn("previous[0] must be a finding", p.stdout)
+
     def test_a_round_verdict_without_previous_is_refused(self):
         judge_pass(20)
         push_new_commit("g2.txt")
