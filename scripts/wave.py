@@ -457,6 +457,25 @@ class Repo:
             return True
         return any(l.strip().endswith((".yml", ".yaml")) for l in out.splitlines())
 
+    def actions_enabled(self) -> bool | None:
+        """GitHub's Actions on/off for this repo (the `enabled` of the actions permissions API). None when gh
+        cannot read it (no scope, API down): callers keep waiting, never NO-CI on a read failure (#97)."""
+        ok, out = self.gh_ok(["api", f"repos/{self.slug}/actions/permissions"])
+        if not ok:
+            return None
+        try:
+            return bool(json.loads(out).get("enabled"))
+        except ValueError:
+            return None
+
+    def ci_expected(self) -> bool:
+        """Whether this repo can produce a check at all: Actions is enabled and origin/<base> carries workflow
+        files. Actions off is NO-CI even with the files still on disk — the incident behind #97. A read failure
+        answers True: the wait survives, a tool failure is never classified NO-CI."""
+        if self.actions_enabled() is False:
+            return False
+        return self.has_ci_workflows()
+
     def profile(self) -> dict:
         """The repo's own orchestration: detect_profile's phases plus the gate and the worktree location,
         which read the config and CI that only this class sees."""
@@ -1970,8 +1989,9 @@ def verify_one(repo: Repo, pr: dict, epic_nodes: dict | None = None) -> dict:
     if checks_error:
         checks = {}
     bad = {k: v for k, v in checks.items() if v.lower() not in ("pass", "success", "skipping", "skipped", "neutral")}
-    # no check at all on a repo with no workflow is NO-CI, never a silent green (#97); a gh failure is neither — CI-UNKNOWN
-    no_ci = not checks_error and not checks and not repo.has_ci_workflows()
+    # no check at all on a repo with no CI that could produce one (Actions off, or no workflow) is NO-CI,
+    # never a silent green (#97); a gh failure is neither — CI-UNKNOWN
+    no_ci = not checks_error and not checks and not repo.ci_expected()
     # sibling issues that cite a file this PR touched: the next wave inherits this change
     touched_files = repo.git(["diff", "--name-only", f"origin/{repo.base}...origin/{head}"]).split()
     siblings = []
@@ -2187,7 +2207,7 @@ def cmd_verify(default: Repo | None, a):
             if r["protected_touched"]: flags.append("PROTECTED:" + ",".join(r["protected_touched"]))
             if r["checks_not_green"]: flags.append("CI:" + ",".join(f"{k}={v}" for k, v in r["checks_not_green"].items()))
             if r["checks_error"]: flags.append("CI-UNKNOWN[gh could not read the PR's checks: a tool failure is never green or NO-CI — fix gh and re-run]")
-            if r["no_ci"]: flags.append("NO-CI[no check on the PR and no workflow in .github/workflows/: there is nothing to wait for;"
+            if r["no_ci"]: flags.append("NO-CI[no check on the PR and no CI that could produce one (Actions disabled, or no workflow in origin/<base>): there is nothing to wait for;"
                                         " merge stops at once, --no-ci acknowledges a green `order --run-gate` chain_gate or the gate output in this body]")
             if r["mergeable"] == "CONFLICTING": flags.append("CONFLICT")
             if r["worktree"] and (r["worktree"]["dirty"] or r["worktree"]["unpushed"]): flags.append("WORKTREE-NOT-CLEAN")
@@ -2217,14 +2237,15 @@ def merge_tree_conflicts(repo: Repo, a_ref: str, b_ref: str) -> list[str]:
 
 def cmd_order(default: Repo | None, a):
     selected = select_prs(default, a.prs, a.epic)
-    if a.plan and not selected:
-        # an empty plan must never be written: `--epic <leaf>` is almost always a wrong number, so it gets its own answer (#97)
+    if not selected:
+        # an empty selection is never success: `--epic <leaf>` is almost always a wrong number, so it gets its own answer (#97)
         if a.epic and not a.prs:
             repo, n = parse_ref(a.epic, default)
             root = tree(repo, n).get(key(repo, n), {})
             if root and not root["children"]:
                 raise SystemExit(f"{key(repo, n)} is a leaf: use `order <PR>`")
-        raise SystemExit(f"nothing to order: no open PR matched — no plan written to {a.plan}")
+        where = f" — no plan written to {a.plan}" if a.plan else ""
+        raise SystemExit(f"nothing to order: no open PR matched{where}")
     by_repo: dict[str, list[dict]] = {}
     for r, p in selected:
         by_repo.setdefault(r.slug, []).append(p)
@@ -2378,10 +2399,10 @@ def gate_chain(repo: Repo, base_sha: str, order: list[int], trees: list[str | No
 
 
 def ci_verdict(repo: Repo, n: int) -> str | None:
-    """PASS | FAILED | NO-CI | None (still pending). NO-CI is not pending: no check on the PR at all and no
-    workflow in origin/<base>'s .github/workflows/ — waiting cannot change that, so the caller stops instead
-    of running out the clock. gh failing to read the checks is None too: a tool failure is retried as pending,
-    never classified NO-CI (#97)."""
+    """PASS | FAILED | NO-CI | None (still pending). NO-CI is not pending: no check on the PR at all and no CI
+    that could produce one (Actions disabled, or no workflow in origin/<base>'s .github/workflows/) — waiting
+    cannot change that, so the caller stops instead of running out the clock. gh failing to read the checks or
+    the Actions state is None too: a tool failure is retried as pending, never classified NO-CI (#97)."""
     checks = repo.pr_checks(n)
     if checks is None:
         return None
@@ -2390,7 +2411,7 @@ def ci_verdict(repo: Repo, n: int) -> str | None:
         return "FAILED"
     if states and states <= {"pass", "success", "skipping", "skipped", "neutral"}:
         return "PASS"
-    if not states and not repo.has_ci_workflows():
+    if not states and not repo.ci_expected():
         return "NO-CI"
     return None
 
@@ -2573,8 +2594,10 @@ def cmd_merge(default: Repo | None, a):
         c = wait_for(ci, a.ci_timeout, 15)
         if c == "NO-CI":
             if not a.no_ci:
-                print(f"{key(repo, n)}: NO-CI — no check on the PR and no workflow in .github/workflows/: there is nothing to wait for. "
-                      f"To merge without CI pass --no-ci, with a green `order --run-gate` chain_gate in the plan or the gate's output in the PR body.")
+                print(f"{key(repo, n)}: NO-CI — no check on the PR and no CI that could produce one "
+                      f"(Actions disabled on the repo, or no workflow in origin/{repo.base}'s .github/workflows/): "
+                      f"there is nothing to wait for. To merge without CI pass --no-ci, with a green `order --run-gate` "
+                      f"chain_gate in the plan or a fenced gate run pasted in the PR body.")
                 sys.exit(3)
             if plan_gate_green(plans.get(repo.slug), n):
                 print(f"{key(repo, n)}: merging without CI (--no-ci): the plan's chain gate is green for this PR.")
@@ -3650,8 +3673,8 @@ GUARANTEES = [
     ("no merge of a PR whose issue still has an open blocker", "cmd_merge", "refusal names the blockers", True),
     ("no merge of a PR that verify rejects", "cmd_merge -> verify_one", "attribution, protected, CI, contradictions re-checked at merge time", False),
     ("no merge before CI is green, one PR at a time", "cmd_merge", "waits for checks, stops on FAILED", False),
-    ("merge never waits for CI that does not exist: no check on the PR and no workflow in origin/<base>'s .github/workflows/ stops it at once with NO-CI (--no-ci acknowledges a green `order --run-gate` chain_gate or a fenced gate run pasted in the PR body, named as an unverified paste); gh failing to read the checks is pending or CI-UNKNOWN, never NO-CI or green", "cmd_merge -> ci_verdict (+ verify_one)", "exit 3 at once, naming --no-ci; verify reports NO-CI and CI-UNKNOWN instead of a silent green", True),
-    ("an empty plan is never success: `order --plan` refuses to write a plan with no PR (a leaf gets `#N is a leaf: use `order <PR>``) and `merge` refuses when nothing is targeted", "cmd_order (--plan), cmd_merge", "exit != 0: nothing to order / merge refused: nothing to merge", True),
+    ("merge never waits for CI that does not exist: no check on the PR and no CI that could produce one (Actions disabled, or no workflow in origin/<base>) stops it at once with NO-CI (--no-ci acknowledges a green `order --run-gate` chain_gate or a fenced gate run pasted in the PR body, named as an unverified paste); a read or gh failure is pending or CI-UNKNOWN, never NO-CI or green", "cmd_merge -> ci_verdict (+ verify_one)", "exit 3 at once, naming --no-ci; verify reports NO-CI and CI-UNKNOWN instead of a silent green", True),
+    ("an empty selection is never success: `order` refuses it (a leaf gets `#N is a leaf: use `order <PR>``), a plan is never written from it, and `merge` refuses when nothing is targeted", "cmd_order, cmd_merge", "exit != 0: nothing to order / merge refused: nothing to merge", True),
     ("base CI red after a merge stops the queue", "cmd_merge --wait-base-ci", "exit 4 with the semantic-conflict note", False),
     (".wave.json is read from origin/<base> after the fetch, not from a main checkout left behind; doctor names a stale copy", "Repo._load_cfg <- Repo.fetch, cmd_doctor", "facts config_source: origin/main:.wave.json; ! main checkout's `.wave.json` matches origin/main's: differs in gate", True),
     ("doctor names every CI action the gate does not cover", "cmd_doctor -> Repo.ci_gate", "! CI runs `x/y@v1` and the gate does not", True),

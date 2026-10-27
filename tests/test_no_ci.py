@@ -81,16 +81,16 @@ def judge_pass_n(pr: int) -> None:
 class CiVerdict(unittest.TestCase):
     """The distinction the issue asks for: no checks anywhere is NO-CI, not pending."""
 
-    def test_no_checks_and_no_workflow_is_no_ci(self):
+    def test_no_checks_and_no_expected_ci_is_no_ci(self):
         class R:
-            def __init__(self, checks, workflows):
-                self.c, self.w = checks, workflows
+            def __init__(self, checks, ci_expected):
+                self.c, self.e = checks, ci_expected
             def pr_checks(self, n):
                 return self.c
-            def has_ci_workflows(self):
-                return self.w
+            def ci_expected(self):
+                return self.e
         self.assertEqual(wave.ci_verdict(R({}, False), 1), "NO-CI")
-        self.assertIsNone(wave.ci_verdict(R({}, True), 1), "a workflow exists: the checks may still come (pending)")
+        self.assertIsNone(wave.ci_verdict(R({}, True), 1), "CI is expected: the checks may still come (pending)")
         self.assertEqual(wave.ci_verdict(R({"ci": "pass"}, False), 1), "PASS")
         self.assertEqual(wave.ci_verdict(R({"ci": "fail"}, True), 1), "FAILED")
 
@@ -186,6 +186,16 @@ class EmptyPlans(unittest.TestCase):
         self.assertEqual(q.returncode, 1, q.stdout + q.stderr)
         self.assertIn("nothing to merge", q.stderr)
 
+    def test_bare_order_refuses_a_leaf_too(self):
+        p = run_wave("order", "--epic", "2")
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("is a leaf: use `order <PR>`", p.stderr)
+
+    def test_bare_order_refuses_an_empty_selection_too(self):
+        p = run_wave("order", "99")
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("nothing to order", p.stderr)
+
 
 class GatePaste(unittest.TestCase):
     """The body-paste evidence is anchored: a fenced run, not any mention (#97 review)."""
@@ -210,6 +220,23 @@ class WorkflowSource(unittest.TestCase):
     def test_workflow_existence_reads_origin_not_the_checkout_tree(self):
         repo = wave.Repo("o/z", {"path": str(Z)})
         self.assertTrue(repo.has_ci_workflows(), "origin/main has the workflow; a stale tree must not flip NO-CI")
+
+    def test_actions_disabled_is_no_ci_even_with_workflow_files(self):
+        # the incident behind #97: Actions off (billing), files still on disk — the merge spun the whole clock
+        repo = wave.Repo("o/z", {"path": str(Z)})
+        self.assertTrue(repo.has_ci_workflows(), "premise: origin/main carries the workflow files")
+        self.assertIs(repo.actions_enabled(), False, "premise: the fixture says Actions is disabled")
+        with mock.patch.object(repo, "pr_checks", lambda n: {}):
+            self.assertEqual(wave.ci_verdict(repo, 1), "NO-CI", "no check can ever run: files or not, this is NO-CI")
+
+    def test_an_actions_read_failure_keeps_pending_when_files_exist(self):
+        repo = wave.Repo("o/z", {"path": str(Z)})  # origin has the files; the fixture says Actions is disabled
+        with mock.patch.object(repo, "actions_enabled", lambda: None):
+            self.assertTrue(repo.ci_expected(), "Actions unreadable + files on origin: keep waiting")
+            self.assertIsNone(wave.ci_verdict(repo, 1), "the verdict retries as pending, never NO-CI")
+        with mock.patch.object(repo, "actions_enabled", lambda: None), \
+             mock.patch.object(repo, "has_ci_workflows", lambda: False):
+            self.assertFalse(repo.ci_expected(), "Actions unreadable but truly no workflow: the files arm decides, NO-CI stands")
 
 
 class ChecksError(unittest.TestCase):
@@ -247,7 +274,7 @@ class GuaranteesPinned(unittest.TestCase):
     def test_the_two_new_guarantees_are_listed_and_pinned(self):
         p = run_wave("guarantees", "--json")
         rows = json.loads(p.stdout)
-        for frag in ("never waits for CI that does not exist", "an empty plan is never success"):
+        for frag in ("never waits for CI that does not exist", "an empty selection is never success"):
             row = next(r for r in rows if frag in r["guard"])
             self.assertTrue(row["tested"], frag)
 
