@@ -14,7 +14,7 @@ import sys
 import unittest
 from unittest import mock
 
-from helpers import TMP, WAVE, gh_calls, git, run_wave, sandbox, wave
+from helpers import TMP, gh_calls, git, judge_pass, run_wave, sandbox, wave, writes_allowed
 
 N = TMP / "n"
 Z = TMP / "z"
@@ -56,26 +56,9 @@ def setUpModule():
     (Z / ".github" / "workflows" / "ci.yml").unlink()  # the stale tree: only origin knows the workflow
 
 
-def writes(*args, log: str):
-    """`wave.py <args>` with the fake gh accepting merges and issue writes, logged aside so the
-    no-writes audit of the rest of the suite never sees a test merge."""
-    env = {**os.environ, "FAKE_GH_EDIT": "1", "FAKE_GH_COMMENT": "1", "FAKE_GH_MERGE": "1",
-           "FAKE_GH_LOG": str(TMP / f"gh-{log}.log")}
-    return subprocess.run([sys.executable, str(WAVE), *args], cwd=sandbox(), env=env, capture_output=True, text=True)
-
-
-def calls(log: str) -> list[list[str]]:
-    f = TMP / f"gh-{log}.log"
-    return [json.loads(l) for l in f.read_text().splitlines()] if f.exists() else []
-
-
 def judge_pass_n(pr: int) -> None:
     """Seed a pass verdict at the head of o/n's PR, the way the read-only judge agent would."""
-    repo = wave.Repo.get("o/n")
-    branch = next(x["headRefName"] for x in repo.open_prs() if x["number"] == pr)
-    repo.handoffs.mkdir(parents=True, exist_ok=True)
-    (repo.handoffs / f"judge-{pr}.json").write_text(json.dumps({
-        "verdict": "pass", "head_sha": repo.git(["rev-parse", f"origin/{branch}"]).strip(), "findings": []}))
+    judge_pass(pr, slug="o/n")
 
 
 class CiVerdict(unittest.TestCase):
@@ -140,27 +123,27 @@ class NoCiEvidence(unittest.TestCase):
         plan = TMP / "n-plan.json"
         o = run_wave("order", "o/n#81", "--run-gate", "--plan", str(plan), cwd=N)
         self.assertEqual(o.returncode, 0, o.stderr)
-        p = writes("merge", "--plan", str(plan), "--yes", "--no-ci", log="noci-plan")
+        p, mcalls = writes_allowed("merge", "--plan", str(plan), "--yes", "--no-ci", log="noci-plan", comment=True)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertIn("--no-ci", p.stdout)
-        self.assertTrue([c for c in calls("noci-plan") if c[:2] == ["pr", "merge"]])
+        self.assertTrue([c for c in mcalls if c[:2] == ["pr", "merge"]])
 
     def test_the_gate_output_in_the_body_is_evidence(self):
         judge_pass_n(82)
-        p = writes("merge", "o/n#82", "--yes", "--no-ci", log="noci-body")
+        p, mcalls = writes_allowed("merge", "o/n#82", "--yes", "--no-ci", log="noci-body", comment=True)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertIn("--no-ci", p.stdout)
         self.assertIn(GATE, p.stdout, "the acknowledgment names the gate it accepted")
         self.assertIn("unverified", p.stdout, "the acknowledgment says the paste is unverified")
-        self.assertTrue([c for c in calls("noci-body") if c[:2] == ["pr", "merge"]])
+        self.assertTrue([c for c in mcalls if c[:2] == ["pr", "merge"]])
 
     def test_without_evidence_no_ci_is_refused(self):
         judge_pass_n(81)
-        p = writes("merge", "o/n#81", "--yes", "--no-ci", log="noci-none")
+        p, mcalls = writes_allowed("merge", "o/n#81", "--yes", "--no-ci", log="noci-none", comment=True)
         self.assertEqual(p.returncode, 3, p.stdout + p.stderr)
         self.assertIn("NO-CI", p.stdout)
         self.assertIn("--run-gate", p.stdout, "the refusal names what counts as evidence")
-        self.assertEqual([c for c in calls("noci-none") if c[:2] == ["pr", "merge"]], [])
+        self.assertEqual([c for c in mcalls if c[:2] == ["pr", "merge"]], [])
 
 
 class EmptyPlans(unittest.TestCase):

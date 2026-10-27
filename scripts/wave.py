@@ -283,6 +283,7 @@ class Repo:
         self._load_cfg()
         self.handoffs = self.root.parent / f"{self.root.name}-handoffs"
         self._prs: list[dict] | None = None
+        self._ci_expected: bool | None = None  # cached: it cannot change within one command, and merge's CI wait polls it every 15 s
         self._pr_states: dict[str, dict] | None | bool = False  # False: not asked yet; None: gh failed
         self._pr_full = False  # the list filled PR_LIST_LIMIT: a branch it does not name is asked for alone
         self._pr_heads: dict[str, dict | None] = {}
@@ -471,10 +472,11 @@ class Repo:
     def ci_expected(self) -> bool:
         """Whether this repo can produce a check at all: Actions is enabled and origin/<base> carries workflow
         files. Actions off is NO-CI even with the files still on disk — the incident behind #97. A read failure
-        answers True: the wait survives, a tool failure is never classified NO-CI."""
-        if self.actions_enabled() is False:
-            return False
-        return self.has_ci_workflows()
+        answers True: the wait survives, a tool failure is never classified NO-CI. Cached per instance: the
+        answer cannot change within one command, and merge's CI wait re-asks it on every poll."""
+        if self._ci_expected is None:
+            self._ci_expected = False if self.actions_enabled() is False else self.has_ci_workflows()
+        return self._ci_expected
 
     def profile(self) -> dict:
         """The repo's own orchestration: detect_profile's phases plus the gate and the worktree location,
@@ -1506,7 +1508,8 @@ def worktree_state(repo: Repo, wt: Path, branch: str, n: int, now: float | None 
     the dispatch stamp, and progress (working | stalled | dead) by minutes since the newest change — plus `busy`:
     a live process (ps argv, lsof cwd) sits in the worktree, so a long gate with no file change is still `working`,
     and quiet with no process is `stalled`, a signal at WORKING_MIN instead of DEAD_MIN; a worktree whose
-    PR is merged, closed or open is `done`, however idle."""
+    PR is merged, closed or open is `done`, however idle. `tables` is a pre-fetched (ps, lsof) pair shared across
+    the worktrees of one poll; None probes here."""
     stamp = stamp_of(wt)
     now = time.time() if now is None else now
     dispatched = _epoch(stamp.get("dispatched_at"))
@@ -1518,7 +1521,8 @@ def worktree_state(repo: Repo, wt: Path, branch: str, n: int, now: float | None 
     ok, remote = repo.git_ok(["rev-parse", "--verify", "--quiet", f"origin/{branch}"])
     known, pr = repo.pr_of(branch)
     has_pr = (pr or {}).get("state") in PR_STATES
-    seen = {"likely dead": "dead"}.get(verdict(idle, has_pr), verdict(idle, has_pr))
+    v = verdict(idle, has_pr)
+    seen = {"likely dead": "dead"}.get(v, v)
     f = {"issue": n, "worktree": str(wt), "branch": branch, "stamp": stamp, "stamped": bool(stamp),
          "dirty": bool(repo.git(["status", "--porcelain"], cwd=wt).strip()),
          "unpushed": ok and remote.strip() != repo.git(["rev-parse", "HEAD"], cwd=wt).strip(),
@@ -1551,18 +1555,13 @@ def inside_worktree(line: str, root: str) -> bool:
 def worktree_processes(wt: Path) -> list[str]:
     """Best-effort probe for live processes inside a worktree: ps matches the command line, lsof the cwd,
     both on a path boundary (`inside_worktree`). A failed probe reads as no process, so the verdict falls
-    back to what the files say. Tests inject this — the suite never runs it."""
-    lines: list[str] = []
-    try:
-        rc, out, _ = run(["ps", "-axww", "-o", "command="])
-        if rc == 0:
-            lines += [l for l in out.splitlines() if inside_worktree(l, str(wt))]
-        rc, out, _ = run(["lsof", "-0", "-w", "-d", "cwd", "-Fn"])
-        if rc == 0:
-            lines += [f[1:] for f in out.split("\0") if f.startswith("n") and inside_worktree(f[1:], str(wt))]
-    except OSError:
-        return []
-    return lines
+    back to what the files say — the fallback is owned by `worktree_state`'s single guard (this function
+    lets OSError out). Tests inject this — the suite never depends on its output."""
+    rc, out, _ = run(["ps", "-axww", "-o", "command="])
+    lines = [l for l in out.splitlines() if inside_worktree(l, str(wt))] if rc == 0 else []
+    rc, out, _ = run(["lsof", "-0", "-w", "-d", "cwd", "-Fn"])
+    return lines + ([f[1:] for f in out.split("\0") if f.startswith("n") and inside_worktree(f[1:], str(wt))]
+                    if rc == 0 else [])
 
 
 def wake_lines(default: Repo, r: dict) -> list[str]:
@@ -1584,9 +1583,10 @@ def every_seconds(s: str) -> float:
     return int(m.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600}[m.group(2)]
 
 
-def stalled_agents(default: Repo) -> list[dict]:
+def stalled_agents(default: Repo, rows: list[dict] | None = None) -> list[dict]:
     """Worktree records whose agent is stalled or likely dead — what --check reports and --watch waits for."""
-    rows = [worktree_state(default, wt, br, n) for wt, br, n in issue_worktrees(default)]
+    if rows is None:
+        rows = [worktree_state(default, wt, br, n) for wt, br, n in issue_worktrees(default)]
     return [r for r in rows if agent_verdict(r) in ("stalled", "likely dead")]
 
 
@@ -1706,6 +1706,11 @@ def render_prompt(repo: Repo, iss: dict, branch: str, sha: str, parallel: int, s
         "PREPARED": prepared_note(iss.get("body") or ""),
         "PARALLEL": str(max(parallel - 1, 0)),
     }
+    return fill_template(tpl, fields)
+
+
+def fill_template(tpl: str, fields: dict[str, str]) -> str:
+    """The one `{{KEY}}` substitution every prompt template goes through."""
     for k, v in fields.items():
         tpl = tpl.replace("{{" + k + "}}", v)
     return tpl
@@ -1990,6 +1995,38 @@ def manifest_version_changes(repo: Repo, head: str) -> list[str]:
     return out
 
 
+GREEN_BUCKETS = {"pass", "success", "skipping", "skipped", "neutral"}
+FAIL_BUCKETS = {"fail", "failure", "error", "cancelled", "timed_out"}
+
+
+def no_ci_reason(base: str = "<base>") -> str:
+    """The one statement of what NO-CI means and what --no-ci acknowledges: verify's flag, both merge
+    refusals, the --no-ci help and the GUARANTEES row derive from here, so they cannot drift apart (they
+    had — a commit existed only to re-sync two copies)."""
+    return (f"no check on the PR and no CI that could produce one (Actions disabled on the repo, or no workflow "
+            f"in origin/{base}'s .github/workflows/): there is nothing to wait for — --no-ci acknowledges a green "
+            f"`order --run-gate` chain_gate, the machine-verifiable evidence, or a fenced gate run pasted in the "
+            f"PR body, an unverified paste")
+
+
+def classify_checks(repo: Repo, checks_error: bool, checks: dict) -> tuple[str | None, dict]:
+    """The one classifier for both consumers of a PR's checks: `verify_one` (which needs the per-check dict)
+    and `ci_verdict` (which needs the verdict word). Returns (verdict, bad) — verdict PASS | FAILED | NO-CI |
+    None (pending), bad the checks that are not green. A gh failure is (None, {}): never green, never NO-CI (#97).
+    NO-CI is not pending: no check at all on a repo with no CI that could produce one (Actions off, or no
+    workflow in origin/<base>) — waiting cannot change that."""
+    if checks_error:
+        return None, {}
+    bad = {k: v for k, v in checks.items() if v.lower() not in GREEN_BUCKETS}
+    if any(v.lower() in FAIL_BUCKETS for v in checks.values()):
+        return "FAILED", bad
+    if checks and not bad:
+        return "PASS", {}
+    if not checks and not repo.ci_expected():
+        return "NO-CI", {}
+    return None, bad
+
+
 def verify_one(repo: Repo, pr: dict, epic_nodes: dict | None = None) -> dict:
     head = pr["headRefName"]
     repo.git(["fetch", "-q", "origin", head])
@@ -2008,10 +2045,8 @@ def verify_one(repo: Repo, pr: dict, epic_nodes: dict | None = None) -> dict:
     checks_error = checks is None
     if checks_error:
         checks = {}
-    bad = {k: v for k, v in checks.items() if v.lower() not in ("pass", "success", "skipping", "skipped", "neutral")}
-    # no check at all on a repo with no CI that could produce one (Actions off, or no workflow) is NO-CI,
-    # never a silent green (#97); a gh failure is neither — CI-UNKNOWN
-    no_ci = not checks_error and not checks and not repo.ci_expected()
+    ci_word, bad = classify_checks(repo, checks_error, checks)
+    no_ci = ci_word == "NO-CI"
     # sibling issues that cite a file this PR touched: the next wave inherits this change
     touched_files = repo.git(["diff", "--name-only", f"origin/{repo.base}...origin/{head}"]).split()
     siblings = []
@@ -2060,7 +2095,7 @@ def verify_one(repo: Repo, pr: dict, epic_nodes: dict | None = None) -> dict:
           and not ledger and not version_bumps and not checks_error)
     return {"repo": repo.slug, "pr": pr["number"], "issue": n_issue, "head": head, "attribution": attribution,
             "protected_touched": touched, "checks_not_green": bad, "checks_error": checks_error, "no_ci": no_ci,
-            "ok_beyond_ci": ok and not checks_error,
+            "ok_beyond_ci": ok,
             "mergeable": pr.get("mergeable"),
             "worktree": wt_state, "notify_issues": siblings, "contradictions": contradictions,
             "closes_other": closes_other, "closes_only_in_commit": closes_only_in_commit, "ledger": ledger,
@@ -2068,6 +2103,15 @@ def verify_one(repo: Repo, pr: dict, epic_nodes: dict | None = None) -> dict:
 
 
 VERDICTS = ("pass", "fail", "concerns")
+
+
+def bad_ref(where: str, i: int, f) -> str | None:
+    """The typed refusal for one finding-shaped entry: a path and a 1-based line, or the first reason it is not."""
+    if not isinstance(f, dict) or not isinstance(f.get("file"), str) or not f["file"]:
+        return f"{where}[{i}].file must be a path"
+    if not isinstance(f.get("line"), int) or isinstance(f.get("line"), bool) or f["line"] < 1:
+        return f"{where}[{i}].line must be a 1-based line"
+    return None
 
 
 def verdict_problems(v) -> list[str]:
@@ -2086,10 +2130,9 @@ def verdict_problems(v) -> list[str]:
         bad.append("findings must be a list")
     else:
         for i, f in enumerate(fs):
-            if not isinstance(f, dict) or not isinstance(f.get("file"), str) or not f["file"]:
-                bad.append(f"findings[{i}].file must be a path")
-            elif not isinstance(f.get("line"), int) or isinstance(f.get("line"), bool) or f["line"] < 1:
-                bad.append(f"findings[{i}].line must be a 1-based line")
+            ref = bad_ref("findings", i, f)
+            if ref:
+                bad.append(ref)
             elif not isinstance(f.get("note"), str) or not f["note"]:
                 bad.append(f"findings[{i}].note must say what is wrong")
             elif f.get("severity") not in ("blocking", "nit"):
@@ -2102,10 +2145,9 @@ def verdict_problems(v) -> list[str]:
             bad.append("a round verdict answers every previous finding in `recheck`, a list of {file, line, status}")
         else:
             for i, r in enumerate(rc):
-                if not isinstance(r, dict) or not isinstance(r.get("file"), str) or not r["file"]:
-                    bad.append(f"recheck[{i}].file must be a path")
-                elif not isinstance(r.get("line"), int) or isinstance(r.get("line"), bool) or r["line"] < 1:
-                    bad.append(f"recheck[{i}].line must be a 1-based line")
+                ref = bad_ref("recheck", i, r)
+                if ref:
+                    bad.append(ref)
                 elif r.get("status") not in ("fixed", "not fixed"):
                     bad.append(f"recheck[{i}].status must be fixed|not fixed")
     return bad
@@ -2113,9 +2155,8 @@ def verdict_problems(v) -> list[str]:
 
 def round_problems(v) -> list[str]:
     """The round contract, judged after staleness: a round verdict names the findings it was asked to re-check
-    (`previous`) and its `recheck` answers every one of them, file and line each — a short list is named."""
-    if not isinstance(v, dict):
-        return ["the verdict is not a JSON object"]
+    (`previous`) and its `recheck` answers every one of them, file and line each — a short list is named.
+    `v` is a schema-valid dict by the time this runs (`judge_check` runs `verdict_problems` first)."""
     prev = v.get("previous")
     bad = []
     if not isinstance(prev, list) or not prev:
@@ -2162,7 +2203,8 @@ def judge_check(repo: Repo, n: int, head_sha: str, round_: bool = False) -> dict
     nits = sum(1 for f in v["findings"] if f["severity"] == "nit")
     detail = (f"pass at {head_sha[:7]}" if v["verdict"] == "pass"
               else f"concerns at {head_sha[:7]}: {nits} nit(s) only, not blocking — the owner reads them in {path.name}")
-    return {"flag": None, "detail": detail, "verdict": v["verdict"], "head_sha": head_sha, "findings": v["findings"]}
+    return {"flag": None, "detail": detail, "verdict": v["verdict"], "head_sha": head_sha, "findings": v["findings"],
+            "nits": nits}
 
 
 JUDGE_TOOLS = "Read, Grep, Glob, Write"  # the one place the judge's tool surface is named in code (agents/judge.md carries it to the host)
@@ -2175,9 +2217,7 @@ def render_round_prompt(repo: Repo, n: int, issue: int | None, prev: dict, sha: 
     fields = {"PR": str(n), "REPO": repo.slug, "ISSUE": f"#{issue}" if issue else "(the PR body names no issue)",
               "PREV_SHA": prev["head_sha"], "SHA": sha, "DELTA": str(delta),
               "OUT": str(repo.handoffs / f"judge-{n}.json"), "PREV_FINDINGS": findings}
-    for k, v in fields.items():
-        tpl = tpl.replace("{{" + k + "}}", v)
-    return tpl
+    return fill_template(tpl, fields)
 
 
 def cmd_judge(default: Repo | None, a):
@@ -2230,7 +2270,7 @@ def cmd_judge(default: Repo | None, a):
             print(render_round_prompt(repo, n, n_issue, prev, sha, patch))
         jc = judge_check(repo, n, sha, round_=a.since)
         if jc["flag"] is None:
-            fresh = "fresh" if jc["verdict"] == "pass" else f"fresh ({jc['detail'].split(': ', 1)[1]})"
+            fresh = "fresh" if jc["verdict"] == "pass" else f"fresh ({jc['nits']} nit(s) only, not blocking — the owner reads them in the verdict file)"
             print(f"  verdict {jc['verdict']} at {sha[:7]} — {fresh}; `merge` re-checks the sha before merging")
         elif jc["flag"] in ("JUDGE-FAIL", "JUDGE-STALE"):
             print(f"  {jc['flag']}[{jc['detail']}]" + (" — judge again at this head" if jc["flag"] == "JUDGE-STALE" else ""))
@@ -2268,8 +2308,7 @@ def cmd_verify(default: Repo | None, a):
             if r["protected_touched"]: flags.append("PROTECTED:" + ",".join(r["protected_touched"]))
             if r["checks_not_green"]: flags.append("CI:" + ",".join(f"{k}={v}" for k, v in r["checks_not_green"].items()))
             if r["checks_error"]: flags.append("CI-UNKNOWN[gh could not read the PR's checks: a tool failure is never green or NO-CI — fix gh and re-run]")
-            if r["no_ci"]: flags.append("NO-CI[no check on the PR and no CI that could produce one (Actions disabled, or no workflow in origin/<base>): there is nothing to wait for;"
-                                        " merge stops at once, --no-ci acknowledges a green `order --run-gate` chain_gate — the machine-verifiable evidence — or a fenced gate run pasted in this body, an unverified paste]")
+            if r["no_ci"]: flags.append("NO-CI[" + no_ci_reason(repo.base) + "]")
             if r["mergeable"] == "CONFLICTING": flags.append("CONFLICT")
             if r["worktree"] and (r["worktree"]["dirty"] or r["worktree"]["unpushed"]): flags.append("WORKTREE-NOT-CLEAN")
             for c in r["contradictions"]: flags.append("CONTRADICTION[" + c + "]")
@@ -2460,21 +2499,13 @@ def gate_chain(repo: Repo, base_sha: str, order: list[int], trees: list[str | No
 
 
 def ci_verdict(repo: Repo, n: int) -> str | None:
-    """PASS | FAILED | NO-CI | None (still pending). NO-CI is not pending: no check on the PR at all and no CI
-    that could produce one (Actions disabled, or no workflow in origin/<base>'s .github/workflows/) — waiting
-    cannot change that, so the caller stops instead of running out the clock. gh failing to read the checks or
-    the Actions state is None too: a tool failure is retried as pending, never classified NO-CI (#97)."""
+    """PASS | FAILED | NO-CI | None (still pending), from the one classifier verify uses — the two gates can
+    never disagree on what is green or what NO-CI means (#97). gh failing to read the checks is None too: a
+    tool failure is retried as pending, never classified NO-CI."""
     checks = repo.pr_checks(n)
     if checks is None:
         return None
-    states = {v.lower() for v in checks.values()}
-    if any(s in ("fail", "failure", "error", "cancelled", "timed_out") for s in states):
-        return "FAILED"
-    if states and states <= {"pass", "success", "skipping", "skipped", "neutral"}:
-        return "PASS"
-    if not states and not repo.ci_expected():
-        return "NO-CI"
-    return None
+    return classify_checks(repo, False, checks)[0]
 
 
 def plan_gate_green(pl: dict | None, n: int) -> bool:
@@ -2628,7 +2659,7 @@ def cmd_merge(default: Repo | None, a):
         if not v["ok"] and not (a.no_ci and v["no_ci"] and v["ok_beyond_ci"]) and not a.force:
             print(f"{key(repo, n)}: verify says NOT OK — attribution={v['attribution']} protected={v['protected_touched']} ci={v['checks_not_green']} contradictions={v['contradictions']} closes_other={v['closes_other']} closes_only_in_commit={v['closes_only_in_commit']} ledger={v['ledger']} version_bumps={v['version_bumps']} worktree={v['worktree']}. Not merging."
                   + (f" It conflicts with {repo.base}: run `wave resolve` on PR {key(repo, n)}, then rerun merge from here." if v["mergeable"] == "CONFLICTING" else "")
-                  + (" — NO-CI: no check on the PR and no workflow in .github/workflows/: nothing to wait for; pass --no-ci, with a green `order --run-gate` chain_gate or a fenced gate run pasted in the PR body" if v["no_ci"] else ""))
+                  + (" — NO-CI: " + no_ci_reason(repo.base) + "; pass --no-ci to proceed" if v["no_ci"] else ""))
             sys.exit(2)
 
         def mergeable():
@@ -2655,10 +2686,7 @@ def cmd_merge(default: Repo | None, a):
         c = wait_for(ci, a.ci_timeout, 15)
         if c == "NO-CI":
             if not a.no_ci:
-                print(f"{key(repo, n)}: NO-CI — no check on the PR and no CI that could produce one "
-                      f"(Actions disabled on the repo, or no workflow in origin/{repo.base}'s .github/workflows/): "
-                      f"there is nothing to wait for. To merge without CI pass --no-ci, with a green `order --run-gate` "
-                      f"chain_gate in the plan or a fenced gate run pasted in the PR body.")
+                print(f"{key(repo, n)}: NO-CI — {no_ci_reason(repo.base)}. Pass --no-ci to merge without CI.")
                 sys.exit(3)
             if plan_gate_green(plans.get(repo.slug), n):
                 print(f"{key(repo, n)}: merging without CI (--no-ci): the plan's chain gate is green for this PR.")
@@ -3368,21 +3396,22 @@ def cmd_agents(default: Repo | None, a):
     if default is None:
         raise SystemExit("run inside a repo checkout, or pass --repo")
     if getattr(a, "watch", False):
+        interval = every_seconds(getattr(a, "every", None) or "5m")
         while True:  # the watchdog the orchestrator arms in the background: it ends — and so notifies —
             try:  # the moment a worktree turns stalled or likely dead
                 bad = stalled_agents(default)
             except (Exception, SystemExit) as e:  # sh raises SystemExit on a bounced git call; log it and keep polling — never a crash that reads like a stall
                 print(f"  ! probe failed, still watching: {type(e).__name__}: {e}")
-                time.sleep(every_seconds(getattr(a, "every", None) or "5m"))
+                time.sleep(interval)
                 continue
             if bad:
                 for r in bad:
                     print("\n".join(wake_lines(default, r)))
                 raise SystemExit(1)
-            time.sleep(every_seconds(getattr(a, "every", None) or "5m"))
+            time.sleep(interval)
     rows = [worktree_state(default, wt, br, n) for wt, br, n in issue_worktrees(default)]
     if getattr(a, "check", False):
-        bad = [r for r in rows if agent_verdict(r) in ("stalled", "likely dead")]
+        bad = stalled_agents(default, rows=rows)
         if not bad:
             print(f"no stalled or likely dead agent among {len(rows)} worktree(s) — `wave agents --watch` arms this as a watchdog")
             return
@@ -3517,7 +3546,8 @@ def cmd_doctor(default: Repo | None, a) -> None:
         checks.append((f"no agent likely dead (no PR, nothing changed for more than {DEAD_MIN} min)", not dead,
                        (", ".join(f"{name} ({lv['idle_min']} min)" for name, _, lv in dead)
                         + " — resume the agent with `SendMessage` to its id, or "
-                        + ", ".join(f"`wave dispatch --force {n}`" for _, n, _ in dead) + " to start over on top of what is there") if dead else "none", False))
+                        + ", ".join(f"`wave dispatch {n} --force --respawn`" for _, n, _ in dead)
+                        + " to start over on top of what is there (`wake_lines` says the same)") if dead else "none", False))
         checks.append(("no unsaved work behind a merged PR (dirty or unpushed)", not unsaved,
                        ", ".join(unsaved) + " — commit and push it, or discard it by hand; `wave cleanup` keeps these" if unsaved else "none", False))
         checks.append(("every worktree's PR state could be read (gh answered)", not unknown,
@@ -3747,7 +3777,7 @@ GUARANTEES = [
     ("no merge of a PR whose issue still has an open blocker", "cmd_merge", "refusal names the blockers", True),
     ("no merge of a PR that verify rejects", "cmd_merge -> verify_one", "attribution, protected, CI, contradictions re-checked at merge time", False),
     ("no merge before CI is green, one PR at a time", "cmd_merge", "waits for checks, stops on FAILED", False),
-    ("merge never waits for CI that does not exist: no check on the PR and no CI that could produce one (Actions disabled, or no workflow in origin/<base>) stops it at once with NO-CI (--no-ci acknowledges a green `order --run-gate` chain_gate or a fenced gate run pasted in the PR body, named as an unverified paste); a read or gh failure is pending or CI-UNKNOWN, never NO-CI or green", "cmd_merge -> ci_verdict (+ verify_one)", "exit 3 at once, naming --no-ci; verify reports NO-CI and CI-UNKNOWN instead of a silent green", True),
+    ("merge never waits for CI that does not exist: " + no_ci_reason() + " stops it at once with NO-CI; a read or gh failure is pending or CI-UNKNOWN, never NO-CI or green", "cmd_merge -> ci_verdict (+ verify_one)", "exit 3 at once, naming --no-ci; verify reports NO-CI and CI-UNKNOWN instead of a silent green", True),
     ("an empty selection is never success: `order` refuses it (a leaf gets `#N is a leaf: use `order <PR>``), a plan is never written from it, and `merge` refuses when nothing is targeted", "cmd_order, cmd_merge", "exit != 0: nothing to order / merge refused: nothing to merge", True),
     ("base CI red after a merge stops the queue", "cmd_merge --wait-base-ci", "exit 4 with the semantic-conflict note", False),
     (".wave.json is read from origin/<base> after the fetch, not from a main checkout left behind; doctor names a stale copy", "Repo._load_cfg <- Repo.fetch, cmd_doctor", "facts config_source: origin/main:.wave.json; ! main checkout's `.wave.json` matches origin/main's: differs in gate", True),
@@ -4152,7 +4182,7 @@ def main(argv=None):
     x = s.add_parser("verify", help="check PRs: attribution, protected paths, CI, mergeability, worktree"); x.add_argument("prs", nargs="*"); x.add_argument("--epic"); x.add_argument("--json", action="store_true")
     x = s.add_parser("judge", help="write a PR's scoped patch for the judge agent, validate the verdict it writes (merge refuses without a pass at the head)"); x.add_argument("prs", nargs="+"); x.add_argument("--since", action="store_true", help="a round: read the previous judge-<PR>.json, write judge-<PR>.delta.patch (<previous head>..<head>) and print the round prompt with the previous findings in it")
     x = s.add_parser("order", help="pairwise merge-tree -> merge order, per repo"); x.add_argument("prs", nargs="*"); x.add_argument("--epic"); x.add_argument("--json", action="store_true"); x.add_argument("--plan", help="write the approved delta (base sha + PR heads + order) to this file"); x.add_argument("--run-gate", action="store_true", help="run the repo's gate on the tree after each step of the chain, in a throwaway worktree: names the PR that turns it red")
-    x = s.add_parser("merge", help="merge PRs in order, one at a time, CI green before each"); x.add_argument("prs", nargs="*"); x.add_argument("--yes", action="store_true"); x.add_argument("--plan", help="plan file from `order --plan`: refuses if the base or any PR head moved since"); x.add_argument("--force", action="store_true"); x.add_argument("--squash", action="store_true"); x.add_argument("--ci-timeout", type=int, default=1200); x.add_argument("--wait-base-ci", action="store_true"); x.add_argument("--no-ci", action="store_true", help="merge a PR with no CI at all (no check on the PR, and Actions disabled on GitHub or no workflow in origin/<base>'s .github/workflows/): needs a green `order --run-gate` chain_gate in the plan — the machine-verifiable evidence — or a fenced gate run pasted in the PR body, an unverified paste")
+    x = s.add_parser("merge", help="merge PRs in order, one at a time, CI green before each"); x.add_argument("prs", nargs="*"); x.add_argument("--yes", action="store_true"); x.add_argument("--plan", help="plan file from `order --plan`: refuses if the base or any PR head moved since"); x.add_argument("--force", action="store_true"); x.add_argument("--squash", action="store_true"); x.add_argument("--ci-timeout", type=int, default=1200); x.add_argument("--wait-base-ci", action="store_true"); x.add_argument("--no-ci", action="store_true", help="merge a PR with no CI at all — " + no_ci_reason())
     x = s.add_parser("resolve", help="merge the base into a conflicting PR's branch in its worktree, gate, push (never --force), comment; a conflict is left for you, then --continue"); x.add_argument("pr"); x.add_argument("--continue", dest="cont", action="store_true")
     x = s.add_parser("close-parents", help="close parents whose sub-issues are all closed"); x.add_argument("epic"); x.add_argument("--include-epic", action="store_true"); x.add_argument("--dry-run", action="store_true")
     x = s.add_parser("cleanup", help="remove worktrees whose work lives elsewhere (a merged PR, an empty seat), printing the disk each removal reclaims; branches stay"); x.add_argument("slugs", nargs="*"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--include-closed", action="store_true", help="also remove worktrees whose PR closed without merging"); x.add_argument("--stale-days", type=int, metavar="N", help="also list kept worktrees with no open PR and nothing newer than N days, with their size; with --yes, remove those too"); x.add_argument("--yes", action="store_true", help="with --stale-days: remove the stale worktrees as well")
