@@ -1547,7 +1547,7 @@ def wake_lines(default: Repo, r: dict) -> list[str]:
 def every_seconds(s: str) -> float:
     """`45s` | `5m` | `1h` | bare seconds — the --watch poll interval."""
     m = re.fullmatch(r"(\d+)([smh]?)", s.strip())
-    if not m or m.group(1) == "0":
+    if not m or int(m.group(1)) == 0:
         raise SystemExit(f"--every {s!r}: use <n>s | <n>m | <n>h | <n>, n > 0")
     return int(m.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600}[m.group(2)]
 
@@ -3210,7 +3210,7 @@ def cmd_agents(default: Repo | None, a):
         while True:  # the watchdog the orchestrator arms in the background: it ends — and so notifies —
             try:  # the moment a worktree turns stalled or likely dead
                 bad = stalled_agents(default)
-            except Exception as e:  # a transient git/gh failure is logged and polled over, never a crash that reads like a stall
+            except (Exception, SystemExit) as e:  # sh raises SystemExit on a bounced git call; log it and keep polling — never a crash that reads like a stall
                 print(f"  ! probe failed, still watching: {type(e).__name__}: {e}")
                 time.sleep(every_seconds(getattr(a, "every", None) or "5m"))
                 continue

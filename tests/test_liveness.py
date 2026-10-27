@@ -234,7 +234,8 @@ class Stalled(unittest.TestCase):
         self.assertEqual(rec["progress"], "working")
 
     def test_a_merged_pr_is_done_never_stalled(self):
-        with mock.patch.object(wave.Repo, "pr_of", return_value=(True, {"number": 21, "state": "MERGED"})):
+        with mock.patch.object(wave, "worktree_processes", return_value=[]), \
+             mock.patch.object(wave.Repo, "pr_of", return_value=(True, {"number": 21, "state": "MERGED"})):
             rec = wave.worktree_state(repo(), TMP / "l-11", "feat/11-quiet", 11, now=NOW)
         self.assertEqual(rec["pr_state"], "MERGED")
         self.assertEqual(rec["progress"], "done", "merged work is done however idle: never a stall signal")
@@ -319,7 +320,7 @@ class Watch(unittest.TestCase):
         self.assertEqual(ticks, [300, 300, 300], "the default --every is 5m")
 
     def test_every_zero_never_spins_the_watchdog(self):
-        for bad in ("0", "0m", "0s", "0h"):
+        for bad in ("0", "0m", "0s", "0h", "00", "000", "00s"):
             with self.assertRaises(SystemExit):
                 wave.every_seconds(bad)
 
@@ -333,12 +334,13 @@ class Watch(unittest.TestCase):
         def flaky(wt):
             polls["n"] += 1
             if polls["n"] == 2:
-                raise RuntimeError("git exploded")
+                raise SystemExit("git index.lock: unable to lock")  # what `sh()` raises on a bounced git call
             return [f"gate {wt}"] if wt.name in ("l-9", "l-11", "l-12") else []
 
         out, code = self.watch("--every", "5m", probe=flaky, clock=clock, sleep=tick)
-        self.assertEqual(code, 1)
-        self.assertIn("git exploded", out, "a transient failure is logged, never silent")
+        self.assertEqual(code, 1, "a transient failure keeps the watchdog alive; only a stall ends it with 1")
+        self.assertIn("probe failed, still watching", out, "a transient failure is logged, never silent")
+        self.assertIn("git index.lock", out)
         self.assertIn("o/l#10", out, "the watchdog still fires for the real stall")
 
 
