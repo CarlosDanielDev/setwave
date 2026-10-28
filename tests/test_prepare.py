@@ -146,6 +146,75 @@ class Dispatch(unittest.TestCase):
         self.assertNotIn("## Handoff", (TMP / "l-handoffs" / "14.md").read_text())
 
 
+class Size(unittest.TestCase):
+    """#119: prepare classifies the issue small / medium / large by Done-when items and cited files;
+    a small one runs as one agent with no judge/fix phase, and the SKILL's step 3 says so."""
+
+    def test_small_medium_large_by_items_and_files(self):
+        small = "## Done when\n\n- [ ] a (`f.py:1`) — owner: x\n- [ ] b (`g.py:1`) — owner: x\n"
+        self.assertEqual(wave.issue_size(small), {"size": "small", "items": 2, "files": 2})
+        medium = small + "- [ ] c\n- [ ] d\n- [ ] e\n"
+        self.assertEqual(wave.issue_size(medium)["size"], "medium", "5 items, few files: the middle size")
+        self.assertEqual(wave.issue_size(medium + "- [ ] f\n")["size"], "large", "6 items is large on items alone")
+        files = " ".join(f"(`f{i}.py:1`)" for i in range(10))
+        self.assertEqual(wave.issue_size(f"## Done when\n\n- [ ] a {files}\n")["size"], "large",
+                         "10 cited files is large on files alone")
+
+    def test_the_handoff_names_the_size_and_what_it_means_for_the_pipeline(self):
+        repo = wave.Repo.get("o/r")
+        small = wave.handoff_block(repo, {"number": 9, "title": "t", "html_url": "u",
+                                          "body": "## Done when\n\n- [ ] a — owner: x\n"})
+        self.assertIn("Size: small (1 Done-when items, 0 files cited)", small)
+        self.assertIn("one agent, no judge/fix phase", small)
+        medium = wave.handoff_block(repo, {"number": 9, "title": "t", "html_url": "u",
+                                           "body": "## Done when\n\n" + "- [ ] a\n" * 4})
+        self.assertIn("Size: medium (4 Done-when items, 0 files cited)", medium)
+        self.assertIn("full pipeline", medium)
+
+    def test_prepare_prints_the_classification(self):
+        p, _ = writes_allowed("prepare", "70", log="prepare-70-size")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("Size: small", p.stdout)
+
+    def test_amend_refreshes_the_size_line_prepare_stamped(self):
+        """#120 judge, blocking: prepare runs before the owner's answers, so the Size it stamps can predate
+        the amend — when the Done when lands, the routing line must follow the final body, never stay
+        `small (0 Done-when items)` for an issue that now carries four."""
+        p, calls = writes_allowed("prepare", "70", log="prepare-70-size-refresh")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("Size: small (0 Done-when items", edited_body(calls), "the stamp starts truthful for a bare body")
+        # GitHub keeps that body; the owner's four-item amend lands on it. The fake gh serves the static
+        # fixture, so the persisted composition is replayed through the same functions amend runs.
+        repo = wave.Repo.get("o/r")
+        prepared = wave.insert_section(BARE, wave.HANDOFF, wave.handoff_block(repo, {"number": 70, "title": "Bare leaf", "html_url": "u", "body": BARE}))
+        amended = wave.with_done_when(prepared, "- [ ] a\n- [ ] b\n- [ ] c\n- [ ] d\n")
+        final = wave.refresh_size(amended)
+        self.assertIn("Size: medium (4 Done-when items", final, "the routing line follows the final Done when")
+        self.assertNotIn("Size: small", final)
+
+    def test_amend_refreshes_a_stale_size_line_persisted_on_github(self):
+        f = TMP / "done-when-amend-67.md"
+        f.write_text("- [ ] a\n- [ ] b\n- [ ] c\n- [ ] d\n")
+        p, calls = writes_allowed("amend", "67", "--done-when", str(f), log="amend-67-size")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        body = edited_body(calls)
+        self.assertIsNotNone(body)
+        self.assertIn("Size: medium (4 Done-when items", body, "the stale small line prepare left is gone")
+        self.assertNotIn("Size: small", body)
+
+    def test_dispatch_prints_the_routing_from_the_final_body(self):
+        p = run_wave("dispatch", "68", "--no-prepare", "--dry-run")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("Size: medium (4 Done-when items", p.stdout,
+                      "the body still carries the stale `Size: small` line; dispatch computes its own")
+        (TMP / "r-handoffs" / "68.md").unlink(missing_ok=True)  # --dry-run still writes the prompt file
+
+    def test_the_skill_says_a_small_issue_runs_one_agent_without_judge_fix(self):
+        skill = (WAVE.parent.parent / "skills" / "wave" / "SKILL.md").read_text()
+        self.assertIn("Size:", skill)
+        self.assertIn("no judge/fix phase", skill)
+
+
 class PromptNote(unittest.TestCase):
     def test_the_note_names_the_tool_sections_and_the_missing_ones(self):
         repo = wave.Repo.get("o/r")

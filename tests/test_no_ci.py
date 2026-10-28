@@ -102,6 +102,61 @@ class MergeStops(unittest.TestCase):
         self.assertIn("--no-ci", p.stdout)
 
 
+class MergeNoWait(unittest.TestCase):
+    """#119: the CI wait is never armed for a repo that cannot produce checks — even when the checks
+    read fails — and the NO-CI stop prints the ready `gh pr merge --squash --match-head-commit <sha>`
+    so finishing by hand takes seconds instead of another hung session."""
+
+    def test_a_repo_without_ci_is_no_ci_even_when_the_checks_read_fails(self):
+        class R:
+            def pr_checks(self, n):
+                return None          # gh failed to read the checks
+            def ci_expected(self):
+                return False         # but no CI exists that could produce one
+        self.assertEqual(wave.merge_ci_step(R(), 81), "NO-CI",
+                         "plain ci_verdict returns None here and the merge waits the whole ci-timeout")
+
+    def test_a_repo_with_expected_ci_still_goes_through_ci_verdict(self):
+        class R:
+            def pr_checks(self, n):
+                return {"ci": "pass"}
+            def ci_expected(self):
+                return True
+        self.assertEqual(wave.merge_ci_step(R(), 81), "PASS")
+
+    def test_the_no_ci_stop_prints_the_match_head_commit_command(self):
+        out = io.StringIO()
+        slept: list[float] = []
+        with mock.patch.object(wave.time, "sleep", lambda s: slept.append(s)):
+            with contextlib.redirect_stdout(out):
+                with self.assertRaises(SystemExit) as ctx:
+                    wave.cmd_merge(wave.Repo.get("o/n"), argparse.Namespace(
+                        prs=["81"], yes=True, plan=None, force=True, squash=True,
+                        ci_timeout=1200, wait_base_ci=False, no_ci=False))
+        sha = wave.Repo.get("o/n").git(["rev-parse", "origin/t/n1"]).strip()
+        self.assertEqual(ctx.exception.code, 3, out.getvalue())
+        self.assertIn(f"gh pr merge 81 -R o/n --squash --match-head-commit {sha}", out.getvalue())
+        self.assertIn("--no-ci", out.getvalue(), "the acknowledgment is still named")
+        self.assertEqual(slept, [], "nothing waited: the stop is in seconds")
+
+
+    def test_the_verify_gate_stop_prints_the_command_too(self):
+        """#120 judge nit: without --force the default no-CI merge stops at the verify gate, one branch
+        before the NO-CI stop that prints — the command must be there too."""
+        p = run_wave("merge", "o/n#81", "--yes")
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        sha = wave.Repo.get("o/n").git(["rev-parse", "origin/t/n1"]).strip()
+        self.assertIn(f"gh pr merge 81 -R o/n --merge --match-head-commit {sha}", p.stdout)
+        self.assertIn("pass --no-ci", p.stdout)
+
+    def test_the_no_ci_no_evidence_refusal_prints_the_command_too(self):
+        p = run_wave("merge", "o/n#81", "--yes", "--no-ci", "--force")
+        self.assertEqual(p.returncode, 3, p.stdout + p.stderr)
+        sha = wave.Repo.get("o/n").git(["rev-parse", "origin/t/n1"]).strip()
+        self.assertIn("no evidence", p.stdout)
+        self.assertIn(f"gh pr merge 81 -R o/n --merge --match-head-commit {sha}", p.stdout)
+
+
 class VerifyReports(unittest.TestCase):
     def test_verify_reports_no_ci_not_silent_green(self):
         p = run_wave("verify", "o/n#81", "--json")

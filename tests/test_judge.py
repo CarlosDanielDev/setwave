@@ -78,6 +78,52 @@ class JudgeCmd(unittest.TestCase):
                 self.assertIn("JUDGE-MISSING", p.stdout, f"{why}: no valid verdict, so none is on file")
 
 
+class Scope(unittest.TestCase):
+    """#119: a `concerns` whose findings all carry `"scope": true` is the owner's decision, not a fix
+    round — the implementing agent cannot un-ask a scope question. `judge_check` classifies it and
+    `wave judge` prints the owner question (accept as is / split a follow-up)."""
+
+    def tearDown(self):
+        VERDICT.unlink(missing_ok=True)
+
+    def seed(self, findings, verdict="concerns"):
+        HANDOFFS.mkdir(parents=True, exist_ok=True)
+        VERDICT.write_text(json.dumps({"verdict": verdict, "head_sha": head_sha(), "findings": findings}))
+
+    def scope_concern(self, **extra):
+        return {"file": "g.txt", "line": 1, "severity": "nit", "note": "the hero was never asked", "scope": True, **extra}
+
+    def test_all_scope_concerns_print_the_owner_question(self):
+        self.seed([self.scope_concern()])
+        p = run_wave("judge", "20")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr + " — concerns never refuse")
+        self.assertIn("scope-only concerns", p.stdout)
+        self.assertIn("accept", p.stdout)
+        self.assertIn("follow-up", p.stdout)
+
+    def test_mixed_findings_are_not_scope_only(self):
+        self.seed([self.scope_concern(),
+                   {"file": "g.txt", "line": 2, "severity": "nit", "note": "a plain nit"}])
+        p = run_wave("judge", "20")
+        self.assertNotIn("scope-only concerns", p.stdout)
+
+    def test_scope_does_not_soften_a_fail_or_a_blocker(self):
+        self.seed([self.scope_concern(severity="blocking")], verdict="fail")
+        p = run_wave("judge", "20")
+        self.assertIn("JUDGE-FAIL", p.stdout)
+
+    def test_a_non_boolean_scope_is_refused(self):
+        self.seed([self.scope_concern(scope="yes")])
+        p = run_wave("judge", "20")
+        self.assertIn("JUDGE-MISSING", p.stdout)
+        self.assertIn("scope", p.stdout)
+
+    def test_the_judge_template_defines_the_flag(self):
+        text = (WAVE.parent.parent / "templates" / "judge.md").read_text()
+        self.assertIn('"scope": true', text)
+        self.assertIn("follow-up", text)
+
+
 class MergeRefusals(unittest.TestCase):
     """`merge` re-checks the verdict itself, where it cannot be skipped: the OK was for a judged delta."""
 

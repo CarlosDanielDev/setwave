@@ -314,6 +314,28 @@ class Lint(unittest.TestCase):
         self.assertIn("CONTRADICTION: handoff branch `feat/99-x` does not carry #6", p.stdout)
         self.assertIn("CONTRADICTION: body closes [9] but this is #6", p.stdout)
 
+    def test_a_visible_result_promise_without_a_verifying_item_warns(self):
+        """#119: the caption issue whose Done-when checked only the plumbing."""
+        p = run_wave("lint", "65")
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("WARNING:", p.stdout)
+        self.assertIn("promises a visible result", p.stdout)
+        self.assertIn("Done-when item verifies", p.stdout)
+
+    def test_an_item_that_verifies_the_screen_silences_the_warning(self):
+        p = run_wave("lint", "66")
+        self.assertEqual(p.returncode, 0, p.stdout)
+        self.assertIn("o/r#66: [no type] the common contract — ok", p.stdout)
+        self.assertNotIn("WARNING:", p.stdout)
+
+    def test_the_promise_may_come_from_the_title_alone(self):
+        body = ("Parent: #1\n\nStorage moves to UserDefaults.\n\n## Done when\n\n"
+                "- [ ] the flag is stored (`Home.swift:1`) — owner: implementer\n\n"
+                "## Handoff\n\n```bash\ngit worktree add -b feat/67-title ../r-67 origin/main\n```\n\nCloses #67\n")
+        self.assertEqual(wave.lint_body(body, 67, None, title="Store the flag"), [])
+        warned = wave.lint_body(body, 67, None, title="Show a gray hero on the home screen")
+        self.assertTrue(any("visible result" in m for m in warned), warned)
+
 
 class TypedLint(unittest.TestCase):
     """The issue's label picks its template (`templates/issue/<type>.md`); `lint` charges what it adds."""
@@ -459,6 +481,28 @@ class Dispatch(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertTrue((TMP / "r-handoffs" / "2.md").read_text().endswith(tail),
                         "a respawn re-applies the addendum the stamp records")
+
+    def test_an_unresolved_gate_placeholder_refuses_before_any_worktree(self):
+        """#119: a gate naming {SIMULATOR} with no seat to resolve it once shipped a literal into the prompt."""
+        self.declare(gate=["xcrun simctl boot {SIMULATOR} test"])
+        p = run_wave("dispatch", "2", "--force", "--no-prepare")
+        self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("{SIMULATOR}", p.stderr)
+        self.assertIn("resources", p.stderr)
+        self.assertFalse((TMP / "r-handoffs" / "2.md").exists(), "the refusal precedes every prompt")
+        self.assertFalse((TMP / "r-2").exists(), "and every worktree")
+
+    def test_wave_prompt_refuses_the_same_placeholder(self):
+        self.declare(gate=["xcrun simctl boot {SIMULATOR} test"])
+        p = run_wave("prompt", "2")
+        self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("{SIMULATOR}", p.stderr)
+
+    def test_a_declared_resource_resolves_and_the_refusal_goes_away(self):
+        self.declare(gate=["xcrun simctl boot {SIMULATOR} test"], resources={"SIMULATOR": ["UDID-AAAA"]})
+        p = run_wave("dispatch", "2", "--force", "--no-prepare")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("UDID-AAAA", (TMP / "r-handoffs" / "2.md").read_text())
 
     def test_doctor_warns_when_a_batch_is_pinned_to_one_simulator(self):
         self.declare(gate=["xcodebuild -destination 'platform=iOS Simulator,id=SIM-1' test"])
