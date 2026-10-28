@@ -76,7 +76,8 @@ IGNORE_ACTIONS = ["actions/checkout", "actions/setup-*", "actions/cache", "actio
 # not DEAD_MIN — and busy is `working` however long the gate runs without touching a tracked file
 WORKING_MIN = 10
 DEAD_MIN = 30
-STAMP = ".setwave.json"  # written by dispatch into each worktree, excluded from git: issue, repo, dispatched_at, prompt, resumes, respawns, resources, addendum
+STAMP = ".setwave.json"  # written by dispatch into each worktree, excluded from git: issue, repo, dispatched_at, prompt, resumes, respawns, resources, addendum, budget
+TOKENS = ".setwave-tokens.jsonl"  # the agent's usage lines ({"at", "tokens"} cumulative), excluded from git: what `wave stats` reads as spend vs the budget ceiling
 # dispatches over a worktree without a new commit on its branch — a plain resume and a respawn with a new strategy
 # count alike: at RETRY_CEILING of them, the agent is agent-exhausted — dispatch refuses a further one and
 # `wave sweep --fix` escalates to the owner; nothing is ever closed by itself
@@ -1618,6 +1619,28 @@ def broken_crates(root: Path, home: Path) -> tuple[int, list[tuple[Path, list[st
 
 # ---------------------------------------------------------------- prompt
 
+def budget_note(budget: int | None, wt: Path) -> str:
+    """The `## Teto de custo` block of the agent prompt (#119): the ceiling, the stop-at-80% rule and
+    where the usage lines go — the one file `wave stats` reads as spend vs ceiling. No ceiling, no block."""
+    if not budget:
+        return ""
+    return (f"## Teto de custo\n\nTeto desta issue: **{budget} tokens**. Passou de 80% ({int(budget * 0.8)}) → "
+            "pare e relate: termine o passo em curso, commit, e diga no relatório final quanto gastou e o que "
+            "ficou fora — não abra PR como se estivesse completo. Ao encerrar, anexe uma linha "
+            f'`{{"at": "<iso>", "tokens": <total acumulado>}}` a `{wt}/{TOKENS}` (já excluído do git): '
+            "é o que `wave stats` lê para mostrar gasto vs teto.")
+
+
+PLACEHOLDER = re.compile(r"\{([A-Z][A-Z0-9_]*)\}")
+
+
+def unresolved_seats(lines: list[str], seat: dict[str, str] | None) -> list[str]:
+    """Gate placeholders nothing resolves (#119): every `{NAME}` left after `{N}`, `{WORKTREE}` and the
+    seat's own keys were substituted — a literal `{SIMULATOR}` in a prompt is what `resources` was for."""
+    known = {"N", "WORKTREE", *(seat or {}).keys()}
+    return sorted({m for line in lines for m in PLACEHOLDER.findall(line)} - known)
+
+
 def remaining(body: str) -> str:
     """The prompt's Remaining section: the issue's open items only, and the rule for the others."""
     items = done_when(body)
@@ -1680,10 +1703,14 @@ def seat_plan(repo: Repo, ns: list[int]) -> dict[str, dict[str, str]]:
     return seats
 
 
-def render_prompt(repo: Repo, iss: dict, branch: str, sha: str, parallel: int, seat: dict[str, str] | None = None) -> str:
+def render_prompt(repo: Repo, iss: dict, branch: str, sha: str, parallel: int, seat: dict[str, str] | None = None, budget: int | None = None) -> str:
     tpl = (TEMPLATES / "agent.md").read_text()
     n = iss["number"]
     gate = [seat_sub(g, {"N": str(n), "WORKTREE": str(repo.worktree(n)), **(seat or {})}) for g in repo.gate()]
+    left = unresolved_seats(gate, seat)
+    if left:
+        raise SystemExit("prompt refused: the gate carries {" + ", {".join(left) + "} and no seat resolves it — "
+                         "declare them under `resources` in `.wave.json` (one value per parallel agent) or fix the gate")
     fields = {
         "WAVE": str(Path(__file__).resolve()), "REMAINING": remaining(iss.get("body") or "").rstrip("\n"),
         "N": str(n), "TITLE": iss["title"], "URL": iss["html_url"], "REPO": repo.slug,
@@ -1703,6 +1730,7 @@ def render_prompt(repo: Repo, iss: dict, branch: str, sha: str, parallel: int, s
         "SKILLS": skill_list(agent_skills(repo)),
         "PREPARED": prepared_note(iss.get("body") or ""),
         "PARALLEL": str(max(parallel - 1, 0)),
+        "BUDGET": budget_note(budget, repo.worktree(n)),
     }
     return fill_template(tpl, fields)
 
@@ -1865,6 +1893,14 @@ def cmd_dispatch(default: Repo | None, a):
                 raise SystemExit(f"dispatch refused: {key(repo, n)} is not ready — {'; '.join(bad)}. `wave why {key(repo, n)}`")
     seats: dict[str, dict[str, str]] = {}
     for repo in {r for r, _ in targets}:
+        left = unresolved_seats(repo.gate(), {k: "" for k in repo.resources})
+        if left:
+            raise SystemExit(f"dispatch refused: the gate of {repo.slug} carries "
+                             f"{', '.join('{' + x + '}' for x in left)} and no seat resolves it — declare `resources` "
+                             "in `.wave.json` (one value per parallel agent) or fix the gate")
+        raw = repo.cfg.get("budget")
+        if raw is not None and (not isinstance(raw, int) or isinstance(raw, bool) or raw <= 0):
+            raise SystemExit(f"{repo.slug}: `budget` must be a positive number of tokens — `{raw}` is not")
         repo.fetch()
         sync_provider(repo, a.dry_run)
         repo.handoffs.mkdir(exist_ok=True)
@@ -1918,12 +1954,15 @@ def cmd_dispatch(default: Repo | None, a):
         if addendum_file and not addendum_file.is_file():
             raise SystemExit(f"dispatch refused: addendum {addendum_file} is not a file")
         addendum = addendum_file.read_text() if addendum_file else ""
-        path.write_text(render_prompt(repo, iss, branch, sha, len(targets), seats.get(key(repo, n))) + addendum)
+        budget = getattr(a, "budget", None) or repo.cfg.get("budget")  # --budget wins over the .wave.json default
+        path.write_text(render_prompt(repo, iss, branch, sha, len(targets), seats.get(key(repo, n)), budget=budget) + addendum)
         if not a.dry_run:  # the stamp `agents`, `doctor` and the retry ceiling read; a re-dispatch (--force) is a new agent, so a new stamp
             stamp = {"issue": n, "repo": repo.slug, "dispatched_at": now_iso(), "prompt": str(path),
                      "resumes": resumes, "respawns": respawns}
             if seats.get(key(repo, n)):
                 stamp["resources"] = seats[key(repo, n)]
+            if budget:
+                stamp["budget"] = budget
             if addendum_file:
                 stamp["addendum"] = str(addendum_file)
             (wt / STAMP).write_text(json.dumps(stamp, indent=2) + "\n")
@@ -1932,9 +1971,11 @@ def cmd_dispatch(default: Repo | None, a):
             ok, excl = repo.git_ok(["rev-parse", "--git-path", "info/exclude"], cwd=wt)  # shared by every worktree
             excl_path = wt / excl.strip()  # an absolute path stays itself
             text = excl_path.read_text() if ok and excl_path.exists() else ""
-            if ok and f"/{STAMP}" not in text.splitlines():
-                excl_path.parent.mkdir(parents=True, exist_ok=True)
-                excl_path.write_text(text + ("\n" if text and not text.endswith("\n") else "") + f"/{STAMP}\n")
+            if ok:
+                missing = [f"/{f}" for f in (STAMP, TOKENS) if f"/{f}" not in text.splitlines()]
+                if missing:
+                    excl_path.parent.mkdir(parents=True, exist_ok=True)
+                    excl_path.write_text(text + ("\n" if text and not text.endswith("\n") else "") + "\n".join(missing) + "\n")
         print(f"{key(repo, n)}: {branch} -> {wt}\n    prompt: {path}   (base origin/{repo.base} = {sha})")
     print("\nDispatch one Agent (general-purpose) per prompt file, all in ONE message; prompt = file content verbatim.")
     print("Arm the stall watchdog in the background: `wave agents --watch` — it exits 1 with the worktree's line the moment an agent stalls (no process) or dies.")
@@ -1944,7 +1985,7 @@ def cmd_prompt(default: Repo | None, a):
     repo, n = parse_ref(a.issue, default)
     repo.fetch()
     iss = repo.issue(n)
-    print(render_prompt(repo, iss, branch_for(iss), repo.origin_sha(), a.parallel))
+    print(render_prompt(repo, iss, branch_for(iss), repo.origin_sha(), a.parallel, budget=getattr(a, "budget", None)))
 
 
 def epic_prs(default: Repo | None, epic_ref: str) -> list[tuple[Repo, dict]]:
@@ -2135,6 +2176,8 @@ def verdict_problems(v) -> list[str]:
                 bad.append(f"findings[{i}].note must say what is wrong")
             elif f.get("severity") not in ("blocking", "nit"):
                 bad.append(f"findings[{i}].severity must be blocking|nit")
+            elif "scope" in f and not isinstance(f.get("scope"), bool):
+                bad.append(f"findings[{i}].scope must be a boolean when present")
         if v.get("verdict") in ("fail", "concerns") and not fs:
             bad.append(f"a {v.get('verdict')} names at least one finding")
     rc = v.get("recheck")
@@ -2199,10 +2242,13 @@ def judge_check(repo: Repo, n: int, head_sha: str, round_: bool = False) -> dict
         if gaps:
             return {"flag": "JUDGE-MISSING", "detail": f"{path.name}: " + "; ".join(gaps)}
     nits = sum(1 for f in v["findings"] if f["severity"] == "nit")
+    # a concern the implementing agent cannot resolve (an item outside the Done when) is the owner's call,
+    # never a fix round (#119): scope-only when the verdict carries findings and every one of them is scope
+    scope_only = v["verdict"] == "concerns" and bool(v["findings"]) and all(f.get("scope") is True for f in v["findings"])
     detail = (f"pass at {head_sha[:7]}" if v["verdict"] == "pass"
               else f"concerns at {head_sha[:7]}: {nits} nit(s) only, not blocking — the owner reads them in {path.name}")
     return {"flag": None, "detail": detail, "verdict": v["verdict"], "head_sha": head_sha, "findings": v["findings"],
-            "nits": nits}
+            "nits": nits, "scope_only": scope_only}
 
 
 JUDGE_TOOLS = "Read, Grep, Glob, Write"  # the one place the judge's tool surface is named in code (agents/judge.md carries it to the host)
@@ -2270,6 +2316,9 @@ def cmd_judge(default: Repo | None, a):
         if jc["flag"] is None:
             fresh = "fresh" if jc["verdict"] == "pass" else f"fresh ({jc['nits']} nit(s) only, not blocking — the owner reads them in the verdict file)"
             print(f"  verdict {jc['verdict']} at {sha[:7]} — {fresh}; `merge` re-checks the sha before merging")
+            if jc.get("scope_only"):
+                print("  scope-only concerns — not a fix round: the implementing agent cannot un-ask a scope question. "
+                      "Take it to the owner: accept as is, or split what was never asked into a follow-up issue.")
         elif jc["flag"] in ("JUDGE-FAIL", "JUDGE-STALE"):
             print(f"  {jc['flag']}[{jc['detail']}]" + (" — judge again at this head" if jc["flag"] == "JUDGE-STALE" else ""))
         else:
@@ -2496,6 +2545,18 @@ def gate_chain(repo: Repo, base_sha: str, order: list[int], trees: list[str | No
     return {"gate": gate, "steps": steps, "first_failure": culprit, "base_red": base_red, "base": base}
 
 
+def merge_ci_step(repo: Repo, n: int) -> str | None:
+    """The one CI read the merge wait arms. The checks themselves are read first: checks that exist count,
+    Actions or not (a CI app produces them with no workflow in the repo). Only when the checks read fails
+    (gh down, a token without scope) does `ci_expected` decide: with no CI that could ever produce one,
+    that is NO-CI at once — the wait is never armed for CI that cannot exist (#119); with CI expected it
+    stays None, pending, exactly as before."""
+    checks = repo.pr_checks(n)
+    if checks is None:
+        return None if repo.ci_expected() else "NO-CI"
+    return classify_checks(repo, False, checks)[0]
+
+
 def ci_verdict(repo: Repo, n: int) -> str | None:
     """PASS | FAILED | NO-CI | None (still pending), from the one classifier verify uses — the two gates can
     never disagree on what is green or what NO-CI means (#97). gh failing to read the checks is None too: a
@@ -2679,12 +2740,15 @@ def cmd_merge(default: Repo | None, a):
                 sys.exit(2)
 
         def ci():
-            return ci_verdict(repo, n)
+            return merge_ci_step(repo, n)
 
         c = wait_for(ci, a.ci_timeout, 15)
         if c == "NO-CI":
             if not a.no_ci:
-                print(f"{key(repo, n)}: NO-CI — {no_ci_reason(repo.base)}. Pass --no-ci to merge without CI.")
+                head_sha = repo.git(["rev-parse", f"origin/{pr['headRefName']}"]).strip()
+                print(f"{key(repo, n)}: NO-CI — nothing to wait for. Finish it in seconds:")
+                print(f"    gh pr merge {n} -R {repo.slug} {'--squash' if a.squash else '--merge'} --match-head-commit {head_sha}")
+                print(f"    ({no_ci_reason(repo.base)} — pass --no-ci with the evidence to have merge do it)")
                 sys.exit(3)
             if plan_gate_green(plans.get(repo.slug), n):
                 print(f"{key(repo, n)}: merging without CI (--no-ci): the plan's chain gate is green for this PR.")
@@ -3090,9 +3154,17 @@ def has_evidence(body: str) -> bool:
     return bool(EVIDENCE_LINE.search(body) or EVIDENCE_SYMBOL.search(body))
 
 
-def lint_body(body: str, n: int, typ: str | None, *, depends_wired: bool = True, sub_issues: int = 0) -> list[str]:
+# words that promise a result visible on the device (the gray caption of #339 shipped after ~600k tokens
+# with a Done when that checked only the plumbing): a promise without a verifying item is a warning
+VISIBLE = re.compile(r"\b(tela|screens?|layout|hero|copys?|bot[ãa]o|buttons?|[íi]cones?|icons?|cor(?:es)?|colou?rs?|"
+                     r"fontes?|fonts?|anima[çc][ãa]o|animation|modais|modals?|dialogs?|toasts?|banners?|temas?|themes?|"
+                     r"dark mode|screenshot|preview|\bUI\b)\b", re.I)
+
+
+def lint_body(body: str, n: int, typ: str | None, *, title: str = "", depends_wired: bool = True, sub_issues: int = 0) -> list[str]:
     """Everything `wave lint` charges one body with: the common contract, plus the type's template when labeled.
-    `depends_wired` mirrors the issue's blocked_by and `sub_issues` its count; both come from GitHub."""
+    `depends_wired` mirrors the issue's blocked_by and `sub_issues` its count; both come from GitHub. The visible-
+    result warning (#119) reads the title too: a promise it alone makes must be verified by a Done-when item."""
     missing = [s for s in ("## Done when", "## Handoff") if s not in body]
     if not BRANCH_IN_BODY.search(body):
         missing.append("branch line `git worktree add -b <branch>` (will be derived from the title)")
@@ -3110,6 +3182,11 @@ def lint_body(body: str, n: int, typ: str | None, *, depends_wired: bool = True,
         missing.append("a parent with a Handoff block: parents are never dispatched; move the handoff to the leaves")
     if not has_evidence(body):
         missing.append("no evidence: neither `file:line` nor `file` + `symbol`")
+    items = done_when(body) or []
+    promised = VISIBLE.search(title or "") or VISIBLE.search(body.split("## Done when", 1)[0])
+    if promised and not any(VISIBLE.search(i["text"]) for i in items):
+        missing.append("WARNING: the title/body promises a visible result (tela, copy, layout) and no Done-when item "
+                       "verifies one — add an item that checks what the screen shows (the exact copy, a screenshot, the element rendered)")
     return missing + (lint_type(body, typ) if typ else [])
 
 
@@ -3120,7 +3197,7 @@ def cmd_lint(default: Repo | None, a):
         iss = repo.issue(n)
         body = iss.get("body") or ""
         typ = issue_type(iss)
-        missing = lint_body(body, n, typ,
+        missing = lint_body(body, n, typ, title=iss.get("title") or "",
                             depends_wired=bool(repo.blocked_by(n)) if "Depends on" in body else True,
                             sub_issues=len(repo.sub_issues(n)) if "## Handoff" in body else 0)
         problems += bool(missing)
@@ -3133,6 +3210,25 @@ def cmd_lint(default: Repo | None, a):
 # ---------------------------------------------------------------- prepare / amend
 
 PREPARE_COMMENT = "handoff added by `wave prepare`"
+
+SIZE_FILE = re.compile(r"[\w./-]+\.(?:rs|ts|tsx|js|jsx|py|go|swift|kt|rb|php|cs|java|yml|yaml|toml|json|md)\b")
+
+
+def issue_size(body: str) -> dict:
+    """#119: small | medium | large from the Done-when item count and the cited files — a small issue runs
+    as one agent with no judge/fix phase (the SKILL's step 3 acts on the handoff's `Size:` line)."""
+    items = len(done_when(body) or [])
+    files = {m.group(0) for m in SIZE_FILE.finditer(body)}
+    size = "small" if items <= 2 and len(files) <= 3 else "large" if items >= 6 or len(files) >= 10 else "medium"
+    return {"size": size, "items": items, "files": len(files)}
+
+
+def size_note(size: dict) -> str:
+    """The handoff's `Size:` line: the classification and what it means for the pipeline."""
+    pipe = {"small": "one agent, no judge/fix phase — the owner reviews the diff directly",
+            "medium": "the full pipeline: implement, judge, fix only on a blocking finding",
+            "large": "the full pipeline, and consider splitting the issue before dispatch"}[size["size"]]
+    return f"Size: {size['size']} ({size['items']} Done-when items, {size['files']} files cited) — {pipe}"
 
 
 def handoff_block(repo: Repo, iss: dict) -> str:
@@ -3151,6 +3247,7 @@ def handoff_block(repo: Repo, iss: dict) -> str:
         f"Base `origin/{repo.base}` at `{repo.origin_sha()}`. Gate:",
         "", "```bash", *gate, "```", "",
         "Skills: " + skill_list(skills), "",
+        size_note(issue_size(iss.get("body") or "")), "",
         "Non-negotiables: no AI attribution in commits or PRs; never `git gc --prune`, `git reflog expire`, "
         "`git stash`, `git reset --hard`, `git clean -f`, `git push --force*`, `git branch -D`, `rm -rf`; "
         "never merge — the owner merges; never touch the main checkout or a sibling worktree; "
@@ -3233,6 +3330,7 @@ def cmd_prepare(default: Repo | None, a):
                                      "updated": "Handoff updated in place in the body",
                                      "current": "Handoff already current — nothing written"}[what]
               + f" (branch {branch_for(iss)}, worktree {repo.worktree(n)}, base {repo.base} @ {repo.origin_sha()})")
+        print(f"  {size_note(issue_size(iss.get('body') or ''))}")
         if not gaps:
             print("  nothing to ask: the issue carries its own judgement")
         else:
@@ -3878,6 +3976,14 @@ GUARANTEES = [
     ("no skill whose frontmatter is broken — name kebab matching its directory, a description of at least 40 chars, no dead template link", "ci.yml skill-lint <- validate_skills.py", "CI red: skills/<dir>/SKILL.md: name `X` differs from its directory ...", True),
     ("dois agentes do mesmo lote nunca recebem o mesmo recurso", "cmd_dispatch -> seat_plan",
      "dispatch refused: 3 issues, 2 SIMULATOR free; each prompt of the batch carries its own `id={SIMULATOR}`", True),
+    # cost brakes (#119): a caption on a screen once cost ~600k tokens because nothing slowed the wave down
+    ("a dispatch with a budget stamps the ceiling per issue and the prompt carries it with the stop-at-80% rule; `budget` in .wave.json is the default, --budget overrides", "cmd_dispatch --budget -> render_prompt, stamp; budget_note", "the `## Teto de custo` block of `wave prompt`; the stamp's `budget`", True),
+    ("wave stats shows spend vs ceiling per issue, read from the usage file the prompt tells the agent to append to", "cmd_stats -> budget_rows, tokens_used", "the budget section of `wave stats`", True),
+    ("prepare classifies the issue small / medium / large by Done-when items and cited files; a small one runs as one agent with no judge/fix phase", "issue_size -> handoff_block, cmd_prepare; the SKILL's step 3", "the handoff's `Size:` line", True),
+    ("a concerns verdict whose findings all carry scope:true is not a fix round: judge says so and the owner is asked accept / follow-up", "verdict_problems + judge_check -> cmd_judge; the SKILL's step 5", "`scope-only concerns` in `wave judge` output", True),
+    ("lint warns when the title/body promises a visible result (tela, copy, layout) and no Done-when item verifies one", "lint_body (title=) -> VISIBLE", "WARNING: ... promises a visible result ...", True),
+    ("dispatch refuses a prompt whose gate still carries a placeholder no seat resolves", "cmd_dispatch + render_prompt -> unresolved_seats", "dispatch/prompt refused: the gate carries {SIMULATOR} and no seat resolves it", True),
+    ("merge never arms the CI wait for a repo that cannot produce checks, even when the checks read fails; its NO-CI stop prints the ready gh pr merge command", "merge_ci_step <- cmd_merge", "NO-CI stop in seconds with `gh pr merge <N> -R <slug> --squash --match-head-commit <sha>`", True),
 ]
 
 
@@ -4166,7 +4272,7 @@ def main(argv=None):
     x.add_argument("--again", action="store_true", help="re-propose for a repo already answered (a `.wave.json` or a confirmed entry)")
     x = s.add_parser("next", help="leaf issues ready to dispatch"); x.add_argument("epic"); x.add_argument("--batch", type=int, default=4); x.add_argument("--json", action="store_true")
     x = s.add_parser("epics", help="every open epic across the registry's repos (--slug / --repo for one), readiest first: leaves, closed, ready, blocked, in progress, last status comment"); x.add_argument("--slug", help="owner/name: scan that repo instead of the whole registry"); x.add_argument("--repo", default=argparse.SUPPRESS, help="path inside a repo: scan that repo instead of the whole registry"); x.add_argument("--json", action="store_true", help="one object per epic, for the SKILL's step 0")
-    x = s.add_parser("dispatch", help="create worktrees + prompt files (runs doctor and refuses issues that are not READY)"); x.add_argument("issues", nargs="+"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--force", action="store_true"); x.add_argument("--warm", action="store_true", help="Rust: `cargo fetch` in the main checkout first, so parallel builds only extract"); x.add_argument("--addendum", metavar="FILE", help="append this file verbatim to the end of every prompt of the batch and record it in the stamp — a --force/--respawn re-applies the recorded one"); x.add_argument("--respawn", action="store_true", help="this dispatch returns with a new strategy after the same failure twice: the stamp counts a respawn, not a plain resume"); x.add_argument("--no-prepare", action="store_true", help="do not run `wave prepare` on an issue whose body has no `## Handoff`")
+    x = s.add_parser("dispatch", help="create worktrees + prompt files (runs doctor and refuses issues that are not READY)"); x.add_argument("issues", nargs="+"); x.add_argument("--dry-run", action="store_true"); x.add_argument("--force", action="store_true"); x.add_argument("--warm", action="store_true", help="Rust: `cargo fetch` in the main checkout first, so parallel builds only extract"); x.add_argument("--addendum", metavar="FILE", help="append this file verbatim to the end of every prompt of the batch and record it in the stamp — a --force/--respawn re-applies the recorded one"); x.add_argument("--respawn", action="store_true", help="this dispatch returns with a new strategy after the same failure twice: the stamp counts a respawn, not a plain resume"); x.add_argument("--no-prepare", action="store_true", help="do not run `wave prepare` on an issue whose body has no `## Handoff`"); x.add_argument("--budget", type=int, metavar="TOKENS", help="token ceiling per issue of this batch, stamped and carried by the prompt with the stop-at-80% rule (default: `budget` in .wave.json; `wave stats` shows spend vs ceiling)")
     x = s.add_parser("prepare", help="write the facts of a handoff (branch, worktree, base, gate, skills, non-negotiables, Closes #N) into the issue's `## Handoff` — appended, or an existing one replaced in place — and print the judgement it cannot write, one question per gap, for the orchestrator to ask"); x.add_argument("issues", nargs="+")
     x = s.add_parser("amend", help="write the owner's answered criteria into the issue once: --done-when <file>, one `- [ ] item` per line, written before the Handoff, never over one that exists"); x.add_argument("issue"); x.add_argument("--done-when", metavar="FILE", required=True)
     x = s.add_parser("release", help="prepare a release and stop: bump both manifests on release/<version>, open the `Release <version>` PR with one note per PR since the last tag; --dry-run prints the branch, the diff and the notes. Merge, tag and gh release stay yours"); x.add_argument("version"); x.add_argument("--dry-run", action="store_true")
@@ -4176,7 +4282,7 @@ def main(argv=None):
     x.add_argument("--check", action="store_true", help="exit 1 when an agent is stalled or likely dead, printing SendMessage (gate in foreground) or dispatch --force --respawn")
     x.add_argument("--watch", action="store_true", help="block until a worktree turns stalled or likely dead, then exit 1 with its line — arm it in the background; its ending is the notification")
     x.add_argument("--every", default="5m", metavar="N", help="watch poll interval: 45s | 5m | 1h | bare seconds (default 5m)")
-    x = s.add_parser("prompt", help="print the agent prompt for one issue"); x.add_argument("issue"); x.add_argument("--parallel", type=int, default=4)
+    x = s.add_parser("prompt", help="print the agent prompt for one issue"); x.add_argument("issue"); x.add_argument("--parallel", type=int, default=4); x.add_argument("--budget", type=int, metavar="TOKENS", help="token ceiling the prompt carries (default: `budget` in .wave.json)")
     x = s.add_parser("verify", help="check PRs: attribution, protected paths, CI, mergeability, worktree"); x.add_argument("prs", nargs="*"); x.add_argument("--epic"); x.add_argument("--json", action="store_true")
     x = s.add_parser("judge", help="write a PR's scoped patch for the judge agent, validate the verdict it writes (merge refuses without a pass at the head)"); x.add_argument("prs", nargs="+"); x.add_argument("--since", action="store_true", help="a round: read the previous judge-<PR>.json, write judge-<PR>.delta.patch (<previous head>..<head>) and print the round prompt with the previous findings in it")
     x = s.add_parser("order", help="pairwise merge-tree -> merge order, per repo"); x.add_argument("prs", nargs="*"); x.add_argument("--epic"); x.add_argument("--json", action="store_true"); x.add_argument("--plan", help="write the approved delta (base sha + PR heads + order) to this file"); x.add_argument("--run-gate", action="store_true", help="run the repo's gate on the tree after each step of the chain, in a throwaway worktree: names the PR that turns it red")
@@ -4238,6 +4344,39 @@ def append_log(rec: dict) -> None:
         pass
 
 
+def tokens_used(wt: Path) -> int | None:
+    """The newest cumulative `tokens` total in the worktree's usage file (`TOKENS`), or None when the
+    agent has appended nothing yet."""
+    try:
+        lines = [json.loads(l) for l in (wt / TOKENS).read_text().splitlines() if l.strip()]
+    except (OSError, ValueError):
+        return None
+    totals = [r["tokens"] for r in lines if isinstance(r, dict) and isinstance(r.get("tokens"), int)]
+    return totals[-1] if totals else None
+
+
+def budget_rows() -> list[str]:
+    """One row per stamped issue worktree with a ceiling (#119): spend vs ceiling, or the ceiling alone
+    while nothing has been recorded. A repo that cannot be opened is skipped, never fatal to `stats`."""
+    rows = []
+    for slug, entry in sorted(load_registry()["repos"].items()):
+        if "path" not in entry or not Path(entry["path"]).exists():
+            continue
+        try:
+            repo = Repo.get(slug, True)
+            wts = issue_worktrees(repo)
+        except SystemExit:
+            continue
+        for wt, _branch, n in wts:
+            b = stamp_of(wt).get("budget")
+            if not isinstance(b, int) or isinstance(b, bool) or b <= 0:
+                continue
+            used = tokens_used(wt)
+            rows.append(f"  {slug}#{n}: " + (f"{used} / {b} tokens ({round(used * 100 / b)}%)" if used is not None
+                                             else f"ceiling {b}, no usage recorded"))
+    return rows
+
+
 def cmd_stats() -> None:
     f = CONFIG_DIR / "log.jsonl"
     if not f.exists():
@@ -4260,6 +4399,10 @@ def cmd_stats() -> None:
     respawns = sum(r.get("respawns", 0) for r in d)
     if resumes or respawns:
         print(f"\ndispatch escalations: {resumes} plain resumes, {respawns} respawns with a new strategy")
+    rows = budget_rows()
+    if rows:
+        print("\nbudget, spend vs ceiling per issue:")
+        print("\n".join(rows))
 
 
 if __name__ == "__main__":

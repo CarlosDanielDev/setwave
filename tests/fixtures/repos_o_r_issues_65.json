@@ -1,0 +1,10 @@
+{
+  "id": 1065,
+  "number": 65,
+  "title": "Show a gray caption on the home screen",
+  "state": "open",
+  "body": "Parent: #1\n\nThe home screen gains a one-line gray caption under the hero (\"Play now — progress stays on this device\"): the copy and the color follow the layout mock at `HomeView.swift:42`.\n\n## Done when\n\n- [ ] the flag is stored in UserDefaults (`HomeView.swift:42`) — owner: implementer\n- [ ] a no-op analytics hook fires (`Analytics.swift:10`) — owner: implementer\n\n## Handoff\n\n```bash\ngit worktree add -b feat/65-caption ../r-65 origin/main\n```\n\nCloses #65\n",
+  "labels": [],
+  "html_url": "https://github.com/o/r/issues/65",
+  "repository_url": "https://api.github.com/repos/o/r"
+}
