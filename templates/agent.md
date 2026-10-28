@@ -64,6 +64,10 @@ cd {{WORKTREE}}
 {{GATE}}
 ```
 
+### 4.1 Contrato de progresso — o orquestrador não adivinha
+
+Cada marco abaixo mandará **uma linha** via `SendMessage` ao orquestrador (`to: "main"`), com o marco e o fato — nada de prosa, nada de relatório longo (o relatório longo é só o final, seção 7): recon concluído (o que você leu, o que vai fazer) · testes vermelhos capturados (quantos, por quê) · implementação aplicada (arquivos) · gate verde (exit codes) · pushed + PR aberto (número). Marco silencioso é lacuna: se você ficou mais de ~10 minutos sem cruzar um marco — lendo, esperando, decidindo — mande uma linha dizendo onde está. Isso substitui o orquestrador ter de rodar `wave agents` para descobrir que você existe; não o dispensa de nunca encerrar o turno aguardando (regra acima).
+
 ## 5. Entrega
 
 `git add <só seus arquivos>`; commit em inglês, imperativo, no estilo do log (`git log --oneline -15`), com `Closes #{{N}}` no corpo; `git push -u origin {{BRANCH}}`; `gh pr create --base {{BASE}} --title "<uma frase em inglês dizendo o que muda>" --body-file <arquivo>`. Corpo: o que mudou e por quê; ADR em três frases; premissas erradas da issue; saída do gate; mutation-check antes/depois; e o **ledger** — uma seção com o heading exato `## Done when` (no início da linha, nenhuma variante) e a lista da issue copiada verbatim, todos os itens, na ordem, cada um marcado:
