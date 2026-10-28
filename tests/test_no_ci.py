@@ -140,6 +140,23 @@ class MergeNoWait(unittest.TestCase):
         self.assertEqual(slept, [], "nothing waited: the stop is in seconds")
 
 
+    def test_the_verify_gate_stop_prints_the_command_too(self):
+        """#120 judge nit: without --force the default no-CI merge stops at the verify gate, one branch
+        before the NO-CI stop that prints — the command must be there too."""
+        p = run_wave("merge", "o/n#81", "--yes")
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        sha = wave.Repo.get("o/n").git(["rev-parse", "origin/t/n1"]).strip()
+        self.assertIn(f"gh pr merge 81 -R o/n --merge --match-head-commit {sha}", p.stdout)
+        self.assertIn("pass --no-ci", p.stdout)
+
+    def test_the_no_ci_no_evidence_refusal_prints_the_command_too(self):
+        p = run_wave("merge", "o/n#81", "--yes", "--no-ci", "--force")
+        self.assertEqual(p.returncode, 3, p.stdout + p.stderr)
+        sha = wave.Repo.get("o/n").git(["rev-parse", "origin/t/n1"]).strip()
+        self.assertIn("no evidence", p.stdout)
+        self.assertIn(f"gh pr merge 81 -R o/n --merge --match-head-commit {sha}", p.stdout)
+
+
 class VerifyReports(unittest.TestCase):
     def test_verify_reports_no_ci_not_silent_green(self):
         p = run_wave("verify", "o/n#81", "--json")

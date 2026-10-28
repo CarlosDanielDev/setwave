@@ -1879,8 +1879,18 @@ def cmd_epics(default: Repo | None, a):
               f" — {s['command']}")
 
 
+def flagged_budget(a) -> int | None:
+    """`--budget`, validated: a positive token count or nothing — the `.wave.json` default may then speak.
+    A nonsense flag must refuse here, not reach the prompt as a ceiling `stats` silently drops (#120)."""
+    b = getattr(a, "budget", None)
+    if b is not None and b <= 0:
+        raise SystemExit(f"--budget must be a positive number of tokens — `{b}` is not")
+    return b
+
+
 def cmd_dispatch(default: Repo | None, a):
     targets = [parse_ref(r, default) for r in a.issues]
+    budget_flag = flagged_budget(a)
     if not a.dry_run and not a.force:
         class _D: batch = len(targets)
         try:
@@ -1954,7 +1964,7 @@ def cmd_dispatch(default: Repo | None, a):
         if addendum_file and not addendum_file.is_file():
             raise SystemExit(f"dispatch refused: addendum {addendum_file} is not a file")
         addendum = addendum_file.read_text() if addendum_file else ""
-        budget = getattr(a, "budget", None) or repo.cfg.get("budget")  # --budget wins over the .wave.json default
+        budget = budget_flag or repo.cfg.get("budget")  # --budget wins over the .wave.json default
         path.write_text(render_prompt(repo, iss, branch, sha, len(targets), seats.get(key(repo, n)), budget=budget) + addendum)
         if not a.dry_run:  # the stamp `agents`, `doctor` and the retry ceiling read; a re-dispatch (--force) is a new agent, so a new stamp
             stamp = {"issue": n, "repo": repo.slug, "dispatched_at": now_iso(), "prompt": str(path),
@@ -1977,6 +1987,7 @@ def cmd_dispatch(default: Repo | None, a):
                     excl_path.parent.mkdir(parents=True, exist_ok=True)
                     excl_path.write_text(text + ("\n" if text and not text.endswith("\n") else "") + "\n".join(missing) + "\n")
         print(f"{key(repo, n)}: {branch} -> {wt}\n    prompt: {path}   (base origin/{repo.base} = {sha})")
+        print(f"    {size_note(issue_size(iss.get('body') or ''))}")
     print("\nDispatch one Agent (general-purpose) per prompt file, all in ONE message; prompt = file content verbatim.")
     print("Arm the stall watchdog in the background: `wave agents --watch` — it exits 1 with the worktree's line the moment an agent stalls (no process) or dies.")
 
@@ -1985,7 +1996,8 @@ def cmd_prompt(default: Repo | None, a):
     repo, n = parse_ref(a.issue, default)
     repo.fetch()
     iss = repo.issue(n)
-    print(render_prompt(repo, iss, branch_for(iss), repo.origin_sha(), a.parallel, budget=getattr(a, "budget", None)))
+    budget = flagged_budget(a) or repo.cfg.get("budget")  # the same default `dispatch` applies
+    print(render_prompt(repo, iss, branch_for(iss), repo.origin_sha(), a.parallel, budget=budget))
 
 
 def epic_prs(default: Repo | None, epic_ref: str) -> list[tuple[Repo, dict]]:
@@ -2545,6 +2557,14 @@ def gate_chain(repo: Repo, base_sha: str, order: list[int], trees: list[str | No
     return {"gate": gate, "steps": steps, "first_failure": culprit, "base_red": base_red, "base": base}
 
 
+def match_head_commit_cmd(repo: Repo, n: int, head: str, squash: bool) -> str:
+    """The one-command finish for a no-CI PR: merge the exact head the owner verified, nothing that moved
+    after (#119). Printed on every NO-CI stop — the verify gate's, the no-evidence refusal's and the
+    wait's — so finishing by hand takes seconds on any of them."""
+    sha = repo.git(["rev-parse", f"origin/{head}"]).strip()
+    return f"gh pr merge {n} -R {repo.slug} {'--squash' if squash else '--merge'} --match-head-commit {sha}"
+
+
 def merge_ci_step(repo: Repo, n: int) -> str | None:
     """The one CI read the merge wait arms. The checks themselves are read first: checks that exist count,
     Actions or not (a CI app produces them with no workflow in the repo). Only when the checks read fails
@@ -2719,6 +2739,8 @@ def cmd_merge(default: Repo | None, a):
             print(f"{key(repo, n)}: verify says NOT OK — attribution={v['attribution']} protected={v['protected_touched']} ci={v['checks_not_green']} contradictions={v['contradictions']} closes_other={v['closes_other']} closes_only_in_commit={v['closes_only_in_commit']} ledger={v['ledger']} version_bumps={v['version_bumps']} worktree={v['worktree']}. Not merging."
                   + (f" It conflicts with {repo.base}: run `wave resolve` on PR {key(repo, n)}, then rerun merge from here." if v["mergeable"] == "CONFLICTING" else "")
                   + (" — NO-CI: " + no_ci_reason(repo.base) + "; pass --no-ci to proceed" if v["no_ci"] else ""))
+            if v["no_ci"]:
+                print(f"    or finish it by hand: {match_head_commit_cmd(repo, n, pr['headRefName'], a.squash)}")
             sys.exit(2)
 
         def mergeable():
@@ -2745,9 +2767,8 @@ def cmd_merge(default: Repo | None, a):
         c = wait_for(ci, a.ci_timeout, 15)
         if c == "NO-CI":
             if not a.no_ci:
-                head_sha = repo.git(["rev-parse", f"origin/{pr['headRefName']}"]).strip()
                 print(f"{key(repo, n)}: NO-CI — nothing to wait for. Finish it in seconds:")
-                print(f"    gh pr merge {n} -R {repo.slug} {'--squash' if a.squash else '--merge'} --match-head-commit {head_sha}")
+                print(f"    {match_head_commit_cmd(repo, n, pr['headRefName'], a.squash)}")
                 print(f"    ({no_ci_reason(repo.base)} — pass --no-ci with the evidence to have merge do it)")
                 sys.exit(3)
             if plan_gate_green(plans.get(repo.slug), n):
@@ -2757,6 +2778,7 @@ def cmd_merge(default: Repo | None, a):
                 if not named:
                     print(f"{key(repo, n)}: NO-CI and no evidence: --no-ci needs a green chain gate (`order --run-gate`) in the plan "
                           f"or a fenced gate run pasted in the PR body. Not merging.")
+                    print(f"    or finish it by hand: {match_head_commit_cmd(repo, n, pr['headRefName'], a.squash)}")
                     sys.exit(3)
                 print(f"{key(repo, n)}: merging without CI (--no-ci): the PR body carries a fenced run of the gate `{named}` — "
                       f"unverified paste: nothing here proved it ran; the machine-verifiable evidence is a green `order --run-gate` chain_gate.")
@@ -3231,6 +3253,26 @@ def size_note(size: dict) -> str:
     return f"Size: {size['size']} ({size['items']} Done-when items, {size['files']} files cited) — {pipe}"
 
 
+def refresh_size(body: str) -> str:
+    """The body with the Handoff's `Size:` line recomputed from the current Done when: the line prepare
+    stamped can predate the owner's answers (`prepare` runs before `amend`), and a stale `small (0 items)`
+    would route a four-item issue to one agent with no judge/fix (#120). Upserted in place, every other
+    byte kept; a body without a Handoff is returned unchanged."""
+    lines = body.splitlines(keepends=True)
+    start = next((i for i, l in enumerate(lines) if HANDOFF.match(l.rstrip("\r\n"))), None)
+    if start is None:
+        return body
+    end = next((i for i in range(start + 1, len(lines)) if HEADING.match(lines[i])), len(lines))
+    line = size_note(issue_size(body))
+    at = next((i for i in range(start + 1, end) if lines[i].startswith("Size: ")), None)
+    if at is not None:
+        lines[at] = line + "\n"
+        return "".join(lines)
+    sk = next((i for i in range(start + 1, end) if lines[i].startswith("Skills: ")), start)
+    lines[sk + 1:sk + 1] = [line + "\n", "\n"]
+    return "".join(lines)
+
+
 def handoff_block(repo: Repo, iss: dict) -> str:
     """The facts half of a handoff, everything from `facts` on the repo: branch, worktree, base and sha,
     gate, skills (`.wave.json`'s `phases.agent_skills`, else the default stack), the non-negotiables and
@@ -3361,6 +3403,7 @@ def cmd_amend(default: Repo | None, a):
     except ValueError as e:
         print(f"amend refused: {key(repo, n)}: {e}", file=sys.stderr)
         sys.exit(2)
+    new = refresh_size(new)  # the Size the handoff stamped may predate these answers: routing reads it (#120)
     edit_issue_body(repo, n, body, new)
     print(f"{key(repo, n)}: Done-when written ({len(items)} item(s)); verify can now compare the PR's ledger")
 
@@ -3980,10 +4023,11 @@ GUARANTEES = [
     ("a dispatch with a budget stamps the ceiling per issue and the prompt carries it with the stop-at-80% rule; `budget` in .wave.json is the default, --budget overrides", "cmd_dispatch --budget -> render_prompt, stamp; budget_note", "the `## Teto de custo` block of `wave prompt`; the stamp's `budget`", True),
     ("wave stats shows spend vs ceiling per issue, read from the usage file the prompt tells the agent to append to", "cmd_stats -> budget_rows, tokens_used", "the budget section of `wave stats`", True),
     ("prepare classifies the issue small / medium / large by Done-when items and cited files; a small one runs as one agent with no judge/fix phase", "issue_size -> handoff_block, cmd_prepare; the SKILL's step 3", "the handoff's `Size:` line", True),
+    ("the Size line follows the final Done when: amend recomputes the line prepare stamped (it can predate the owner's answers) and dispatch prints the classification from the body it dispatches", "cmd_amend -> refresh_size; cmd_dispatch -> size_note(issue_size)", "Size: medium (4 Done-when items, ...) where prepare had stamped small (0 items)", True),
     ("a concerns verdict whose findings all carry scope:true is not a fix round: judge says so and the owner is asked accept / follow-up", "verdict_problems + judge_check -> cmd_judge; the SKILL's step 5", "`scope-only concerns` in `wave judge` output", True),
     ("lint warns when the title/body promises a visible result (tela, copy, layout) and no Done-when item verifies one", "lint_body (title=) -> VISIBLE", "WARNING: ... promises a visible result ...", True),
     ("dispatch refuses a prompt whose gate still carries a placeholder no seat resolves", "cmd_dispatch + render_prompt -> unresolved_seats", "dispatch/prompt refused: the gate carries {SIMULATOR} and no seat resolves it", True),
-    ("merge never arms the CI wait for a repo that cannot produce checks, even when the checks read fails; its NO-CI stop prints the ready gh pr merge command", "merge_ci_step <- cmd_merge", "NO-CI stop in seconds with `gh pr merge <N> -R <slug> --squash --match-head-commit <sha>`", True),
+    ("merge never arms the CI wait for a repo that cannot produce checks, even when the checks read fails; every NO-CI stop — the verify gate's, the no-evidence refusal's and the wait's — prints the ready gh pr merge command", "merge_ci_step + match_head_commit_cmd <- cmd_merge", "NO-CI stop in seconds with `gh pr merge <N> -R <slug> --squash --match-head-commit <sha>`", True),
 ]
 
 

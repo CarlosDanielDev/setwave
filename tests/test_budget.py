@@ -82,6 +82,28 @@ class Budget(unittest.TestCase):
         self.assertNotIn("Teto de custo", (TMP / "r-handoffs" / "2.md").read_text())
         self.assertNotIn("budget", self.stamp(2))
 
+    def test_wave_prompt_uses_the_wave_json_budget_and_the_flag_wins(self):
+        self.declare(budget=100000)
+        p = run_wave("prompt", "2")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("Teto de custo", p.stdout)
+        self.assertIn("100000", p.stdout, "prompt honors the .wave.json default, like dispatch")
+        p = run_wave("prompt", "2", "--budget", "300000")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("300000", p.stdout, "--budget overrides it here too")
+
+    def test_a_non_positive_budget_flag_is_refused(self):
+        for flag in ("-5", "0"):
+            with self.subTest(flag=flag):
+                p = self.dispatch("--budget", flag)
+                self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+                self.assertIn("--budget", p.stderr)
+                self.assertIn("positive", p.stderr)
+                self.assertFalse((TMP / "r-handoffs" / "2.md").exists(), "the refusal precedes every prompt")
+                p = run_wave("prompt", "2", "--budget", flag)
+                self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+                self.assertIn("--budget", p.stderr)
+
     def test_stats_shows_spend_vs_ceiling_per_issue(self):
         p = self.dispatch("--budget", "200000")
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
