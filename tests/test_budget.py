@@ -104,6 +104,22 @@ class Budget(unittest.TestCase):
                 self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
                 self.assertIn("--budget", p.stderr)
 
+    def test_prompt_refuses_an_invalid_wave_json_budget(self):
+        """#120 judge round 2: the config fallback must carry the same validation on the prompt path —
+        a string crashed `wave prompt` in `budget_note` (TypeError), a negative rendered a nonsense
+        ceiling; dispatch already refused both, and must keep doing so."""
+        for bad in (-5, "lots"):
+            with self.subTest(bad=bad):
+                self.declare(budget=bad)
+                p = run_wave("prompt", "2")
+                self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+                self.assertIn("positive", p.stderr)
+                self.assertNotIn("Traceback", p.stderr, "a bad config value refuses, it never crashes")
+                p = self.dispatch()
+                self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+                self.assertIn("positive", p.stderr)
+                self.assertFalse((TMP / "r-handoffs" / "2.md").exists(), "the refusal precedes every prompt")
+
     def test_stats_shows_spend_vs_ceiling_per_issue(self):
         p = self.dispatch("--budget", "200000")
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)

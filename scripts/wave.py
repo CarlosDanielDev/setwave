@@ -1888,9 +1888,21 @@ def flagged_budget(a) -> int | None:
     return b
 
 
+def budget_of(a, repo: Repo) -> int | None:
+    """The issue's token ceiling: `--budget` wins over the `budget` key of .wave.json. Both are validated
+    positive on every path that renders or stamps them — dispatch and `wave prompt` alike (#120, round 2):
+    a config of `-5` or `"lots"` refuses here, it never reaches `budget_note` as a ceiling."""
+    b = flagged_budget(a)
+    if b:
+        return b
+    raw = repo.cfg.get("budget")
+    if raw is not None and (not isinstance(raw, int) or isinstance(raw, bool) or raw <= 0):
+        raise SystemExit(f"{repo.slug}: `budget` must be a positive number of tokens — `{raw}` is not")
+    return raw
+
+
 def cmd_dispatch(default: Repo | None, a):
     targets = [parse_ref(r, default) for r in a.issues]
-    budget_flag = flagged_budget(a)
     if not a.dry_run and not a.force:
         class _D: batch = len(targets)
         try:
@@ -1908,9 +1920,7 @@ def cmd_dispatch(default: Repo | None, a):
             raise SystemExit(f"dispatch refused: the gate of {repo.slug} carries "
                              f"{', '.join('{' + x + '}' for x in left)} and no seat resolves it — declare `resources` "
                              "in `.wave.json` (one value per parallel agent) or fix the gate")
-        raw = repo.cfg.get("budget")
-        if raw is not None and (not isinstance(raw, int) or isinstance(raw, bool) or raw <= 0):
-            raise SystemExit(f"{repo.slug}: `budget` must be a positive number of tokens — `{raw}` is not")
+        budget_of(a, repo)  # the flag and the config value validated before any worktree exists
         repo.fetch()
         sync_provider(repo, a.dry_run)
         repo.handoffs.mkdir(exist_ok=True)
@@ -1964,7 +1974,7 @@ def cmd_dispatch(default: Repo | None, a):
         if addendum_file and not addendum_file.is_file():
             raise SystemExit(f"dispatch refused: addendum {addendum_file} is not a file")
         addendum = addendum_file.read_text() if addendum_file else ""
-        budget = budget_flag or repo.cfg.get("budget")  # --budget wins over the .wave.json default
+        budget = budget_of(a, repo)  # --budget wins over the .wave.json default, both validated
         path.write_text(render_prompt(repo, iss, branch, sha, len(targets), seats.get(key(repo, n)), budget=budget) + addendum)
         if not a.dry_run:  # the stamp `agents`, `doctor` and the retry ceiling read; a re-dispatch (--force) is a new agent, so a new stamp
             stamp = {"issue": n, "repo": repo.slug, "dispatched_at": now_iso(), "prompt": str(path),
@@ -1996,7 +2006,7 @@ def cmd_prompt(default: Repo | None, a):
     repo, n = parse_ref(a.issue, default)
     repo.fetch()
     iss = repo.issue(n)
-    budget = flagged_budget(a) or repo.cfg.get("budget")  # the same default `dispatch` applies
+    budget = budget_of(a, repo)  # the same validated default `dispatch` applies (#120, round 2)
     print(render_prompt(repo, iss, branch_for(iss), repo.origin_sha(), a.parallel, budget=budget))
 
 
