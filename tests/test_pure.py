@@ -107,5 +107,35 @@ class Closes(unittest.TestCase):
                 self.assertEqual(wave.CLOSES.findall(text), [])
 
 
+class ZoneEstimate(unittest.TestCase):
+    """#121: the crude, documented context estimate and the zone words every print carries."""
+
+    def test_the_estimate_is_items_and_files_times_named_constants(self):
+        self.assertEqual(wave.zone_estimate({"items": 4, "files": 3}),
+                         4 * wave.TOKENS_PER_ITEM + 3 * wave.TOKENS_PER_FILE)
+        self.assertEqual(wave.zone_estimate({"items": 0, "files": 0}), 0)
+
+    def test_the_default_zone_is_the_heuristic_band(self):
+        self.assertEqual(wave.DEFAULT_ZONE, 100000)
+
+    def test_the_size_line_says_estimate_and_the_fit(self):
+        fits = wave.size_note({"size": "small", "items": 1, "files": 1}, zone=100000)
+        self.assertIn("crude", fits, "the wording says crude, never a live context reading")
+        self.assertIn("estimate", fits)
+        self.assertIn("fits the zone", fits)
+        over = wave.size_note({"size": "large", "items": 30, "files": 10}, zone=100000)
+        self.assertIn("over the zone — split", over)
+
+    def test_without_a_zone_the_size_line_is_unchanged(self):
+        self.assertEqual(
+            wave.size_note({"size": "small", "items": 1, "files": 1}),
+            "Size: small (1 Done-when items, 1 files cited) — one agent, no judge/fix phase — "
+            "the owner reviews the diff directly")
+
+    def test_the_zone_state_words(self):
+        self.assertEqual([wave.zone_state(u, 100000) for u in (None, 1, 79999, 80000, 100000, 100001)],
+                         ["no usage", "in-zone", "in-zone", "near-edge", "near-edge", "over"])
+
+
 if __name__ == "__main__":
     unittest.main()
