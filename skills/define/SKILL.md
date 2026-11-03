@@ -31,6 +31,8 @@ Decisions form a tree: each one branches into the decisions that depend on it. T
 
 Number within the round (Q1..Qn); each block is self-contained, because the answers come back to it. Lead with the branches that change the result: observable behavior, scope boundaries, error states, who is affected. Vague language is not an answer: every abstract term ("handles it", "works correctly", "soon") is challenged into a concrete scenario — who does what, what appears on screen, which command prints what — before it becomes a decision; a term the session cannot make concrete is a pendency, not a decision (if what cannot be made concrete is the outcome itself, escalation sensor 1 below fires instead of a pendency).
 
+Scope has a ceiling too: the **smart zone** — models perform best near ~100k tokens of context (the repo's `smart_zone` in `.wave.json`; a heuristic, not science). An issue whose implementer would exceed the zone must split into leaves that fit: `wave prepare`'s `Size:` line states the fit of a crude context estimate, and `over the zone — split` there means the issue still carries at least two.
+
 ## Facts are yours, not the owner's
 
 Whether the code really does what the owner just said is a fact of the environment, not a question for them: dispatch a **read-only subagent** (`Explore`) to cross-reference it and keep the round moving — only the questions that depend on the fact wait for a later round. Prose at a known path (the issue, a template, a README section) you read inline; a subagent is for searching code and state. If the subagent fails or stalls, the fact becomes a pendency of investigation — the question never waits forever.

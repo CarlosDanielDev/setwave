@@ -57,6 +57,8 @@ Se uma premissa da issue estiver errada (linha que andou, tipo que mudou, arquiv
 
 {{BUDGET}}
 
+Higiene de contexto — fique na zona: checkpointe achados intermediários em arquivos da worktree em vez de carregá-los no contexto; leia com escopo (Grep com filtro antes de Read inteiro; um arquivo por vez, só o trecho que falta); não releia o que o seu relatório já registra. A linha `Size:` do handoff estima seu contexto contra a `smart_zone` do repo — **é estimativa crua, não leitura ao vivo** — e um aviso `over the zone — split` do dispatch é conselho de dividir a issue, não bloqueio.
+
 ## 4. Gate — na worktree, cole tudo no PR
 
 O gate roda em **foreground**, um passo por chamada, com o timeout máximo da ferramenta: `run_in_background`, Monitor e `sleep`-poll são proibidos para o gate. Gate maior que o timeout → quebre em passos foreground. **Nunca encerre o turno** com um comando ainda rodando ou "aguardando": um turno encerrado não volta sozinho, e um relatório interino ("waiting on GREEN") é lido como stall — rode `wave agents` e retome com `SendMessage` mandando o gate em foreground.
