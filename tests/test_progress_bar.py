@@ -230,6 +230,17 @@ class Buckets(unittest.TestCase):
     def test_outside_a_git_repo_the_line_is_empty(self):
         self.assertEqual(wave.seat_line(TMP / "not-a-repo"), "")
 
+    def test_a_failed_git_common_dir_probe_is_the_empty_line_never_a_crash(self):
+        """`git rev-parse --git-common-dir` failing raises SystemExit through `sh` — BaseException, past
+        an `except Exception` guard: the statusline contract (exit 0 always) must survive even it."""
+        def boom(cmd, cwd=None, env=None):
+            if cmd == ["git", "rev-parse", "--git-common-dir"]:
+                raise SystemExit("$ git rev-parse --git-common-dir\nfatal: not a git repository")
+            return ""
+        with mock.patch.object(wave, "sh", side_effect=boom):
+            line = wave.seat_line(P)  # the probe fails open (the toplevel stands in): never a raise, whatever it renders
+        self.assertIsInstance(line, str, "SystemExit escaped the catch-all: the statusline would crash")
+
 
 class Cache(unittest.TestCase):
     """The one write that keeps the line's done bucket honest: every successful `pr_states()` refreshes

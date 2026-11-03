@@ -1657,7 +1657,7 @@ def seat_worktrees(root: Path, cfg: dict, env: dict) -> list[tuple[Path, str, in
     `issue_worktrees`: `agents --line` builds no Repo (its constructor gh's for the base) and never writes the
     registry, so a statusline render every turn stays read-only."""
     p = cfg.get("worktree_prefix")
-    prefix = (Path(p).expanduser().parent / Path(p).expanduser().name).name if p else f"{root.name}-"
+    prefix = Path(p).expanduser().name if p else f"{root.name}-"
     out = []
     rc, text, _ = run(["git", "worktree", "list", "--porcelain"], cwd=root, env=env)
     if rc != 0:
@@ -1682,8 +1682,10 @@ def seat_line(cwd: Path, now: float | None = None) -> str:
         if not ok:
             return ""
         root = Path(top.strip())
-        common = (root / sh(["git", "rev-parse", "--git-common-dir"], cwd=root).strip()).resolve()
-        root = common.parent if common.name == ".git" else root
+        ok, common = sh_ok(["git", "rev-parse", "--git-common-dir"], cwd=root)
+        if ok and common.strip():  # sh raises SystemExit — BaseException, past any `except Exception`; the
+            common = (root / common.strip()).resolve()  # probe fails open instead: the toplevel stands in
+            root = common.parent if common.name == ".git" else root
         try:
             cfg = json.loads((root / ".wave.json").read_text()) if (root / ".wave.json").exists() else {}
         except (OSError, ValueError):
