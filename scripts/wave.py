@@ -542,6 +542,7 @@ class Repo:
             self._pr_states = None if prs is None else {}
             for pr in prs or []:
                 self._pr_states.setdefault(pr["headRefName"], pr)  # newest first
+            note_pr_states(self.slug, self._pr_states)  # the local cache `agents --line` reads, so the line never gh's
         return self._pr_states
 
     def pr_of(self, branch: str) -> tuple[bool, dict | None]:
@@ -1012,6 +1013,7 @@ def cmd_init(default: Repo | None, a):
         if bad:
             raise SystemExit(f"init refused: {', '.join(bad)} — only {', '.join(INIT_KEYS)} are init's to write")
         accept_proposal(repo, values)
+        print("Seat progress without running a command: add the setwave segment to your statusLine — one paste, chained after your current statusline, never replacing it; the exact snippet and the removal note: statusline/README.md in the plugin.")
         return
     pf = write_proposal_file(repo, prop)
     guessed = [k for k, row in prop.items() if row["source"] == "guessed"]
@@ -1408,17 +1410,18 @@ def _epoch(iso: str | None) -> float | None:
         return None
 
 
-def last_activity(repo: Repo, wt: Path, dispatched: float | None) -> float:
+def last_activity(env: dict, base: str, wt: Path, dispatched: float | None) -> float:
     """Epoch of the newest trace of work in a worktree: the dispatch, a commit on its branch, a file changed or
-    created (ignored files aside, so build output does not count). The directory's own mtime when there is none."""
+    created (ignored files aside, so build output does not count). The directory's own mtime when there is none.
+    (`env`/`base` instead of a Repo so `seat_line` can ask without building one — a Repo would gh for the base.)"""
     times = [dispatched] if dispatched else []
-    rc, out, _ = run(["git", "ls-files", "-z", "-m", "-o", "--exclude-standard"], cwd=wt, env=repo.env)
+    rc, out, _ = run(["git", "ls-files", "-z", "-m", "-o", "--exclude-standard"], cwd=wt, env=env)
     for f in [f for f in out.split("\0") if f] if rc == 0 else []:
         try:
             times.append((wt / f).stat().st_mtime)
         except OSError:
             pass  # deleted: `-m` lists it, it has no mtime
-    rc, out, _ = run(["git", "log", "-1", "--format=%ct", f"origin/{repo.base}..HEAD"], cwd=wt, env=repo.env)
+    rc, out, _ = run(["git", "log", "-1", "--format=%ct", f"origin/{base}..HEAD"], cwd=wt, env=env)
     if rc == 0 and out.strip():
         times.append(float(out.strip()))
     return max(times) if times else wt.stat().st_mtime
@@ -1462,7 +1465,7 @@ def liveness(repo: Repo, n: int, wt: Path | None = None, now: float | None = Non
     stamp = stamp_of(wt)
     now = time.time() if now is None else now
     dispatched = _epoch(stamp.get("dispatched_at"))
-    idle = (now - last_activity(repo, wt, dispatched)) / 60
+    idle = (now - last_activity(repo.env, repo.base, wt, dispatched)) / 60
     pr = pr_for_issue(repo, n)
     return {"issue": n, "worktree": str(wt), "age_min": round((now - dispatched) / 60) if dispatched else None,
             "idle_min": round(idle), "pr": pr["number"] if pr else None, "resumes": stamp.get("resumes", 0),
@@ -1512,7 +1515,7 @@ def worktree_state(repo: Repo, wt: Path, branch: str, n: int, now: float | None 
     stamp = stamp_of(wt)
     now = time.time() if now is None else now
     dispatched = _epoch(stamp.get("dispatched_at"))
-    idle = round((now - last_activity(repo, wt, dispatched)) / 60)
+    idle = round((now - last_activity(repo.env, repo.base, wt, dispatched)) / 60)
     try:
         busy = bool(worktree_processes(wt))
     except OSError:  # a probe that cannot run is no process: the files' verdict stands
@@ -1615,6 +1618,116 @@ def broken_crates(root: Path, home: Path) -> tuple[int, list[tuple[Path, list[st
         if missing:
             broken.append((d, missing, len(files)))
     return checked, broken
+
+
+# ---------------------------------------------------------------- seat line (#116)
+
+PR_CACHE = CONFIG_DIR / "pr-states.json"  # what `agents --line` reads as its done bucket; `pr_states` refreshes it
+
+
+def note_pr_states(slug: str, states: dict[str, dict] | None) -> None:
+    """Refresh the local PR cache `agents --line` reads (the line itself never calls gh, so the one `gh pr list`
+    every full command already makes is what keeps its done bucket honest). Best effort: a failed read writes
+    nothing and a failed write is silent — the cache is a render's convenience, never a command's result."""
+    if states is None:
+        return
+    try:
+        cache = {}
+        try:
+            cache = json.loads(PR_CACHE.read_text())
+        except (OSError, ValueError):
+            pass
+        cache[slug] = {b: {"number": p["number"], "state": p["state"]} for b, p in states.items()}
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        PR_CACHE.write_text(json.dumps(cache))
+    except OSError:
+        pass
+
+
+def pr_cache(slug: str) -> dict[str, dict]:
+    """The cached PR of each head branch of `slug`, {} when no full command has run yet (or it failed)."""
+    try:
+        return json.loads(PR_CACHE.read_text()).get(slug, {})
+    except (OSError, ValueError):
+        return {}
+
+
+def seat_worktrees(root: Path, cfg: dict, env: dict) -> list[tuple[Path, str, int]]:
+    """(path, branch, issue) of a repo's issue worktrees, from `git worktree list` alone — the Repo-free twin of
+    `issue_worktrees`: `agents --line` builds no Repo (its constructor gh's for the base) and never writes the
+    registry, so a statusline render every turn stays read-only."""
+    p = cfg.get("worktree_prefix")
+    prefix = (Path(p).expanduser().parent / Path(p).expanduser().name).name if p else f"{root.name}-"
+    out = []
+    rc, text, _ = run(["git", "worktree", "list", "--porcelain"], cwd=root, env=env)
+    if rc != 0:
+        return out
+    for block in text.split("\n\n"):
+        m = re.search(r"^worktree (.+)$", block, re.M)
+        b = re.search(r"^branch refs/heads/(.+)$", block, re.M)
+        mm = m and b and re.fullmatch(rf"{re.escape(prefix)}(\d+)", Path(m.group(1)).name)
+        if mm and Path(m.group(1)) != root:
+            out.append((Path(m.group(1)), b.group(1), int(mm.group(1))))
+    return out
+
+
+def seat_line(cwd: Path, now: float | None = None) -> str:
+    """The statusline line (#116): `setwave: 2 working · 1 stalled · 1 done(#99) · 0 dead` — one line, < 120
+    chars, from local facts alone: git, the dispatch stamps, the process probe, the PR cache. Never gh, never a
+    Repo, never a registry write. Outside a git repo, a repo with no wave state (no `.wave.json`, no wave keys
+    in its registry entry), or on any failure: the empty line a statusline wants — `main` prints it and returns
+    before `Repo.from_cwd`, so exit 0 always."""
+    try:
+        ok, top = sh_ok(["git", "rev-parse", "--show-toplevel"], cwd=cwd)
+        if not ok:
+            return ""
+        root = Path(top.strip())
+        common = (root / sh(["git", "rev-parse", "--git-common-dir"], cwd=root).strip()).resolve()
+        root = common.parent if common.name == ".git" else root
+        try:
+            cfg = json.loads((root / ".wave.json").read_text()) if (root / ".wave.json").exists() else {}
+        except (OSError, ValueError):
+            cfg = {}
+        ok, url = sh_ok(["git", "remote", "get-url", "origin"], cwd=root)
+        slug = slug_of_url(url) if ok else None
+        entry = {k: v for k, v in load_registry()["repos"].get(slug or "", {}).items() if k != "path"}
+        if not cfg and not entry:
+            return ""  # a repo with no wave state: silence — a statusline is never noise in someone else's project
+        now = time.time() if now is None else now
+        base = cfg.get("base") or entry.get("base") or ""
+        cache = pr_cache(slug or "")
+        w = s = d = x = 0
+        done: list[int] = []
+        for wt, branch, _n in seat_worktrees(root, cfg, os.environ):
+            stamp = stamp_of(wt)
+            dirty = run(["git", "status", "--porcelain"], cwd=wt, env=os.environ)[1].strip()
+            rc, count, _ = run(["git", "rev-list", "--count", f"origin/{base}..HEAD"], cwd=wt, env=os.environ)
+            if not stamp and not dirty and (rc != 0 or count.strip() in ("", "0")):
+                continue  # an empty seat: no stamp, no commits, no dirt — nobody's agent, like derive_state
+            dispatched = _epoch(stamp.get("dispatched_at"))
+            idle = (now - last_activity(os.environ, base, wt, dispatched)) / 60
+            try:
+                busy = bool(worktree_processes(wt))
+            except OSError:  # a probe that cannot run is no process, as in worktree_state
+                busy = False
+            pr = cache.get(branch)
+            if pr and pr.get("state") in PR_STATES:
+                d += 1
+                done.append(int(pr["number"]))
+            elif busy or idle < WORKING_MIN:
+                w += 1
+            elif idle <= DEAD_MIN:
+                s += 1
+            else:
+                x += 1
+        plain = f"setwave: {w} working · {s} stalled · {d} done · {x} dead"
+        if done:
+            named = plain.replace(" done ", " done(" + ",".join(f"#{n}" for n in sorted(done)) + ") ")
+            if len(named) < 120:
+                return named
+        return plain
+    except Exception:
+        return ""  # the statusline renders every turn: any failure is the empty line, never a broken prompt
 
 
 # ---------------------------------------------------------------- prompt
@@ -2023,8 +2136,9 @@ def cmd_dispatch(default: Repo | None, a):
         if zone_estimate(size) > zone:  # a warning, never a refusal: the budget ceiling stays the only hard brake
             print(f"    ! context estimate ~{zone_estimate(size)} tokens is over the zone of {zone} — a crude "
                   f"estimate from the issue's text, not a live context window: split this issue before dispatching it")
-    print("\nDispatch one Agent (general-purpose) per prompt file, all in ONE message; prompt = file content verbatim.")
+    print("\nDispatch one Agent (general-purpose) per prompt file, all in ONE message, each named wave-<N> (N = its issue: the host renders its native progress rows for named agents only — anonymous spawns get none); prompt = file content verbatim.")
     print("Arm the stall watchdog in the background: `wave agents --watch` — it exits 1 with the worktree's line the moment an agent stalls (no process) or dies.")
+    print(f"Seat progress without running anything: the statusline segment — `python3 {HERE}/wave.py agents --line` chained after your statusLine (never replaces it); the exact snippet ships in statusline/README.md.")
 
 
 def cmd_prompt(default: Repo | None, a):
@@ -3972,6 +4086,7 @@ def cmd_hooks(default: Repo | None, a) -> None:
     for name, matcher in todo:
         print(f"installed {name} (PreToolUse[{matcher}])")
     print(f"wrote {path}" + (f", backup: {backup}" if backup else ""))
+    print("Seat progress without running a command: add the setwave segment to your statusLine — one paste, chained after your current statusline, never replacing it; the exact snippet and the removal note: statusline/README.md in the plugin.")
 
 
 # ---------------------------------------------------------------- guarantees
@@ -4096,6 +4211,7 @@ GUARANTEES = [
     ("dispatch refuses a prompt whose gate still carries a placeholder no seat resolves", "cmd_dispatch + render_prompt -> unresolved_seats", "dispatch/prompt refused: the gate carries {SIMULATOR} and no seat resolves it", True),
     ("merge never arms the CI wait for a repo that cannot produce checks, even when the checks read fails; every NO-CI stop — the verify gate's, the no-evidence refusal's and the wait's — prints the ready gh pr merge command", "merge_ci_step + match_head_commit_cmd <- cmd_merge", "NO-CI stop in seconds with `gh pr merge <N> -R <slug> --squash --match-head-commit <sha>`", True),
     ("the smart zone keeps every implementer in the context band where models perform best (#121): `smart_zone` in .wave.json validated exactly like `budget` (positive int, default 100000 — the owner's heuristic, never claimed as science), the Size line states the fit of a crude documented context estimate, dispatch warns `!` with split advice over the zone and never refuses, and stats/agents show spend and state vs zone", "zone_of -> size_note, cmd_dispatch, budget_rows, cmd_agents", "the zone clause of the Size line; the `!` over-zone warning; the zone words in `wave stats` and `wave agents` — estimate wording everywhere", True),
+    ("seat progress is visible without running any command once armed (#116): `agents --line` renders `setwave: N working · N stalled · N done(#PR) · N dead` (one line, < 120 chars, exit 0 always) from local stamps/state alone — never gh, never a Repo, never a registry write, the empty line outside a wave repo — its done bucket is the PR cache every `pr_states()` refreshes, the chaining statusLine snippet ships in statusline/README.md (dispatch prints it, `init --yes` and `hooks install` offer it, never replacing the user's own), the SKILL mandates the chat seat table at every agent event, and every spawn is named wave-<N> so the host's native rows render", "cmd_agents --line / main <- seat_line <- pr cache; statusline/README.md; skills/wave/SKILL.md; tests/test_progress_bar.py", "`wave agents --line` in a wave repo, outside one and with no seats; dispatch prints the segment and the wave-<N> naming; the Docs tests fail if the SKILL mandate, the README or the guarantee leave", True),
 ]
 
 
@@ -4391,6 +4507,7 @@ def main(argv=None):
     x = s.add_parser("why", help="the premises behind READY / NOT READY for an issue, with evidence"); x.add_argument("refs", nargs="+")
     x = s.add_parser("doctor", help="preflight: gh, git, clean checkout, gate, protected paths, dead agents, retry ceiling, leftover worktrees, cargo cache, disk, batch size"); x.add_argument("--batch", type=int, default=4); x.add_argument("--fix-cache", action="store_true", help="move each half-extracted crate to ~/.config/setwave/quarantine/ (never deletes)"); x.add_argument("--epic", help="also run the state sweep of this epic as a soft check")
     x = s.add_parser("agents", help="every issue worktree: age since dispatch, minutes since the newest change, PR, verdict (working | stalled | likely dead | done); --check exits 1 naming the recovery; --watch blocks until a stall and exits 1 with its line")
+    x.add_argument("--line", action="store_true", help="one statusline line instead of the table: `setwave: N working · N stalled · N done(#PR) · N dead` — local stamps/state only, never gh, empty line and exit 0 outside a wave repo (< 120 chars, no color)")
     x.add_argument("--check", action="store_true", help="exit 1 when an agent is stalled or likely dead, printing SendMessage (gate in foreground) or dispatch --force --respawn")
     x.add_argument("--watch", action="store_true", help="block until a worktree turns stalled or likely dead, then exit 1 with its line — arm it in the background; its ending is the notification")
     x.add_argument("--every", default="5m", metavar="N", help="watch poll interval: 45s | 5m | 1h | bare seconds (default 5m)")
@@ -4418,6 +4535,9 @@ def main(argv=None):
     a = p.parse_args(argv)
     if a.cmd == "stats":
         return cmd_stats()
+    if a.cmd == "agents" and getattr(a, "line", False):
+        print(seat_line(Path.cwd()))  # before Repo.from_cwd: a statusline render never gh's for the base, never registers the repo, never logs a run — exit 0 always
+        return
     default: Repo | None
     try:
         default = Repo.from_cwd(a.repo)
