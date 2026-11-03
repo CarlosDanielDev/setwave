@@ -201,6 +201,28 @@ class Buckets(unittest.TestCase):
         self.assertIn("done(#20,#44)", line)
         wave.PR_CACHE.unlink()
 
+    def test_the_line_never_passes_120_even_with_many_long_pr_numbers(self):
+        numbers = [987654321 + i for i in range(12)]  # twelve done seats with nine-digit PRs: the named form bursts 120
+        wts = []
+        try:
+            for n in numbers:
+                wt = worktree(P, n, f"feat/{n}-p")
+                seed(wt, 60, issue=n)
+                wts.append(wt)
+            wave.PR_CACHE.parent.mkdir(parents=True, exist_ok=True)
+            cache = {f"feat/{n}-p": {"number": n, "state": "OPEN"} for n in numbers}  # the comprehension is the inner dict
+            wave.PR_CACHE.write_text(json.dumps({"o/p": cache}))
+            line = self.seated([])
+            self.assertLess(len(line), 120, line)
+            self.assertIn("12 done ·", line, "the named form that would pass 120 falls back to the count")
+            self.assertNotIn("done(", line)
+        finally:
+            if wave.PR_CACHE.exists():
+                wave.PR_CACHE.unlink()
+            for wt in wts:
+                subprocess.run(["git", "-C", str(P), "worktree", "remove", "--force", str(wt)],
+                               capture_output=True, text=True)
+
     def test_any_failure_is_the_empty_line_never_a_crash(self):
         with mock.patch.object(wave, "load_registry", side_effect=RuntimeError("boom")):
             self.assertEqual(wave.seat_line(P), "")
