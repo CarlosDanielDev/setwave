@@ -97,6 +97,22 @@ class Pure(unittest.TestCase):
         body = mark("## Done when\n\n- [x] no TO", "DO left in the diff\n\n## Notes\n\nplain prose\n")
         self.assertEqual(wave.judge_reality(patch_with(added="ok"), wave._deliverable_body(body))["grade"], "clean")
 
+    def test_a_checklist_line_outside_the_ledger_is_delivery_not_contract(self):
+        # the verify gate pins only the `## Done when` ledger: a checkbox line in any other section
+        # is unpinned delivery prose, and prose that promises the work done is what this gate reads
+        body = mark("## Notes\n\n- [ ] follow up on the TO", "DO below\n")
+        r = wave.judge_reality(patch_with(added="ok"), wave._deliverable_body(body))
+        self.assertEqual(r["grade"], "BLOCKER")
+        self.assertEqual(r["blockers"][0]["pattern"], "todo_fixme")
+
+    def test_the_ledger_exclusion_ends_at_the_next_heading(self):
+        # the bound is the `## Done when` section, not the rest of the body: after `## Notes` the
+        # checkbox lines are scanned again
+        body = mark("## Done when\n\n- [x] no TO", "DO left in the diff\n\n## Notes\n\n- [ ] another TO",
+                    "DO to strike\n")
+        r = wave.judge_reality(patch_with(added="ok"), wave._deliverable_body(body))
+        self.assertEqual(r["grade"], "BLOCKER")
+
     def test_a_marker_in_plain_body_prose_is_still_blocker(self):
         body = "## Notes\n\n" + TRIGGERS["todo_fixme"] + "\n"
         r = wave.judge_reality(patch_with(added="ok"), wave._deliverable_body(body))

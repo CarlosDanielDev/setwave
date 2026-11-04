@@ -2466,11 +2466,20 @@ def _context_lines(patch: str) -> str:
 CHECKLIST = re.compile(r"(?m)^- \[[ x]\] ")
 
 def _deliverable_body(body: str) -> str:
-    """The PR body minus its echoed Done-when checklist: every wave PR must carry its issue's ledger
-    verbatim (the kernel refuses a ledger that differs), and the ledger states the criteria for the
-    diff — the pattern classes included, by name. The checklist is the contract, not the delivered
-    content, so it is not fake-done material; only the checklist lines are dropped."""
-    return "\n".join(l for l in body.splitlines() if not CHECKLIST.match(l))
+    """The PR body minus its echoed Done-when ledger: every wave PR must carry its issue's checklist
+    verbatim inside the `## Done when` section (the kernel refuses a ledger that differs), and that
+    checklist names the pattern classes — it is the contract, not the delivered content. The
+    exclusion is bounded to that section, exactly as `done_when` reads it: from the `## Done when`
+    heading to the next heading. A checkbox line anywhere else is unpinned prose — a claim the body
+    makes about the work — and is scanned like the rest of the body."""
+    out, in_ledger = [], False
+    for l in body.splitlines():
+        if l.startswith("## "):
+            in_ledger = DONE_WHEN.match(l) is not None
+        elif in_ledger and CHECKLIST.match(l):
+            continue
+        out.append(l)
+    return "\n".join(out)
 
 
 def _header_paths(patch: str) -> str:
