@@ -335,6 +335,19 @@ class Docs(unittest.TestCase):
         self.assertIn("never", row[0], "refuse, never a silent demotion — the issue's ADR call")
         self.assertIn("nits", row[0], "nits never need evidence and never block")
 
+    def test_the_guarantees_table_pins_the_patch_anchor(self):
+        # #108, item 3, gated at the wave's final review: the patch-anchor promise has its row
+        row = next(r for r in wave.GUARANTEES if "judge_patch_problems" in r[1])
+        self.assertTrue(row[3], "the promise is pinned by a test")
+        self.assertIn("never certifies", row[0], "a verdict is bound to the diff it judged, not just a head")
+        self.assertIn("JUDGE-PATCH-STALE", row[2])
+
+    def test_the_docs_flag_lists_name_all_six_refusals(self):
+        for path in ("README.md", "skills/wave/SKILL.md", "docs/index.html"):
+            text = (self.REPO / path).read_text()
+            for flag in ("JUDGE-PATCH-STALE", "JUDGE-REALITY-BLOCKER", "JUDGE-EVIDENCE"):
+                self.assertIn(flag, text, f"{path} names {flag}")
+
 
 def seed_round(pr: int, previous: list[dict], statuses: list[str]) -> Path:
     """Seed a round verdict at the current head: it names the findings it was asked to re-check and answers each."""
