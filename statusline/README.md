@@ -11,6 +11,13 @@ calls `gh`**, so a render is fast and free. Outside a git repo, or in a repo wit
 wave state, it prints an **empty line** and exits 0 — it degrades in silence and
 never breaks the statusline it is chained into.
 
+## What one render costs
+
+One render runs `git worktree list` plus, per seat, local reads only — the dispatch
+stamp, the process probe, the PR cache, `.wave.json`, the registry entry, a few git
+reads. No `gh`, and it never spawns anything heavy: no sub-agents, no gate, no
+network. The per-render cost is a handful of local commands, every statusline turn.
+
 ## Arm it (one paste, your statusline stays yours)
 
 The segment **chains after your existing statusline — it never replaces it**. Edit

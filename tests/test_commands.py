@@ -395,12 +395,18 @@ class MillerLint(unittest.TestCase):
         p = run_wave("lint", "74")
         self.assertEqual(p.returncode, 1, p.stdout)
         self.assertIn("Miller vermelho (8 Done-when items, 1 files cited, 0 named ADR forks)", p.stdout)
+        self.assertIn(f"items {wave.LIMITES['items'][1]}, files {wave.LIMITES['files'][1]}, "
+                      f"forks {wave.LIMITES['concepts'][1]}", p.stdout,
+                      "the ceilings the message names are read from LIMITES: the prose can never drift from the gate")
         self.assertIn("split the issue", p.stdout)
 
     def test_ambar_warns_and_lint_still_passes(self):
         p = run_wave("lint", "69")
         self.assertEqual(p.returncode, 0, p.stdout)
         self.assertIn("WARNING: Miller âmbar (6 Done-when items, 1 files cited, 0 named ADR forks)", p.stdout)
+        self.assertIn(f"past the meta ({wave.LIMITES['items'][0]}/{wave.LIMITES['files'][0]}/"
+                      f"{wave.LIMITES['concepts'][0]})", p.stdout,
+                      "the metas the message names are read from LIMITES too")
         self.assertIn("inside the ceiling", p.stdout)
 
     def test_verde_prints_nothing_new(self):

@@ -222,6 +222,9 @@ class Buckets(unittest.TestCase):
             for wt in wts:
                 subprocess.run(["git", "-C", str(P), "worktree", "remove", "--force", str(wt)],
                                capture_output=True, text=True)
+            for n in numbers:  # the branch goes too, or a later dispatch in the shared sandbox clone trips over it
+                subprocess.run(["git", "-C", str(P), "branch", "-D", f"feat/{n}-p"],
+                               capture_output=True, text=True)
 
     def test_any_failure_is_the_empty_line_never_a_crash(self):
         with mock.patch.object(wave, "load_registry", side_effect=RuntimeError("boom")):
@@ -352,6 +355,25 @@ class Docs(unittest.TestCase):
         self.assertIn("never replaces", readme, "the user keeps their own statusline")
         self.assertIn("remove", readme.lower(), "the removal note")
         self.assertIn("empty", readme.lower(), "the degradation outside a wave repo")
+
+    def test_the_statusline_readme_carries_the_per_render_cost(self):
+        readme = (self.REPO / "statusline" / "README.md").read_text()
+        flat = " ".join(readme.lower().split())  # the pins are content pins, not line-wrap pins
+        self.assertIn("git worktree list", readme, "what one render runs")
+        self.assertIn("per seat", flat, "the local probes of one render")
+        self.assertIn("never spawns", flat, "no heavy spawn per render")
+        cost = flat.split("what one render costs", 1)[1]
+        self.assertIn("pr cache", cost, "the cost clause lists what seat_line actually reads")
+        self.assertIn(".wave.json", cost, "the line reads the repo config per render")
+        self.assertIn("registry", cost, "the line reads the registry entry per render")
+        self.assertNotIn("tokens", cost, "seat_line never reads the tokens file: that is stats' ledger, not the line's")
+
+    def test_the_line_help_carries_the_precedence_note(self):
+        p = run_wave("agents", "--help")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("--line", p.stdout)
+        self.assertIn("wins over --check/--watch", p.stdout,
+                      "the statusline segment ignores --check/--watch silently: the help says so")
 
     def test_the_guarantees_table_pins_the_seat_progress(self):
         row = next(r for r in wave.GUARANTEES if "agents --line" in r[0])
