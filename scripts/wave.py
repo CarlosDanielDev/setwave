@@ -3361,6 +3361,11 @@ def lint_body(body: str, n: int, typ: str | None, *, title: str = "", depends_wi
     if promised and not any(VISIBLE.search(i["text"]) for i in items):
         missing.append("WARNING: the title/body promises a visible result (tela, copy, layout) and no Done-when item "
                        "verifies one — add an item that checks what the screen shows (the exact copy, a screenshot, the element rendered)")
+    size = issue_size(body)
+    if size["miller"] == "vermelho":
+        missing.append(f"Miller vermelho ({size['items']} Done-when items, {size['files']} files cited, "
+                       f"{miller_concepts(body)} named ADR forks) is above the hard ceiling — items 7, files 7, "
+                       "forks 2 (acima de 7, reproves): split the issue into leaves that fit")
     return missing + (lint_type(body, typ) if typ else [])
 
 
@@ -3378,6 +3383,11 @@ def cmd_lint(default: Repo | None, a):
         where = f"[{typ}] templates/issue/{typ}.md" if typ else "[no type] the common contract"
         note = "" if typ else " (no type label — bug, story, chore, feature — its template was not charged)"
         print(f"{key(repo, n)}: {where} — " + ("ok" if not missing else "; ".join(missing)) + note)
+        size = issue_size(body)
+        if size["miller"] == "âmbar":
+            print(f"  WARNING: Miller âmbar ({size['items']} Done-when items, {size['files']} files cited, "
+                  f"{miller_concepts(body)} named ADR forks) — past the meta (5/5/1), inside the ceiling: "
+                  "consider splitting")
     sys.exit(1 if problems else 0)
 
 
@@ -3410,23 +3420,53 @@ def zone_state(used: int | None, zone: int) -> str:
     return "over" if used > zone else "near-edge" if used >= int(zone * 0.8) else "in-zone"
 
 
+# the Miller attention gate (#126), from the owner's vault kit `_AI/Skills/engenharia-de-atencao/miller-
+# carga-cognitiva.md` (Fonte citada: Ciência = Miller 1956, "The Magical Number Seven, Plus or Minus Two";
+# Cowan 2001 — memória de trabalho ~4±1 de foco real, 7±2 de teto). Kit rule, verbatim: META = 5,
+# TETO DURO = 7, acima de 7 reprova. Each dimension is (meta, teto); the kit exports constants, so these
+# are constants too — no per-repo override (out of scope per #126).
+LIMITES = {"items": (5, 7), "files": (5, 7), "concepts": (1, 2)}
+
+ADR_FORK = re.compile(r"\(([a-e])\)")
+
+
+def miller_class(items: int, files: int, concepts: int) -> str:
+    """Pure verdict of the Miller attention gate (#126): "verde" | "âmbar" | "vermelho" from the three
+    attention counters against LIMITES — at or under every meta is verde, past a meta but at or under
+    every ceiling is âmbar, past any ceiling is vermelho, and vermelho reproves."""
+    counts = (("items", items), ("files", files), ("concepts", concepts))
+    if any(n > LIMITES[d][1] for d, n in counts):
+        return "vermelho"
+    return "âmbar" if any(n > LIMITES[d][0] for d, n in counts) else "verde"
+
+
+def miller_concepts(body: str) -> int:
+    """The third counter of the Miller gate: the named ADR forks the body settles — the distinct
+    `(a)`/`(b)`-style option markers in the `## ADR stub` section. No stub, no named fork: 0."""
+    stub = section(body, "## ADR stub")
+    return len({m.group(1) for m in ADR_FORK.finditer(stub)}) if stub else 0
+
+
 def issue_size(body: str) -> dict:
     """#119: small | medium | large from the Done-when item count and the cited files — a small issue runs
-    as one agent with no judge/fix phase (the SKILL's step 3 acts on the handoff's `Size:` line)."""
+    as one agent with no judge/fix phase (the SKILL's step 3 acts on the handoff's `Size:` line). #126 adds
+    the Miller class to the same reading: same counters, one more verdict (`miller_class`)."""
     items = len(done_when(body) or [])
     files = {m.group(0) for m in SIZE_FILE.finditer(body)}
     size = "small" if items <= 2 and len(files) <= 3 else "large" if items >= 6 or len(files) >= 10 else "medium"
-    return {"size": size, "items": items, "files": len(files)}
+    return {"size": size, "items": items, "files": len(files),
+            "miller": miller_class(items, len(files), miller_concepts(body))}
 
 
 def size_note(size: dict, zone: int | None = None) -> str:
-    """The handoff's `Size:` line: the classification, what it means for the pipeline and — when a
-    zone is given — the fit of the crude context estimate (#121). The fit wording is always estimate
-    wording; the line never claims to read a live context window."""
+    """The handoff's `Size:` line: the classification, what it means for the pipeline, the Miller class
+    (#126) and — when a zone is given — the fit of the crude context estimate (#121). The fit wording is
+    always estimate wording; the line never claims to read a live context window."""
     pipe = {"small": "one agent, no judge/fix phase — the owner reviews the diff directly",
             "medium": "the full pipeline: implement, judge, fix only on a blocking finding",
             "large": "the full pipeline, and consider splitting the issue before dispatch"}[size["size"]]
-    line = f"Size: {size['size']} ({size['items']} Done-when items, {size['files']} files cited) — {pipe}"
+    line = f"Size: {size['size']} ({size['items']} Done-when items, {size['files']} files cited) — {pipe}; " \
+           f"Miller: {size['miller']}"
     if zone is None:
         return line
     est = zone_estimate(size)
@@ -4208,6 +4248,7 @@ GUARANTEES = [
     ("wave stats shows spend vs ceiling per issue, read from the usage file the prompt tells the agent to append to", "cmd_stats -> budget_rows, tokens_used", "the budget section of `wave stats`", True),
     ("prepare classifies the issue small / medium / large by Done-when items and cited files; a small one runs as one agent with no judge/fix phase", "issue_size -> handoff_block, cmd_prepare; the SKILL's step 3", "the handoff's `Size:` line", True),
     ("the Size line follows the final Done when: amend recomputes the line prepare stamped (it can predate the owner's answers) and dispatch prints the classification from the body it dispatches", "cmd_amend -> refresh_size; cmd_dispatch -> size_note(issue_size)", "Size: medium (4 Done-when items, ...) where prepare had stamped small (0 items)", True),
+    ("the Miller attention gate (#126, the kit's META 5 / TETO DURO 7 / acima de 7 reproves): lint fails (exit != 0) on vermelho with the split-the-issue message, warns on âmbar with exit 0, prints nothing new on verde, and every Size stamp (prepare, amend, refresh, dispatch) carries `Miller: <class>`", "cmd_lint -> lint_body -> miller_class; issue_size -> size_note", "wave lint o/r#74 exits 1 naming the ceiling; the boundary 4/5/6/7/8 per dimension is pinned in tests/test_pure.py", True),
     ("a concerns verdict whose findings all carry scope:true is not a fix round: judge says so and the owner is asked accept / follow-up", "verdict_problems + judge_check -> cmd_judge; the SKILL's step 5", "`scope-only concerns` in `wave judge` output", True),
     ("lint warns when the title/body promises a visible result (tela, copy, layout) and no Done-when item verifies one", "lint_body (title=) -> VISIBLE", "WARNING: ... promises a visible result ...", True),
     ("dispatch refuses a prompt whose gate still carries a placeholder no seat resolves", "cmd_dispatch + render_prompt -> unresolved_seats", "dispatch/prompt refused: the gate carries {SIMULATOR} and no seat resolves it", True),

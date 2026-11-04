@@ -1,0 +1,10 @@
+{
+ "id": 1074,
+ "number": 74,
+ "title": "miller 74: a vermelho issue sits past the hard ceiling",
+ "state": "open",
+ "body": "Parent: #1\n\nThe change lands in `scripts/wave.py`, in `cmd_lint`.\n\n## Done when\n\n- [ ] a (`scripts/wave.py:1`) — owner: implementer\n- [ ] b (`scripts/wave.py:2`) — owner: implementer\n- [ ] c (`scripts/wave.py:3`) — owner: implementer\n- [ ] d (`scripts/wave.py:4`) — owner: implementer\n- [ ] e (`scripts/wave.py:5`) — owner: implementer\n- [ ] f (`scripts/wave.py:6`) — owner: implementer\n- [ ] g (`scripts/wave.py:7`) — owner: implementer\n- [ ] h (`scripts/wave.py:8`) — owner: implementer\n\n## Handoff\n\n```bash\ngit worktree add -b feat/74-red ../r-74 origin/main\n```\n\nCloses #74\n",
+ "labels": [],
+ "html_url": "https://github.com/o/r/issues/74",
+ "repository_url": "https://api.github.com/repos/o/r"
+}

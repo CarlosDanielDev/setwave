@@ -94,5 +94,26 @@ class PlanDirectoryPassesLint(unittest.TestCase):
             self.assertEqual(missing, [], f"{k}.md [{typ}]")
 
 
+class MillerAudit(unittest.TestCase):
+    """#126, the #122 Docs pattern: the audit step sits right after the Done-when draft, and the pin
+    fails if the kit's numbers or the split rule leave the skill."""
+
+    def test_the_audit_step_follows_the_done_when_draft(self):
+        text = skill_text()
+        self.assertIn("## The Miller audit", text, "the step is its own section, easy to follow")
+        self.assertGreater(text.index("## The Miller audit"), text.index("## The rounds"),
+                           "it comes right after the rounds, where the Done when is drafted")
+        self.assertLess(text.index("## The Miller audit"), text.index("## The output is a plan directory"),
+                        "before the plan directory is written: a vermelho draft splits there, not after")
+
+    def test_the_step_carries_the_kits_numbers_and_the_verdict(self):
+        text = skill_text()
+        for phrase in ("META = 5", "TETO DURO = 7", "above 7 reproves",
+                       "Miller 1956", "Cowan 2001", "verde", "âmbar", "vermelho", "split"):
+            self.assertIn(phrase, text, f"the audit step names {phrase}")
+        for counter in ("Done-when blocks", "files", "ADR forks"):
+            self.assertIn(counter, text, f"the audit counts {counter}")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -33,6 +33,10 @@ Number within the round (Q1..Qn); each block is self-contained, because the answ
 
 Scope has a ceiling too: the **smart zone** — models perform best near ~100k tokens of context (the repo's `smart_zone` in `.wave.json`; a heuristic, not science). An issue whose implementer would exceed the zone must split into leaves that fit: `wave prepare`'s `Size:` line states the fit of a crude context estimate, and `over the zone — split` there means the issue still carries at least two.
 
+## The Miller audit — right after the Done-when draft
+
+Once the Done-when blocks are drafted, audit the attention one implementer will carry before anything else touches the draft (the owner's kit "Engenharia de Atenção"; Ciência: Miller 1956, Cowan 2001 — real focus ~4±1, ceiling 7±2). Count the three counters the body already carries: the **Done-when blocks**, the **files** it cites, the **ADR forks** it names. Verdict against the kit's limits — the same numbers `wave lint` enforces (its `Size:` line stamps the class): **META = 5, TETO DURO = 7, above 7 reproves.** All three counters at or under the meta → **verde**; past a meta, at or under the ceiling → **âmbar** (say so to the owner, consider splitting); anything past the ceiling → **vermelho**, and the draft does not leave the session: **split** it into leaves that fit before the plan directory is written.
+
 ## Facts are yours, not the owner's
 
 Whether the code really does what the owner just said is a fact of the environment, not a question for them: dispatch a **read-only subagent** (`Explore`) to cross-reference it and keep the round moving — only the questions that depend on the fact wait for a later round. Prose at a known path (the issue, a template, a README section) you read inline; a subagent is for searching code and state. If the subagent fails or stalls, the fact becomes a pendency of investigation — the question never waits forever.
