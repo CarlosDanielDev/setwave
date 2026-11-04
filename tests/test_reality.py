@@ -105,6 +105,37 @@ class Pure(unittest.TestCase):
     def test_a_removed_marker_is_a_fix_not_fake_done(self):
         self.assertEqual(wave.judge_reality(patch_with(removed=TRIGGERS["todo_fixme"]))["grade"], "clean")
 
+    def test_a_marker_in_a_destination_header_path_is_blocker(self):
+        # the headers never reach the added-line scan, and the PR creates the destination path
+        diff = "\n".join(["diff --git a/ok.txt b/" + mark("TO", "DO-fix.txt"),
+                          "index 0000000..1111111 100644",
+                          "--- a/ok.txt",
+                          "+++ b/" + mark("TO", "DO-fix.txt"),
+                          "+a clean line"]) + "\n"
+        r = wave.judge_reality(diff)
+        self.assertEqual(r["grade"], "BLOCKER")
+        self.assertEqual([f["pattern"] for f in r["blockers"]], ["todo_fixme"])
+
+    def test_a_marker_in_a_renamed_path_is_blocker(self):
+        # a pure rename carries no added lines at all: only the header can carry the path
+        diff = "\n".join(["diff --git a/old.txt b/" + mark("FIXM", "E-this.txt"),
+                          "similarity index 100%",
+                          "rename from old.txt",
+                          "rename to " + mark("FIXM", "E-this.txt")]) + "\n"
+        r = wave.judge_reality(diff)
+        self.assertEqual(r["grade"], "BLOCKER")
+        self.assertEqual([f["pattern"] for f in r["blockers"]], ["todo_fixme"])
+
+    def test_a_marker_in_a_source_path_is_not_delivery(self):
+        # the pre-existing name is not what the PR delivers: only destinations are scanned
+        diff = "\n".join(["diff --git a/" + mark("FIXM", "E-old.txt") + " b/new.txt",
+                          "similarity index 100%",
+                          "rename from " + mark("FIXM", "E-old.txt"),
+                          "rename to new.txt",
+                          "--- a/" + mark("FIXM", "E-old.txt"),
+                          "+++ b/new.txt"]) + "\n"
+        self.assertEqual(wave.judge_reality(diff)["grade"], "clean")
+
     def test_a_blocker_swallows_its_own_major_echo(self):
         trigger = TRIGGERS["lorem_ipsum"]
         r = wave.judge_reality(patch_with(added=trigger, context=trigger))
@@ -137,7 +168,7 @@ class JudgeCheck(unittest.TestCase):
         for f in ("judge-20.json", "judge-20.patch", "judge-20.patch.sha"):
             (HANDOFFS / f).unlink(missing_ok=True)
 
-    def seed(self, patch_text: str, reality_grade: str = "MAJOR") -> dict:
+    def seed(self, patch_text: str, reality_grade: str = "MAJOR", body: str = "") -> dict:
         sandbox()  # the registry must exist before Repo.get: this class may run without its siblings
         repo = wave.Repo.get("o/r")
         sha = head_sha()
@@ -148,7 +179,7 @@ class JudgeCheck(unittest.TestCase):
             {"head": sha, "patch_sha": hashlib.sha256(patch.read_bytes()).hexdigest()}))
         (HANDOFFS / "judge-20.json").write_text(json.dumps(
             {"verdict": "pass", "head_sha": sha, "findings": [], "reality": reality_grade}))
-        return wave.judge_check(repo, 20, sha)
+        return wave.judge_check(repo, 20, sha, body=body)
 
     def test_a_major_grade_in_context_lines_never_refuses(self):
         jc = self.seed(patch_with(context=TRIGGERS["todo_fixme"]))
@@ -158,6 +189,20 @@ class JudgeCheck(unittest.TestCase):
         jc = self.seed(patch_with(added=TRIGGERS["lorem_ipsum"]))
         self.assertEqual(jc["flag"], "JUDGE-REALITY-BLOCKER", jc)
         self.assertIn("lorem_ipsum", jc["detail"])
+
+    def test_the_body_judged_at_judge_time_is_rescanned_at_check_time(self):
+        # the certified patch is clean; the marker rides the PR body. `wave judge` grades the same
+        # patch+body BLOCKER, so check time must refuse identically — the scan scope is one scope
+        jc = self.seed(patch_with(added="a clean line"),
+                       body="## Notes\n\n" + TRIGGERS["simulated_integration"])
+        self.assertEqual(jc["flag"], "JUDGE-REALITY-BLOCKER", jc)
+        self.assertIn("simulated_integration", jc["detail"])
+
+    def test_a_clean_body_at_check_time_stays_clean(self):
+        # the checklist is already excluded at judge time; check time applies the same exclusion
+        body = mark("## Done when\n\n- [x] no TO", "DO left in the diff\n\nplain prose\n")
+        jc = self.seed(patch_with(added="a clean line"), body=body)
+        self.assertIsNone(jc["flag"], jc)
 
     def test_no_certified_patch_skips_the_scan(self):
         sandbox()
