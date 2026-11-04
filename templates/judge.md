@@ -12,6 +12,7 @@ You are the independent judge of {{PR}} in `{{REPO}}`. The agent that wrote the 
 - `{{PATCH}}` — the whole diff `origin/<base>...head` for this PR. Judge exactly this; a fault elsewhere is a finding only when this diff causes it.
 - The body of {{ISSUE}} — the diff must do what its `## Done when` asks, and must not do what the issue never asked.
 - The head sha at the moment the patch was written: `{{SHA}}`. Copy it verbatim into the verdict.
+- The sha256 of that patch, printed by `wave judge` next to the patch path. Copy it verbatim into the verdict's `patch_sha`: it is how the kernel knows the verdict judged exactly the diff on disk.
 
 Reading neighbouring files for context (a caller, a test that pins behaviour) is how you judge; changing anything is how you don't.
 
@@ -30,6 +31,7 @@ Write `{{OUT}}` with exactly this shape:
 {
   "verdict": "pass | fail | concerns",
   "head_sha": "{{SHA}}",
+  "patch_sha": "<the sha256 printed next to the patch path, verbatim>",
   "findings": [{"file": "path/relative/to/the/repo", "line": 12, "severity": "blocking | nit", "note": "what is wrong and why it matters"}]
 }
 ```
@@ -39,3 +41,4 @@ Write `{{OUT}}` with exactly this shape:
 - A finding may also carry `"scope": true`: set it when the finding's point is that the diff does something the issue never asked (or skips something nobody asked for either). That is the owner's decision, not a fix round: a `concerns` whose findings all carry `"scope": true` goes to the owner as "accept as is / split a follow-up", never back to the implementing agent. Never set `scope` on a `blocking` finding or a `fail` — those refuse the merge on their own.
 - `fail`: the diff must not merge (it does not do the issue, or it breaks something). `concerns`: it can merge, and the findings it carries are nits. `fail` and `concerns` carry at least one finding; every finding cites `file`, a 1-based `line`, a `severity`, and its `note` says why it matters.
 - `head_sha` is the sha above, verbatim: a push after the patch invalidates the verdict, and the kernel refuses a stale one.
+- `patch_sha` is the patch's sha256, verbatim: the kernel refuses a verdict whose `patch_sha` does not match the patch on disk — a patch re-cut or tampered after you judged it is not evidence for this verdict.

@@ -2328,6 +2328,9 @@ def verdict_problems(v) -> list[str]:
         bad.append(f"verdict must be one of {'|'.join(VERDICTS)}")
     if not isinstance(v.get("head_sha"), str) or not re.fullmatch(r"[0-9a-f]{40}", v["head_sha"]):
         bad.append("head_sha must be the full 40-hex sha the patch was judged at")
+    ps = v.get("patch_sha")
+    if ps is not None and (not isinstance(ps, str) or not re.fullmatch(r"[0-9a-f]{64}", ps)):
+        bad.append("patch_sha must be the full 64-hex sha256 of the patch that was judged")
     fs = v.get("findings")
     if not isinstance(fs, list):
         bad.append("findings must be a list")
@@ -2379,9 +2382,47 @@ def round_problems(v) -> list[str]:
     return bad
 
 
+def judge_patch_problems(repo: Repo, n: int, round_: bool, v: dict) -> str | None:
+    """#108: the verdict certifies a diff, not just a head — the anchor chain is the patch sha, recorded
+    at judge time twice: `wave judge` writes it in the sidecar (`judge-<PR>.patch.sha`, head + patch_sha)
+    at cut time, and the verdict may carry the same `patch_sha`. A refusal when the patch on disk is not
+    the diff the verdict certified — the sidecar head differing from the verdict's head is exactly the
+    stale-patch hole a push used to slip through."""
+    patch = repo.handoffs / (f"judge-{n}.delta.patch" if round_ else f"judge-{n}.patch")
+    digest = hashlib.sha256(patch.read_bytes()).hexdigest() if patch.exists() else None
+    if v.get("patch_sha") is not None and v["patch_sha"] != digest:
+        return (f"{patch.name} on disk is not the patch this verdict judged (its patch_sha names another diff)"
+                + (" — the patch is gone" if digest is None else "")
+                + ": re-cut with `wave judge` and judge again")
+    side = Path(f"{patch}.sha")
+    if not side.exists():
+        return None  # no cut recorded: nothing to compare against, the head sha still guards the verdict
+    try:
+        anchor = json.loads(side.read_text())
+    except (OSError, json.JSONDecodeError):
+        anchor = None
+    if not isinstance(anchor, dict) or digest is None:
+        return f"the cut anchor {side.name} is unreadable or its patch is gone: re-cut with `wave judge` and judge again"
+    if anchor.get("patch_sha") != digest:
+        return f"{patch.name} on disk is not the patch the last cut wrote: re-cut with `wave judge` and judge again"
+    if anchor.get("head") != v["head_sha"]:
+        return (f"the patch on disk was cut at {str(anchor.get('head'))[:7]}, the verdict certifies {v['head_sha'][:7]}"
+                f" — the judge never read that head's diff: re-cut with `wave judge` and judge again")
+    return None
+
+
+def _read_anchor(side: Path) -> dict | None:
+    """The cut anchor (`<patch>.sha`) if it is a readable JSON object, else None."""
+    try:
+        a = json.loads(side.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return a if isinstance(a, dict) else None
+
+
 def judge_check(repo: Repo, n: int, head_sha: str, round_: bool = False) -> dict:
     """The judge's verdict for PR `n`, re-validated by the kernel: `flag` is None only when a schema-valid verdict
-    says `pass` at exactly `head_sha`; anything else is one of the three JUDGE refusals (merge never trusts the
+    says `pass` at exactly `head_sha`; anything else is one of the four JUDGE refusals (merge never trusts the
     file, the plan, or this command's earlier answer — the sha is re-checked where the merge happens)."""
     path = repo.handoffs / f"judge-{n}.json"
     if not path.exists():
@@ -2400,6 +2441,10 @@ def judge_check(repo: Repo, n: int, head_sha: str, round_: bool = False) -> dict
                 "verdict": v["verdict"], "head_sha": v["head_sha"], "findings": v["findings"]}
     if v["head_sha"] != head_sha:
         return {"flag": "JUDGE-STALE", "detail": f"the verdict is for {v['head_sha'][:7]}, the head is {head_sha[:7]}: a push invalidates it, judge again",
+                "verdict": "pass", "head_sha": v["head_sha"], "findings": []}
+    patch_bad = judge_patch_problems(repo, n, round_, v)
+    if patch_bad:
+        return {"flag": "JUDGE-PATCH-STALE", "detail": patch_bad,
                 "verdict": "pass", "head_sha": v["head_sha"], "findings": []}
     if round_:
         gaps = round_problems(v)
@@ -2424,6 +2469,7 @@ def render_round_prompt(repo: Repo, n: int, issue: int | None, prev: dict, sha: 
     findings = "\n".join(f"- `{f['file']}:{f['line']}` [{f['severity']}] {f['note']}" for f in prev["findings"]) or "- (the previous verdict named no findings)"
     fields = {"PR": str(n), "REPO": repo.slug, "ISSUE": f"#{issue}" if issue else "(the PR body names no issue)",
               "PREV_SHA": prev["head_sha"], "SHA": sha, "DELTA": str(delta),
+              "PATCH_SHA": hashlib.sha256(delta.read_bytes()).hexdigest(),
               "OUT": str(repo.handoffs / f"judge-{n}.json"), "PREV_FINDINGS": findings}
     return fill_template(tpl, fields)
 
@@ -2446,6 +2492,14 @@ def cmd_judge(default: Repo | None, a):
         head = f"origin/{pr['headRefName']}"
         sha = repo.git(["rev-parse", head]).strip()
         repo.handoffs.mkdir(parents=True, exist_ok=True)
+        verdict_path = repo.handoffs / f"judge-{n}.json"
+        old_verdict = None
+        if verdict_path.exists():
+            try:
+                old_verdict = json.loads(verdict_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                old_verdict = None
+        old_anchor = None
         prev = None
         if a.since:
             prev_path = repo.handoffs / f"judge-{n}.json"
@@ -2462,6 +2516,8 @@ def cmd_judge(default: Repo | None, a):
                 bad += 1
                 continue
             delta = repo.handoffs / f"judge-{n}.delta.patch"
+            side = Path(f"{delta}.sha")
+            old_anchor = _read_anchor(side)
             delta.write_text(repo.git(["diff", prev["head_sha"], sha]))  # the round judges <previous head>..<head>, nothing else
             files = repo.git(["diff", "--name-only", prev["head_sha"], sha]).split()
             patch = delta
@@ -2469,11 +2525,18 @@ def cmd_judge(default: Repo | None, a):
                 else " — NOTE: the previous head is not an ancestor of the current head (a rebase?): this delta is the whole diff, so convergence is not measured; prefer a whole-diff round"
         else:
             patch = repo.handoffs / f"judge-{n}.patch"
+            side = Path(f"{patch}.sha")
+            old_anchor = _read_anchor(side)
             patch.write_text(repo.git(["diff", f"origin/{repo.base}...{head}"]))  # base...head is by construction the diff of the files the PR touches
             files = repo.git(["diff", "--name-only", f"origin/{repo.base}...{head}"]).split()
+        digest = hashlib.sha256(patch.read_bytes()).hexdigest()
+        side.write_text(json.dumps({"head": sha, "patch_sha": digest}))  # the cut anchor (#108): what the patch was, at what head
         n_issue = next((int(num) for _, num in CLOSES.findall(pr.get("body") or "")), None)
-        print(f"{key(repo, n)}: patch {patch} ({len(files)} file(s): {', '.join(files) or 'none'})"
+        print(f"{key(repo, n)}: patch {patch} sha256 {digest} ({len(files)} file(s): {', '.join(files) or 'none'})"
               + (f"; its issue is #{n_issue}" if n_issue else "; its PR body names no issue") + (ancestry if a.since else ""))
+        if isinstance(old_verdict, dict) and (old_verdict.get("head_sha") != sha
+                                              or (old_anchor and old_anchor.get("patch_sha") != digest)):
+            print(f"  previous verdict invalidated: patch re-cut at {sha}")
         if a.since:
             print(render_round_prompt(repo, n, n_issue, prev, sha, patch))
         jc = judge_check(repo, n, sha, round_=a.since)
@@ -2483,7 +2546,7 @@ def cmd_judge(default: Repo | None, a):
             if jc.get("scope_only"):
                 print("  scope-only concerns — not a fix round: the implementing agent cannot un-ask a scope question. "
                       "Take it to the owner: accept as is, or split what was never asked into a follow-up issue.")
-        elif jc["flag"] in ("JUDGE-FAIL", "JUDGE-STALE"):
+        elif jc["flag"] in ("JUDGE-FAIL", "JUDGE-STALE", "JUDGE-PATCH-STALE"):
             print(f"  {jc['flag']}[{jc['detail']}]" + (" — judge again at this head" if jc["flag"] == "JUDGE-STALE" else ""))
         else:
             if (repo.handoffs / f"judge-{n}.json").exists():
@@ -2493,10 +2556,11 @@ def cmd_judge(default: Repo | None, a):
                   f" with the patch above, head sha {sha}, and the issue body")
             print(f'  it writes {repo.handoffs / f"judge-{n}.json"}:' +
                   ' {"verdict": "pass|fail|concerns", "head_sha": "<the 40-hex sha above>",'
+                  ' "patch_sha": "<the sha256 printed above, verbatim>",'
                   ' "findings": [{"file": "<path>", "line": <N>, "severity": "blocking|nit", "note": "<what is wrong>"}]}'
                   + (' — a round adds "previous": [<the findings it was asked to re-check, verbatim>] and "recheck": [{"file": "<path>", "line": <N>, "status": "fixed|not fixed"}], one answer per previous finding' if a.since else ''))
             print(f"  then re-run this command; `merge` refuses a PR without a pass verdict at the head it merges"
-                  f" (JUDGE-MISSING / JUDGE-FAIL / JUDGE-STALE); only `fail` or a `blocking` finding blocks — nits ride to the owner")
+                  f" (JUDGE-MISSING / JUDGE-FAIL / JUDGE-STALE / JUDGE-PATCH-STALE); only `fail` or a `blocking` finding blocks — nits ride to the owner")
         if jc["flag"]:
             bad += 1
     sys.exit(1 if bad else 0)
