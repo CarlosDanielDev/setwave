@@ -114,6 +114,15 @@ class MillerAudit(unittest.TestCase):
         for counter in ("Done-when blocks", "files", "ADR forks"):
             self.assertIn(counter, text, f"the audit counts {counter}")
 
+    def test_the_step_names_the_fork_numbers_explicitly(self):
+        """#127 review: `LIMITES["concepts"] = (1, 2)` — three named forks already reproves at lint,
+        not eight. A blanket "META = 5, TETO DURO = 7" made the fork counter drift from the gate."""
+        text = skill_text()
+        self.assertIn("items and files — META = 5, TETO DURO = 7, above 7 reproves", text,
+                      "the blanket numbers, scoped to the two counters they belong to")
+        self.assertIn("ADR forks — META = 1, TETO DURO = 2, above 2 reproves", text,
+                      "the fork numbers are the gate's own: three forks is already vermelho")
+
 
 if __name__ == "__main__":
     unittest.main()

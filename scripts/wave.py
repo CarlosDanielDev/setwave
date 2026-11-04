@@ -3364,8 +3364,9 @@ def lint_body(body: str, n: int, typ: str | None, *, title: str = "", depends_wi
     size = issue_size(body)
     if size["miller"] == "vermelho":
         missing.append(f"Miller vermelho ({size['items']} Done-when items, {size['files']} files cited, "
-                       f"{miller_concepts(body)} named ADR forks) is above the hard ceiling — items 7, files 7, "
-                       "forks 2 (acima de 7, reproves): split the issue into leaves that fit")
+                       f"{miller_concepts(body)} named ADR forks) is above the hard ceiling — items {LIMITES['items'][1]}, "
+                       f"files {LIMITES['files'][1]}, forks {LIMITES['concepts'][1]} (above it, reproves): "
+                       "split the issue into leaves that fit")
     return missing + (lint_type(body, typ) if typ else [])
 
 
@@ -3386,7 +3387,8 @@ def cmd_lint(default: Repo | None, a):
         size = issue_size(body)
         if size["miller"] == "âmbar":
             print(f"  WARNING: Miller âmbar ({size['items']} Done-when items, {size['files']} files cited, "
-                  f"{miller_concepts(body)} named ADR forks) — past the meta (5/5/1), inside the ceiling: "
+                  f"{miller_concepts(body)} named ADR forks) — past the meta "
+                  f"({LIMITES['items'][0]}/{LIMITES['files'][0]}/{LIMITES['concepts'][0]}), inside the ceiling: "
                   "consider splitting")
     sys.exit(1 if problems else 0)
 
