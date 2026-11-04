@@ -125,9 +125,14 @@ class ZoneLedger(unittest.TestCase):
             self.assertIn("estimate", p.stdout, "the zone read is an estimate wherever it prints")
 
     def test_stats_names_the_zone_while_no_usage_is_recorded(self):
+        """No usage yet: the row names the zone, and "no usage" says once — the ceiling clause
+        already carries it (#127)."""
         p = run_wave("stats")
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        self.assertIn("zone 100000: no usage", p.stdout)
+        row = next(l for l in p.stdout.splitlines() if l.lstrip().startswith("o/r#2"))
+        self.assertIn("ceiling 200000, no usage recorded", row, "the pinned budget substring stays")
+        self.assertIn("— zone 100000 (crude estimate)", row, "the zone is still named")
+        self.assertEqual(row.count("no usage"), 1, "the wording is deduped: one mention, not two")
 
     def test_agents_shows_each_seat_zone_state(self):
         self.usage(90000)

@@ -182,6 +182,12 @@ class MillerClass(unittest.TestCase):
         self.assertEqual([wave.zone_state(u, 100000) for u in (None, 1, 79999, 80000, 100000, 100001)],
                          ["no usage", "in-zone", "in-zone", "near-edge", "near-edge", "over"])
 
+    def test_the_zone_edge_is_exact_integer_math_on_non_round_zones(self):
+        """#127: `int(zone * 0.8)` truncates — zone 7 has its 80% edge at 5.6, so 5 sits in-zone and
+        6 turns near-edge; exact integer math (`used * 5 >= zone * 4`) never errs a token."""
+        self.assertEqual([wave.zone_state(u, 7) for u in (5, 6, 7, 8)],
+                         ["in-zone", "near-edge", "near-edge", "over"])
+
 
 if __name__ == "__main__":
     unittest.main()

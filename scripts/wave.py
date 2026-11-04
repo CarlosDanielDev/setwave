@@ -3417,7 +3417,7 @@ def zone_state(used: int | None, zone: int) -> str:
     No usage recorded is its own word — the zone reads spend, and spend needs the usage file."""
     if used is None:
         return "no usage"
-    return "over" if used > zone else "near-edge" if used >= int(zone * 0.8) else "in-zone"
+    return "over" if used > zone else "near-edge" if used * 5 >= zone * 4 else "in-zone"  # exact integer math (#127): int(zone * 0.8) truncated and erred a token on non-round zones (80% of 7 is 5.6 — 5 in-zone, 6 near-edge)
 
 
 # the Miller attention gate (#126), from the owner's vault kit `_AI/Skills/engenharia-de-atencao/miller-
@@ -4550,7 +4550,7 @@ def main(argv=None):
     x = s.add_parser("why", help="the premises behind READY / NOT READY for an issue, with evidence"); x.add_argument("refs", nargs="+")
     x = s.add_parser("doctor", help="preflight: gh, git, clean checkout, gate, protected paths, dead agents, retry ceiling, leftover worktrees, cargo cache, disk, batch size"); x.add_argument("--batch", type=int, default=4); x.add_argument("--fix-cache", action="store_true", help="move each half-extracted crate to ~/.config/setwave/quarantine/ (never deletes)"); x.add_argument("--epic", help="also run the state sweep of this epic as a soft check")
     x = s.add_parser("agents", help="every issue worktree: age since dispatch, minutes since the newest change, PR, verdict (working | stalled | likely dead | done); --check exits 1 naming the recovery; --watch blocks until a stall and exits 1 with its line")
-    x.add_argument("--line", action="store_true", help="one statusline line instead of the table: `setwave: N working · N stalled · N done(#PR) · N dead` — local stamps/state only, never gh, empty line and exit 0 outside a wave repo (< 120 chars, no color)")
+    x.add_argument("--line", action="store_true", help="one statusline line instead of the table: `setwave: N working · N stalled · N done(#PR) · N dead` — local stamps/state only, never gh, empty line and exit 0 outside a wave repo (< 120 chars, no color); wins over --check/--watch")
     x.add_argument("--check", action="store_true", help="exit 1 when an agent is stalled or likely dead, printing SendMessage (gate in foreground) or dispatch --force --respawn")
     x.add_argument("--watch", action="store_true", help="block until a worktree turns stalled or likely dead, then exit 1 with its line — arm it in the background; its ending is the notification")
     x.add_argument("--every", default="5m", metavar="N", help="watch poll interval: 45s | 5m | 1h | bare seconds (default 5m)")
@@ -4648,7 +4648,10 @@ def budget_rows() -> list[str]:
             if not isinstance(b, int) or isinstance(b, bool) or b <= 0:
                 continue
             used = tokens_used(wt)
-            z = f" — zone {zone}: {zone_state(used, zone)} (crude estimate)" if zone else ""
+            # the zone clause carries a state word only when there is spend to state it against: with none,
+            # the ceiling clause already said "no usage" — saying it twice was the #127 dedup
+            z = (f" — zone {zone}: {zone_state(used, zone)} (crude estimate)" if used is not None and zone
+                 else f" — zone {zone} (crude estimate)" if zone else "")
             rows.append(f"  {slug}#{n}: " + (f"{used} / {b} tokens ({round(used * 100 / b)}%)" if used is not None
                                              else f"ceiling {b}, no usage recorded") + z)
     return rows
