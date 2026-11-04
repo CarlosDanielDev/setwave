@@ -15,6 +15,7 @@ You are the independent judge of {{PR}} in `{{REPO}}`, judging a diff a round al
 - The body of {{ISSUE}} — the delta must keep the PR doing what the issue's `## Done when` asks.
 - The head sha now: `{{SHA}}`. Copy it verbatim into the verdict.
 - The sha256 of that delta, printed by `wave judge` next to its path: `{{PATCH_SHA}}`. Copy it verbatim into the verdict's `patch_sha`.
+- The grade of the kernel's mechanical fake-done scan of this delta: `{{REALITY}}`. Copy it verbatim into the verdict's `reality`. A `MAJOR` is a match in pre-existing context lines only — context for you, never a refusal on its own; a `BLOCKER` in the delta refuses before this prompt is ever rendered.
 
 Reading neighbouring files for context (a caller, a test that pins behaviour) is how you judge; changing anything is how you don't.
 
@@ -27,6 +28,7 @@ Write `{{OUT}}` with exactly this shape:
   "verdict": "pass | fail | concerns",
   "head_sha": "{{SHA}}",
   "patch_sha": "{{PATCH_SHA}}",
+  "reality": "{{REALITY}}",
   "findings": [{"file": "path/relative/to/the/repo", "line": 12, "severity": "blocking | nit", "note": "what is wrong and why it matters"}],
   "previous": [<the findings listed above, copied verbatim>],
   "recheck": [{"file": "the previous finding's file", "line": 12, "status": "fixed | not fixed"}]

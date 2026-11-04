@@ -109,8 +109,8 @@ def fake_judgement(root: Path, slug: str, pr: int) -> None:
     handoffs = root.parent / f"{root.name}-handoffs"
     handoffs.mkdir(parents=True, exist_ok=True)
     (handoffs / f"judge-{pr}.json").write_text(json.dumps(
-        {"verdict": "pass", "head_sha": sha,
-         "findings": [{"file": ".wave.json", "line": 1, "note": "e2e fake judge: plumbing only, not judgement"}]}))
+        {"verdict": "pass", "head_sha": sha, "reality": "clean",
+         "findings": [{"file": ".wave.json", "line": 1, "severity": "nit", "note": "e2e fake judge: plumbing only, not judgement"}]}))
 
 
 def main(argv=None) -> None:

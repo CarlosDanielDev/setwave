@@ -89,7 +89,7 @@ class Scope(unittest.TestCase):
 
     def seed(self, findings, verdict="concerns"):
         HANDOFFS.mkdir(parents=True, exist_ok=True)
-        VERDICT.write_text(json.dumps({"verdict": verdict, "head_sha": head_sha(), "findings": findings}))
+        VERDICT.write_text(json.dumps({"verdict": verdict, "head_sha": head_sha(), "reality": "clean", "findings": findings}))
 
     def scope_concern(self, **extra):
         return {"file": "g.txt", "line": 1, "severity": "nit", "note": "the hero was never asked", "scope": True, **extra}
@@ -187,13 +187,13 @@ class Plan(unittest.TestCase):
 
 class Schema(unittest.TestCase):
     def test_problems_of_a_good_verdict(self):
-        self.assertEqual(wave.verdict_problems({"verdict": "pass", "head_sha": "0" * 40, "findings": []}), [])
+        self.assertEqual(wave.verdict_problems({"verdict": "pass", "head_sha": "0" * 40, "reality": "clean", "findings": []}), [])
         self.assertEqual(wave.verdict_problems(
-            {"verdict": "concerns", "head_sha": "0" * 40,
+            {"verdict": "concerns", "head_sha": "0" * 40, "reality": "MAJOR",
              "findings": [{"file": "a.py", "line": 3, "severity": "nit", "note": "x"}]}), [])
 
     def test_problems_of_a_recheck(self):
-        good = {"verdict": "pass", "head_sha": "0" * 40, "findings": []}
+        good = {"verdict": "pass", "head_sha": "0" * 40, "reality": "clean", "findings": []}
         for rc in ([], [{"file": "a.py", "line": 1, "status": "fixed"}], [{"file": "a.py", "line": 2, "status": "not fixed"}]):
             self.assertEqual(wave.verdict_problems({**good, "recheck": rc}), [])
         for rc in ("yes", [{"file": "a.py", "line": 1}], [{"file": "a.py", "line": 0, "status": "fixed"}],
@@ -309,7 +309,7 @@ class PatchStaleness(unittest.TestCase):
     def verdict_with_patch_sha(self, patch_sha):
         HANDOFFS.mkdir(parents=True, exist_ok=True)
         VERDICT.write_text(json.dumps(
-            {"verdict": "pass", "head_sha": head_sha(), "findings": [], "patch_sha": patch_sha}))
+            {"verdict": "pass", "head_sha": head_sha(), "reality": "clean", "findings": [], "patch_sha": patch_sha}))
 
     def test_the_cut_records_the_patch_sha_of_the_round_in_the_sidecar(self):
         p = run_wave("judge", "20")
@@ -388,7 +388,7 @@ class PatchStaleness(unittest.TestCase):
         self.assertNotIn("previous verdict invalidated", p.stdout)
 
     def test_the_schemas_anchor_is_optional_but_checked(self):
-        good = {"verdict": "pass", "head_sha": "0" * 40, "findings": []}
+        good = {"verdict": "pass", "head_sha": "0" * 40, "reality": "clean", "findings": []}
         self.assertEqual(wave.verdict_problems({**good, "patch_sha": "a" * 64}), [])
         self.assertTrue(wave.verdict_problems({**good, "patch_sha": "abc"}))
         self.assertTrue(wave.verdict_problems({**good, "patch_sha": "a" * 64 + "\n"}))
