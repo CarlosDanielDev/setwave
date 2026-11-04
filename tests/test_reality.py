@@ -113,6 +113,22 @@ class Pure(unittest.TestCase):
         r = wave.judge_reality(patch_with(added="ok"), wave._deliverable_body(body))
         self.assertEqual(r["grade"], "BLOCKER")
 
+    def test_the_ledger_exclusion_ends_at_a_heading_of_any_level(self):
+        # done_when ends the ledger at a heading of any level 1-6, not only `##`: after `### Notes`
+        # the checkbox lines are scanned again
+        body = mark("## Done when\n\n- [x] no TO", "DO left in the diff\n\n### Notes\n\n- [ ] one more TO",
+                    "DO to strike\n")
+        r = wave.judge_reality(patch_with(added="ok"), wave._deliverable_body(body))
+        self.assertEqual(r["grade"], "BLOCKER")
+
+    def test_only_the_first_ledger_section_is_excluded(self):
+        # done_when reads the first `## Done when` section only: a second one, after another
+        # heading, is prose this gate scans
+        body = mark("## Done when\n\n- [x] no TO", "DO left in the diff\n\n## Notes\n\n## Done when\n\n- [ ] and a TO",
+                    "DO again\n")
+        r = wave.judge_reality(patch_with(added="ok"), wave._deliverable_body(body))
+        self.assertEqual(r["grade"], "BLOCKER")
+
     def test_a_marker_in_plain_body_prose_is_still_blocker(self):
         body = "## Notes\n\n" + TRIGGERS["todo_fixme"] + "\n"
         r = wave.judge_reality(patch_with(added="ok"), wave._deliverable_body(body))

@@ -2469,13 +2469,15 @@ def _deliverable_body(body: str) -> str:
     """The PR body minus its echoed Done-when ledger: every wave PR must carry its issue's checklist
     verbatim inside the `## Done when` section (the kernel refuses a ledger that differs), and that
     checklist names the pattern classes — it is the contract, not the delivered content. The
-    exclusion is bounded to that section, exactly as `done_when` reads it: from the `## Done when`
-    heading to the next heading. A checkbox line anywhere else is unpinned prose — a claim the body
-    makes about the work — and is scanned like the rest of the body."""
-    out, in_ledger = [], False
+    exclusion is exactly congruent with what `done_when` pins: the first `## Done when` section,
+    ended by a heading of any level (`HEADING`, `^#{1,6} `); a later `## Done when` heading starts
+    no second exclusion. A checkbox line anywhere else is unpinned prose — a claim the body makes
+    about the work — and is scanned like the rest of the body."""
+    out, in_ledger, seen = [], False, False
     for l in body.splitlines():
-        if l.startswith("## "):
-            in_ledger = DONE_WHEN.match(l) is not None
+        if HEADING.match(l):
+            in_ledger = not seen and DONE_WHEN.match(l) is not None
+            seen = seen or in_ledger
         elif in_ledger and CHECKLIST.match(l):
             continue
         out.append(l)
