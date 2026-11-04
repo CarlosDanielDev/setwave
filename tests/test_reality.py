@@ -127,6 +127,7 @@ class JudgeCheck(unittest.TestCase):
             (HANDOFFS / f).unlink(missing_ok=True)
 
     def seed(self, patch_text: str, reality_grade: str = "MAJOR") -> dict:
+        sandbox()  # the registry must exist before Repo.get: this class may run without its siblings
         repo = wave.Repo.get("o/r")
         sha = head_sha()
         HANDOFFS.mkdir(parents=True, exist_ok=True)
@@ -148,6 +149,7 @@ class JudgeCheck(unittest.TestCase):
         self.assertIn("lorem_ipsum", jc["detail"])
 
     def test_no_certified_patch_skips_the_scan(self):
+        sandbox()
         repo = wave.Repo.get("o/r")
         sha = head_sha()
         HANDOFFS.mkdir(parents=True, exist_ok=True)
@@ -168,6 +170,7 @@ class JudgeCmd(unittest.TestCase):
 
 class Prompt(unittest.TestCase):
     def test_the_round_prompt_carries_the_scan_grade_and_the_context_matches(self):
+        sandbox()  # the registry must exist before Repo.get: this class may run without its siblings
         delta = TMP / "fake-delta.patch"
         delta.write_text(patch_with(context=TRIGGERS["placeholder_text"]))
         try:
