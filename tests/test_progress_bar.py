@@ -364,6 +364,8 @@ class Docs(unittest.TestCase):
         self.assertIn("never spawns", flat, "no heavy spawn per render")
         cost = flat.split("what one render costs", 1)[1]
         self.assertIn("pr cache", cost, "the cost clause lists what seat_line actually reads")
+        self.assertIn(".wave.json", cost, "the line reads the repo config per render")
+        self.assertIn("registry", cost, "the line reads the registry entry per render")
         self.assertNotIn("tokens", cost, "seat_line never reads the tokens file: that is stats' ledger, not the line's")
 
     def test_the_line_help_carries_the_precedence_note(self):
