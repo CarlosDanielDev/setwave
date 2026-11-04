@@ -54,6 +54,22 @@
         "@type": "Answer",
         "text": "Batches of four, not eleven — the same result for a quarter of the tokens, no rate-limit deaths. A dead agent is resumed with its context, never redispatched from zero. Every run is logged, so wave stats answers from data."
       }
+    },
+    {
+      "@type": "Question",
+      "name": "How do I see what the seats are doing?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "The orchestrator prints the seat table in chat at every agent event. For a place you actually look, wave agents --line renders one statusline-ready line — setwave: 2 working · 1 stalled · 1 done(#99) · 0 dead — exit 0 always, local state only, never gh. A snippet in statusline/README.md appends the segment to your existing statusline; it never replaces it."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Won't a huge issue blow up the agent's context?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "setwave sizes every issue before dispatch: a crude, documented estimate — Done-when items × 8000 plus cited files × 4000 tokens — against a configurable band in .wave.json (smart_zone, default 100000). The Size: line always states it as an estimate, never a claim to read a live context window. If an implementer would drift out of the band where models perform best, dispatch warns loudly. Warn, never refuse."
+      }
     }
   ]
 }
@@ -273,9 +289,9 @@
   <div class="wrap">
     <div class="badge-row">
       <a class="badge" href="https://github.com/CarlosDanielDev/setwave/actions/workflows/ci.yml"><b>CI</b> passing</a>
-      <a class="badge" href="https://github.com/CarlosDanielDev/setwave/releases"><b>v0.7.1</b> latest</a>
-      <span class="badge"><b>332</b> tests</span>
-      <span class="badge"><b>92</b> guarantees</span>
+      <a class="badge" href="https://github.com/CarlosDanielDev/setwave/releases"><b>v0.10.0</b> latest</a>
+      <span class="badge"><b>547</b> tests</span>
+      <span class="badge"><b>116</b> guarantees</span>
       <span class="badge"><b>MIT</b> license</span>
     </div>
     <h1>One prompt.<br>A whole epic <em>merged</em>.</h1>
@@ -301,6 +317,8 @@
       <div class="w"><b>“It's done”</b><p>An agent says the work is green. You merge. CI goes red on something the agent never ran — and now five people know the merge was premature.</p></div>
       <div class="w"><b>Where were we?</b><p>The epic's state lives in a chat that scrolled away. Tomorrow, a new session starts from zero: which issues are blocked, which have PRs, which were abandoned mid-build.</p></div>
       <div class="w"><b>The merge stampede</b><p>Four green PRs, merged in the wrong order. The conflict lands after the fact, the fix goes in on top of it, and the diff that nobody reviewed becomes the diff that ships.</p></div>
+      <div class="w"><b>The context swamp</b><p>An agent's context swells far past the band where models perform best. Quality sags mid-issue and nobody notices until the judge does — by then the tokens are spent.</p></div>
+      <div class="w"><b>Four spinners, no signal</b><p>Four seats are running and your only dashboard is scrollback. Which one is done, which one died quietly, which is rate-limited — you find out by asking the chat.</p></div>
     </div>
     <p class="turn">setwave exists so that story ends: <b>one issue, one worktree, one agent — and a script that refuses every step you have not approved.</b></p>
   </div>
@@ -316,7 +334,7 @@
     <div class="steps">
       <div class="step"><span class="n">01</span><h3>doctor</h3><p>Every ✗ is a mistake dispatch would otherwise let happen: no gate, dirty checkout, dead agents, half-extracted caches.</p><span class="who">script</span></div>
       <div class="step"><span class="n">02</span><h3>next</h3><p>The leaves that are open, unblocked, without a PR, without a worktree — each in exactly one state.</p><span class="who">script</span></div>
-      <div class="step"><span class="n">03</span><h3>dispatch</h3><p>A worktree from origin/base, one prompt file per issue. You spawn one agent per file.</p><span class="who">script + you</span></div>
+      <div class="step"><span class="n">03</span><h3>dispatch</h3><p>A worktree from origin/base, one prompt file per issue — each sized against your smart-zone band. Drift out of it warns loudly; it never refuses. You spawn one agent per file.</p><span class="who">script + you</span></div>
       <div class="step"><span class="n">04</span><h3>verify</h3><p>Attribution grep = 0, protected paths untouched, CI green, ledger matches the issue. Relay nothing unverified.</p><span class="who">script</span></div>
       <div class="step"><span class="n">05</span><h3>judge</h3><p>A read-only agent hunts flaws in the scoped diff. The verdict is a typed artifact keyed to the head SHA.</p><span class="who">script + judge agent</span></div>
       <div class="step"><span class="n">06</span><h3>order</h3><p>Pairwise merge-tree, a chain simulation that names the PR that will conflict, serial paths queued.</p><span class="who">script</span></div>
@@ -342,6 +360,8 @@
           <li><b>The repo's real gate</b>, read from CI or the manifest — never invented</li>
           <li><b>A judge over its diff</b>, before any merge</li>
           <li><b>Sibling issues warned</b> when its PR changes symbols they cite</li>
+          <li><b>A documented context estimate</b> — the <code>Size:</code> line states the smart-zone fit, always as an estimate, never a claim to read a live window</li>
+          <li><b>A seat table in chat</b> at every agent event — and <code>wave agents --line</code> for your statusline</li>
         </ul>
       </div>
       <div class="state out">
@@ -393,8 +413,8 @@
     <h2>Built on itself, measured the whole way.</h2>
     <p class="sub">Every number below is real: the test suite, the guarantees ledger, the run log.</p>
     <div class="proof">
-      <div class="stat"><b>332</b><span>tests, stdlib only, fully offline</span></div>
-      <div class="stat"><b>82</b><span>of 92 guarantees pinned by a test</span></div>
+      <div class="stat"><b>547</b><span>tests, stdlib only, fully offline</span></div>
+      <div class="stat"><b>106</b><span>of 116 guarantees pinned by a test</span></div>
       <div class="stat"><b>5</b><span>releases shipped by the plugin itself</span></div>
       <div class="stat"><b>28+</b><span>PRs merged through the loop</span></div>
       <div class="stat"><b>864</b><span>logged runs, answerable from the log</span></div>
@@ -462,6 +482,18 @@
       <summary>What does it cost in tokens?</summary>
       <p>Batches of four, not eleven — the same result for a quarter of the tokens, no rate-limit deaths. A dead agent is resumed with its context, never redispatched from zero. Every run is logged, so <code>wave stats</code> answers from data.</p>
     </details>
+    <details>
+      <summary>How do I see what the seats are doing?</summary>
+      <p>The orchestrator prints the seat table in chat at every agent event. For a place you actually look, <code>wave agents --line</code> renders one statusline-ready line — <code>setwave: 2 working · 1 stalled · 1 done(#99) · 0 dead</code> — exit 0 always, local state only, never <code>gh</code>. A snippet in <code>statusline/README.md</code> appends the segment to your existing statusline; it never replaces it. Spawns are named <code>wave-&lt;N&gt;</code>, so the host renders its own per-agent progress rows too.</p>
+    </details>
+    <details>
+      <summary>Won't a huge issue blow up the agent's context?</summary>
+      <p>setwave sizes every issue before dispatch: a crude, documented estimate — Done-when items × 8000 plus cited files × 4000 tokens — against a band in <code>.wave.json</code> (<code>smart_zone</code>, default 100000). The <code>Size:</code> line always states it as an estimate, never a claim to read a live context window. If an implementer would drift out of the band where models perform best, <code>dispatch</code> warns loudly. Warn, never refuse.</p>
+    </details>
+    <details>
+      <summary>What is coming in the next release?</summary>
+      <p>The Miller attention gate. <code>wave lint</code> will hard-fail an issue past the attention ceiling — more than 7 Done-when items or cited files, more than 2 named ADR forks (Miller 1956, Cowan 2001); 6–7 warns amber, and the <code>Size:</code> line carries the <code>Miller:</code> class. It is merged to main and not in 0.10.0 — this page will say "released" when it is.</p>
+    </details>
   </div>
 </section>
 
@@ -513,6 +545,7 @@
     { op: "line", kind: "ok",  pr: "✓", html: "doctor — gate real · checkout clean · 4 agents alive · disk ok" },
     { op: "line", kind: "dim", pr: "″", html: "next (batch 4): <span class='br'>#35</span> <span class='br'>#36</span> <span class='br'>#37</span> <span class='br'>#38</span> — leaves, unblocked, no PR, no worktree" },
     { op: "line", kind: "dim", pr: "″", html: "dispatch → 4 worktrees from <span class='br'>origin/main</span> @ ecefb53 · 4 prompt files" },
+    { op: "line", kind: "dim", pr: "″", html: "size — <span class='br'>#35</span>–<span class='br'>#38</span> estimated inside the smart-zone band · drift warns, never refuses" },
 
     { op: "agent", id: "a35", br: "#35", branch: "feat/35-guard-hooks" },
     { op: "agent", id: "a36", br: "#36", branch: "feat/36-state-sweep" },
@@ -522,6 +555,7 @@
     { op: "update", id: "a35", st: "done", x: "PR opened · verify ✓ · CI green" },
     { op: "update", id: "a36", st: "done", x: "PR opened · verify ✓ · CI green" },
     { op: "update", id: "a37", st: "open", x: "rate-limited (429) · resuming from its own context" },
+    { op: "line",  kind: "dim", pr: "″", html: "wave agents --line → setwave: 1 working · 1 stalled · 2 done · 0 dead" },
     { op: "update", id: "a37", st: "done", x: "resumed · PR opened · verify ✓" },
     { op: "update", id: "a38", st: "done", x: "PR opened · verify ✓ · ledger matches" },
     { op: "line",  kind: "ok",  pr: "✓", html: "judge — 4 read-only reviews · 4 pass · verdicts keyed to head SHAs" },
@@ -624,7 +658,9 @@
     { c: "<b>wave epics</b>", d: "every open epic across your repos, sorted by ready work, with the command to continue" },
     { c: "<b>wave prepare</b> <span class='arg'>61</span>", d: "an issue without a handoff gets the facts written — and the judgement asked of you" },
     { c: "<b>wave doctor</b>", d: "every ✗ is a mistake dispatch would otherwise let happen" },
-    { c: "<b>wave stats</b>", d: "runs, durations and failures — from the log, not from memory" }
+    { c: "<b>wave stats</b>", d: "runs, durations and failures — from the log, not from memory" },
+    { c: "<b>wave agents</b> <span class='arg'>--line</span>", d: "one statusline-ready line: working, stalled, done, dead — exit 0 always, local state only, never gh" },
+    { c: "<b>.wave.json</b> <span class='arg'>&quot;smart_zone&quot;</span>", d: "the context band agents perform best in — every issue sized against it, drift warned, never refused" }
   ];
   var card = document.getElementById("flipcard");
   if (!card) return;
