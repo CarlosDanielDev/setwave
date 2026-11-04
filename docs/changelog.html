@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>setwave — changelog</title>
+<meta name="description" content="Every setwave release: the smart zone, the seat progress line, the working stack — newest first.">
+<meta name="theme-color" content="#0a1220">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230a1220'/%3E%3Cpath d='M10 36 Q 20 22 32 36 T 54 36' fill='none' stroke='%2345d6b8' stroke-width='6' stroke-linecap='round'/%3E%3Cpath d='M10 48 Q 20 36 32 48 T 54 48' fill='none' stroke='%2345d6b8' stroke-width='4' stroke-linecap='round' opacity='.55'/%3E%3C/svg%3E">
+<link rel="canonical" href="https://carlosdanieldev.github.io/setwave/changelog.html">
+<style>
+  :root {
+    --abyss: #0a1220;
+    --deep: #0f1a2c;
+    --swell: #16233a;
+    --foam: #eaf4f2;
+    --mist: #93a8bd;
+    --crest: #45d6b8;
+    --sand: #e8c88f;
+    --line: #22344e;
+    --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    --sans: "Sora", system-ui, -apple-system, sans-serif;
+    --display: "Bricolage Grotesque", "Sora", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } * { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+  html, body { overflow-x: clip; }
+  body { margin: 0; background: var(--abyss); color: var(--foam); font-family: var(--sans); font-size: 16.5px; line-height: 1.65; -webkit-font-smoothing: antialiased; scrollbar-gutter: stable; }
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 0 24px; }
+  .narrow { max-width: 820px; }
+  section { padding: 64px 0; }
+  h1, h2, h3 { font-family: var(--display); font-weight: 700; letter-spacing: -0.015em; text-wrap: balance; }
+  h2 { font-size: clamp(1.4rem, 3.4vw, 1.9rem); margin: 0 0 10px; }
+  .kicker { font-family: var(--mono); font-size: .78rem; letter-spacing: .22em; text-transform: uppercase; color: var(--crest); margin: 0 0 16px; }
+  .sub { color: var(--mist); font-size: 1.12rem; max-width: 62ch; margin: 0 0 10px; }
+  code { font-family: var(--mono); font-size: .9em; color: var(--crest); }
+
+  nav { position: sticky; top: 0; z-index: 20; background: color-mix(in srgb, var(--abyss) 82%, transparent); backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
+  nav .wrap { display: flex; align-items: center; gap: 22px; height: 58px; }
+  nav .brand { font-family: var(--mono); font-weight: 700; color: var(--foam); text-decoration: none; font-size: 1rem; }
+  nav .brand::before { content: "〰 "; color: var(--crest); }
+  nav a.link { color: var(--mist); text-decoration: none; font-size: .92rem; }
+  nav a.link:hover { color: var(--foam); }
+  nav .cta { margin-left: auto; }
+  .btn { display: inline-block; font-family: var(--mono); font-size: .92rem; font-weight: 600; padding: 11px 20px; border-radius: 8px; text-decoration: none; cursor: pointer; border: 1px solid transparent; transition: transform .12s ease, background .12s ease; }
+  .btn:hover { transform: translateY(-1px); }
+  .btn.ghost { border-color: var(--line); color: var(--foam); }
+  .btn.ghost:hover { border-color: var(--crest); }
+
+  header.page { padding: 72px 0 8px; }
+  header.page h1 { font-size: clamp(2rem, 6vw, 3rem); margin: 0 0 12px; }
+
+  .entry { border: 1px solid var(--line); border-radius: 12px; background: var(--deep); padding: 26px 28px; margin: 0 0 22px; }
+  .entry.latest { border-color: color-mix(in srgb, var(--crest) 40%, var(--line)); box-shadow: 0 0 0 1px rgba(69,214,184,.08), 0 18px 60px rgba(0,0,0,.4); }
+  .entry .meta { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+  .entry .ver { font-family: var(--mono); font-weight: 700; font-size: .95rem; color: var(--crest); background: color-mix(in srgb, var(--crest) 12%, transparent); border: 1px solid color-mix(in srgb, var(--crest) 35%, transparent); border-radius: 20px; padding: 2px 12px; }
+  .entry time { font-family: var(--mono); font-size: .8rem; color: var(--mist); }
+  .entry .tag { font-family: var(--mono); font-size: .72rem; letter-spacing: .14em; text-transform: uppercase; color: var(--sand); border: 1px solid color-mix(in srgb, var(--sand) 40%, transparent); border-radius: 20px; padding: 2px 10px; }
+  .entry ul { margin: 10px 0 16px; padding-left: 1.1em; color: var(--mist); }
+  .entry ul li { margin: 3px 0; }
+  .entry ul li b { color: var(--foam); font-weight: 600; }
+  .entry .rel { font-family: var(--mono); font-size: .85rem; color: var(--mist); text-decoration: none; }
+  .entry .rel:hover { color: var(--crest); }
+  .older { border-top: 1px solid var(--line); margin-top: 34px; padding-top: 30px; }
+  .older h3 { font-size: 1rem; margin: 18px 0 4px; }
+  .older .line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; margin: 6px 0; }
+  .older .line .ver { font-family: var(--mono); font-size: .85rem; color: var(--crest); min-width: 5.5ch; }
+  .older .line time { font-family: var(--mono); font-size: .78rem; color: var(--mist); }
+  .older .line a { color: var(--foam); text-decoration: none; }
+  .older .line a:hover { color: var(--crest); }
+
+  footer { border-top: 1px solid var(--line); padding: 44px 0 60px; color: var(--mist); font-size: .92rem; }
+  footer a { color: var(--mist); }
+  footer a:hover { color: var(--crest); }
+  @media (max-width: 640px) { .entry { padding: 20px 18px; } }
+</style>
+</head>
+<body id="top">
+<nav>
+  <div class="wrap">
+    <a class="brand" href="./">setwave</a>
+    <a class="link" href="./#problem">Why</a>
+    <a class="link" href="./#loop">The loop</a>
+    <a class="link" href="./#states">Inside a wave</a>
+    <a class="link" href="changelog.html">Changelog</a>
+    <a class="btn ghost cta" href="https://github.com/CarlosDanielDev/setwave">GitHub ↗</a>
+  </div>
+</nav>
+
+<header class="page">
+  <div class="wrap narrow">
+    <p class="kicker">Changelog</p>
+    <h1>Every wave, on the record.</h1>
+    <p class="sub">Newest first. Full notes live on each GitHub release — this page is the short version.</p>
+  </div>
+</header>
+
+<section>
+  <div class="wrap narrow">
+
+    <article class="entry latest">
+      <div class="meta"><span class="ver">0.10.0</span><time datetime="2026-11-03">2026-11-03</time><span class="tag">Latest</span></div>
+      <h2>Smart zone + seat progress line</h2>
+      <ul>
+        <li><b>Smart zone</b> — <code>smart_zone</code> config (default 100k): every issue gets a crude, documented context estimate; the <code>Size:</code> line states zone fit; <code>dispatch</code> warns loud when an implementer would drift out of the band. Warn, never refuse.</li>
+        <li><b>Seat progress line</b> — <code>wave agents --line</code> for your statusline (one line, exit 0 always, zero <code>gh</code>), a chaining snippet that never replaces your own statusline, the seat table mandated in chat at every agent event, and spawns named <code>wave-&lt;N&gt;</code> so the host renders its native progress rows.</li>
+        <li>529 tests, 115 guarantees (105 pinned), 11 mutation-checked guards.</li>
+      </ul>
+      <a class="rel" href="https://github.com/CarlosDanielDev/setwave/releases/tag/v0.10.0">Release notes ↗</a>
+    </article>
+
+    <article class="entry">
+      <div class="meta"><span class="ver">0.9.0</span><time datetime="2026-10-28">2026-10-28</time></div>
+      <h2>Wave 1 closes on its own loop</h2>
+      <ul>
+        <li>The epic loop ran its first full wave with the plugin shipping the enforcement: per-issue token <b>budget</b> with a stop-at-80% rule, small/medium/large <b>issue sizing</b> (a small issue skips the judge phase), scope-only judge concerns routed straight to the owner, and a no-CI fast exit that prints the exact merge command.</li>
+      </ul>
+      <a class="rel" href="https://github.com/CarlosDanielDev/setwave/releases/tag/v0.9.0">Release notes ↗</a>
+    </article>
+
+    <div class="older">
+      <p class="kicker">Earlier</p>
+      <div class="line"><span class="ver">0.8.0</span><time datetime="2026-10-20">2026-10-20</time><a href="https://github.com/CarlosDanielDev/setwave/releases/tag/v0.8.0">release notes ↗</a></div>
+      <div class="line"><span class="ver">0.7.1</span><time datetime="2026-10-15">2026-10-15</time><a href="https://github.com/CarlosDanielDev/setwave/releases/tag/v0.7.1">hardening the prompt ↗</a></div>
+      <div class="line"><span class="ver">0.7.0</span><time datetime="2026-10-14">2026-10-14</time><a href="https://github.com/CarlosDanielDev/setwave/releases/tag/v0.7.0">the working stack ships with the plugin ↗</a></div>
+      <div class="line"><span class="ver">0.6.0</span><time datetime="2026-10-10">2026-10-10</time><a href="https://github.com/CarlosDanielDev/setwave/releases/tag/v0.6.0">the late release and the guards the session produced ↗</a></div>
+      <div class="line"><span class="ver">0.5.0</span><time datetime="2026-10-09">2026-10-09</time><a href="https://github.com/CarlosDanielDev/setwave/releases/tag/v0.5.0">the superharness ↗</a></div>
+      <div class="line"><span class="ver">0.3.7</span><time datetime="2026-09-30">2026-09-30</time><a href="https://github.com/CarlosDanielDev/setwave/releases/tag/v0.3.7">lint knows a symbol is evidence ↗</a></div>
+      <div class="line"><span class="ver">0.3.6</span><time datetime="2026-09-30">2026-09-30</time><a href="https://github.com/CarlosDanielDev/setwave/releases/tag/v0.3.6">a repo says where its worktrees live ↗</a></div>
+      <div class="line"><span class="ver">0.3.5</span><time datetime="2026-09-30">2026-09-30</time><a href="https://github.com/CarlosDanielDev/setwave/releases/tag/v0.3.5">merge verifies again, and the guarantees are a command ↗</a></div>
+    </div>
+
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    setwave — one prompt, a whole epic merged. <a href="https://github.com/CarlosDanielDev/setwave">GitHub ↗</a>
+  </div>
+</footer>
+</body>
+</html>
