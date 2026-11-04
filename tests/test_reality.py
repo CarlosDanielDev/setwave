@@ -4,8 +4,8 @@ Port of claud-framework `backend/superframework/audit/reality_gate.py` (stdlib r
 the six false-completion classes fire BLOCKER on what the PR delivers (added diff lines + the PR
 body) and MAJOR on pre-existing context lines only — MAJOR never refuses, it rides the judge prompt
 as context. `judge_check` re-runs the scan on the certified patch at check time and refuses with
-JUDGE-REALITY-BLOCKER. Every trigger string below is built through `mark(...)`, split, so this file
-never trips the gate it tests on the very diff that ships it.
+JUDGE-REALITY-BLOCKER. Every trigger string below is built through the `mark` helper, split, so this
+file never trips the gate it tests on the very diff that ships it.
 """
 import hashlib
 import json
@@ -90,6 +90,17 @@ class Pure(unittest.TestCase):
         r = wave.judge_reality(patch_with(added="ok"), body=TRIGGERS["invented_number"])
         self.assertEqual(r["grade"], "BLOCKER")
         self.assertEqual(r["blockers"][0]["pattern"], "invented_number")
+
+    def test_a_marker_in_the_echoed_ledger_is_criteria_not_delivery(self):
+        # a wave PR body must carry its issue's ledger verbatim — the pattern classes included, by
+        # name — so the checklist lines are excluded from the body scan, never anything else
+        body = mark("## Done when\n\n- [x] no TO", "DO left in the diff\n\n## Notes\n\nplain prose\n")
+        self.assertEqual(wave.judge_reality(patch_with(added="ok"), wave._deliverable_body(body))["grade"], "clean")
+
+    def test_a_marker_in_plain_body_prose_is_still_blocker(self):
+        body = "## Notes\n\n" + TRIGGERS["todo_fixme"] + "\n"
+        r = wave.judge_reality(patch_with(added="ok"), wave._deliverable_body(body))
+        self.assertEqual(r["grade"], "BLOCKER")
 
     def test_a_removed_marker_is_a_fix_not_fake_done(self):
         self.assertEqual(wave.judge_reality(patch_with(removed=TRIGGERS["todo_fixme"]))["grade"], "clean")

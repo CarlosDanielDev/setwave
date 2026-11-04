@@ -2463,6 +2463,16 @@ def _context_lines(patch: str) -> str:
     return "\n".join(l[1:] for l in patch.splitlines() if l.startswith(" "))
 
 
+CHECKLIST = re.compile(r"(?m)^- \[[ x]\] ")
+
+def _deliverable_body(body: str) -> str:
+    """The PR body minus its echoed Done-when checklist: every wave PR must carry its issue's ledger
+    verbatim (the kernel refuses a ledger that differs), and the ledger states the criteria for the
+    diff — the pattern classes included, by name. The checklist is the contract, not the delivered
+    content, so it is not fake-done material; only the checklist lines are dropped."""
+    return "\n".join(l for l in body.splitlines() if not CHECKLIST.match(l))
+
+
 def judge_reality(patch: str, body: str = "") -> dict:
     """The mechanical grade of a cut patch (+ the PR body, at judge time): added lines and the body
     are what the PR delivers — a match there is BLOCKER; pre-existing context lines are preview —
@@ -2611,7 +2621,7 @@ def cmd_judge(default: Repo | None, a):
         if isinstance(old_verdict, dict) and (old_verdict.get("head_sha") != sha
                                               or (old_anchor and old_anchor.get("patch_sha") != digest)):
             print(f"  previous verdict invalidated: patch re-cut at {sha}")
-        reality = judge_reality(patch.read_text(), pr.get("body") or "")  # #134: zero-token, before any spawn
+        reality = judge_reality(patch.read_text(), _deliverable_body(pr.get("body") or ""))  # #134: zero-token, before any spawn
         print(f"  reality scan: {reality_note(reality)}")
         if reality["grade"] == "BLOCKER":
             print(f"  JUDGE-REALITY-BLOCKER[the mechanical fake-done scan refused before any judge was spawned: "
