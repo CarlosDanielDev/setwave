@@ -358,9 +358,13 @@ class Docs(unittest.TestCase):
 
     def test_the_statusline_readme_carries_the_per_render_cost(self):
         readme = (self.REPO / "statusline" / "README.md").read_text()
+        flat = " ".join(readme.lower().split())  # the pins are content pins, not line-wrap pins
         self.assertIn("git worktree list", readme, "what one render runs")
-        self.assertIn("per seat", readme.lower(), "the local probes of one render")
-        self.assertIn("never spawns", readme.lower(), "no heavy spawn per render")
+        self.assertIn("per seat", flat, "the local probes of one render")
+        self.assertIn("never spawns", flat, "no heavy spawn per render")
+        cost = flat.split("what one render costs", 1)[1]
+        self.assertIn("pr cache", cost, "the cost clause lists what seat_line actually reads")
+        self.assertNotIn("tokens", cost, "seat_line never reads the tokens file: that is stats' ledger, not the line's")
 
     def test_the_line_help_carries_the_precedence_note(self):
         p = run_wave("agents", "--help")

@@ -14,9 +14,9 @@ never breaks the statusline it is chained into.
 ## What one render costs
 
 One render runs `git worktree list` plus, per seat, local reads only — the dispatch
-stamp, the tokens file, the process probe. No `gh`, and it never spawns anything
-heavy: no sub-agents, no gate, no network. The per-render cost is a handful of local
-commands, every statusline turn.
+stamp, the process probe, the PR cache, a few git reads. No `gh`, and it never
+spawns anything heavy: no sub-agents, no gate, no network. The per-render cost is a
+handful of local commands, every statusline turn.
 
 ## Arm it (one paste, your statusline stays yours)
 
