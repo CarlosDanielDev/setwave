@@ -152,7 +152,7 @@ class Size(unittest.TestCase):
 
     def test_small_medium_large_by_items_and_files(self):
         small = "## Done when\n\n- [ ] a (`f.py:1`) — owner: x\n- [ ] b (`g.py:1`) — owner: x\n"
-        self.assertEqual(wave.issue_size(small), {"size": "small", "items": 2, "files": 2})
+        self.assertEqual(wave.issue_size(small), {"size": "small", "items": 2, "files": 2, "miller": "verde"})
         medium = small + "- [ ] c\n- [ ] d\n- [ ] e\n"
         self.assertEqual(wave.issue_size(medium)["size"], "medium", "5 items, few files: the middle size")
         self.assertEqual(wave.issue_size(medium + "- [ ] f\n")["size"], "large", "6 items is large on items alone")
@@ -208,6 +208,19 @@ class Size(unittest.TestCase):
         self.assertIn("Size: medium (4 Done-when items", p.stdout,
                       "the body still carries the stale `Size: small` line; dispatch computes its own")
         (TMP / "r-handoffs" / "68.md").unlink(missing_ok=True)  # --dry-run still writes the prompt file
+
+    def test_the_size_line_stamps_the_miller_class_and_amend_recomputes_it(self):
+        """#126: every Size stamp (prepare, amend, refresh, dispatch) carries `Miller: <class>`, and the
+        stamp follows the final Done when like the rest of the line (#120)."""
+        repo = wave.Repo.get("o/r")
+        prepared = wave.insert_section(BARE, wave.HANDOFF,
+                                       wave.handoff_block(repo, {"number": 70, "title": "Bare leaf",
+                                                                 "html_url": "u", "body": BARE}))
+        self.assertIn("Miller: verde", prepared, "a bare body stamps verde: nothing measured yet")
+        amended = wave.with_done_when(prepared, "- [ ] a\n" * 6)
+        final = wave.refresh_size(amended)
+        self.assertIn("Miller: âmbar", final, "6 items is past the meta of 5, inside the ceiling of 7")
+        self.assertNotIn("Miller: verde", final, "the stale stamp is gone")
 
     def test_the_skill_says_a_small_issue_runs_one_agent_without_judge_fix(self):
         skill = (WAVE.parent.parent / "skills" / "wave" / "SKILL.md").read_text()

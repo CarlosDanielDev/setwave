@@ -387,6 +387,34 @@ class TypedLint(unittest.TestCase):
             self.assertEqual(wave.lint_body(body, n, None), [], f"{k}.md")
 
 
+class MillerLint(unittest.TestCase):
+    """#126: the attention gate is hard on lint — vermelho fails (exit != 0) with the split-the-issue
+    message, âmbar warns with exit 0, verde prints nothing new."""
+
+    def test_vermelho_fails_lint_with_the_split_message(self):
+        p = run_wave("lint", "74")
+        self.assertEqual(p.returncode, 1, p.stdout)
+        self.assertIn("Miller vermelho (8 Done-when items, 1 files cited, 0 named ADR forks)", p.stdout)
+        self.assertIn("split the issue", p.stdout)
+
+    def test_ambar_warns_and_lint_still_passes(self):
+        p = run_wave("lint", "69")
+        self.assertEqual(p.returncode, 0, p.stdout)
+        self.assertIn("WARNING: Miller âmbar (6 Done-when items, 1 files cited, 0 named ADR forks)", p.stdout)
+        self.assertIn("inside the ceiling", p.stdout)
+
+    def test_verde_prints_nothing_new(self):
+        p = run_wave("lint", "66")
+        self.assertEqual(p.returncode, 0, p.stdout)
+        self.assertNotIn("Miller", p.stdout)
+
+    def test_the_guarantee_row_is_pinned_by_a_test(self):
+        row = next(r for r in wave.GUARANTEES if "Miller" in r[0])
+        self.assertTrue(row[3], "the promise is pinned by a test (this file's MillerLint)")
+        self.assertIn("exit != 0", row[0], "the gate is hard: lint fails on vermelho")
+        self.assertIn("Miller:", row[0], "the Size stamp carries the class")
+
+
 class Dispatch(unittest.TestCase):
     """One seat per agent: `resources` gives every prompt of a batch its own simulator ({N} and
     {WORKTREE} substitute too), the seat is stamped on the worktree and kept across --force/--respawn,

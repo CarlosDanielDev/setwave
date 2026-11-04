@@ -119,18 +119,64 @@ class ZoneEstimate(unittest.TestCase):
         self.assertEqual(wave.DEFAULT_ZONE, 100000)
 
     def test_the_size_line_says_estimate_and_the_fit(self):
-        fits = wave.size_note({"size": "small", "items": 1, "files": 1}, zone=100000)
+        fits = wave.size_note({"size": "small", "items": 1, "files": 1, "miller": "verde"}, zone=100000)
         self.assertIn("crude", fits, "the wording says crude, never a live context reading")
         self.assertIn("estimate", fits)
         self.assertIn("fits the zone", fits)
-        over = wave.size_note({"size": "large", "items": 30, "files": 10}, zone=100000)
+        over = wave.size_note({"size": "large", "items": 30, "files": 10, "miller": "vermelho"}, zone=100000)
         self.assertIn("over the zone — split", over)
 
-    def test_without_a_zone_the_size_line_is_unchanged(self):
+    def test_without_a_zone_the_zone_clause_is_absent(self):
         self.assertEqual(
-            wave.size_note({"size": "small", "items": 1, "files": 1}),
+            wave.size_note({"size": "small", "items": 1, "files": 1, "miller": "verde"}),
             "Size: small (1 Done-when items, 1 files cited) — one agent, no judge/fix phase — "
-            "the owner reviews the diff directly")
+            "the owner reviews the diff directly; Miller: verde")
+
+
+class MillerClass(unittest.TestCase):
+    """#126, the attention gate from the owner's vault kit (`_AI/Skills/engenharia-de-atencao/miller-
+    carga-cognitiva.md`; Miller 1956, Cowan 2001): META = 5, TETO DURO = 7, above 7 reproves. The
+    boundary is exact — 5 is still verde, 7 is still inside, 8 reproves."""
+
+    def test_the_constants_carry_meta_and_ceiling_per_dimension(self):
+        self.assertEqual(wave.LIMITES, {"items": (5, 7), "files": (5, 7), "concepts": (1, 2)})
+
+    def test_the_items_boundary_is_exact_4_5_6_7_8(self):
+        for n, want in ((4, "verde"), (5, "verde"), (6, "âmbar"), (7, "âmbar"), (8, "vermelho")):
+            with self.subTest(items=n):
+                self.assertEqual(wave.miller_class(n, 0, 0), want)
+
+    def test_the_files_boundary_is_exact_4_5_6_7_8(self):
+        for n, want in ((4, "verde"), (5, "verde"), (6, "âmbar"), (7, "âmbar"), (8, "vermelho")):
+            with self.subTest(files=n):
+                self.assertEqual(wave.miller_class(0, n, 0), want)
+
+    def test_the_concepts_boundary_is_exact(self):
+        # the kit's third counter is coarser: forks 1–2, so verde ends at 1 and everything past 2 reproves
+        for n, want in ((0, "verde"), (1, "verde"), (2, "âmbar"), (3, "vermelho")):
+            with self.subTest(concepts=n):
+                self.assertEqual(wave.miller_class(0, 0, n), want)
+        for n in (4, 5, 6, 7, 8):
+            with self.subTest(concepts=n):
+                self.assertEqual(wave.miller_class(0, 0, n), "vermelho")
+
+    def test_the_dimensions_combine_and_one_past_the_ceiling_reproves(self):
+        self.assertEqual(wave.miller_class(2, 4, 1), "verde")
+        self.assertEqual(wave.miller_class(2, 4, 2), "âmbar")
+        self.assertEqual(wave.miller_class(5, 8, 1), "vermelho", "one dimension past the ceiling reproves")
+        self.assertEqual(wave.miller_class(8, 1, 1), "vermelho")
+
+    def test_the_named_adr_forks_come_from_the_stub(self):
+        body = "## ADR stub\n\nWhere the class lives: (a) beside `issue_size`; (b) a new section.\n"
+        self.assertEqual(wave.miller_concepts(body), 2)
+        self.assertEqual(wave.miller_concepts("## ADR stub\n\nOne option, no fork named.\n"), 0)
+        self.assertEqual(wave.miller_concepts("no stub here"), 0)
+
+    def test_issue_size_counts_miller_from_the_body(self):
+        body = "## Done when\n\n" + "- [ ] a\n" * 6
+        self.assertEqual(wave.issue_size(body)["miller"], "âmbar", "6 items: past the meta of 5, inside the ceiling of 7")
+        body += "- [ ] b\n- [ ] c\n"
+        self.assertEqual(wave.issue_size(body)["miller"], "vermelho", "8 items is past the hard ceiling")
 
     def test_the_zone_state_words(self):
         self.assertEqual([wave.zone_state(u, 100000) for u in (None, 1, 79999, 80000, 100000, 100001)],
