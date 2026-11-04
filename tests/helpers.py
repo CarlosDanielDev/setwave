@@ -143,7 +143,9 @@ def judge_pass(pr: int, verdict: str = "pass", sha: str | None = None, severity:
         "verdict": verdict, "head_sha": sha or repo.git(["rev-parse", f"origin/{branch}"]).strip(),
         "reality": "clean",
         "findings": [] if verdict == "pass"
-        else [{"file": "g.txt", "line": 1, "severity": severity, "note": "the seeded fault"}]}))
+        else [{"file": "g.txt", "line": 1, "severity": severity, "note": "the seeded fault",
+               # #135: the way the judge writes a blocking finding since the evidence gate — a nit needs none
+               **({"evidence": "verified", "quote": "g"} if severity == "blocking" else {})}]}))
     return f
 
 
