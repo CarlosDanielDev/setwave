@@ -1901,6 +1901,25 @@ def budget_of(a, repo: Repo) -> int | None:
     return raw
 
 
+def zone_of(repo: Repo) -> int:
+    """The smart zone (#121): `smart_zone` in .wave.json, validated exactly like `budget` — a positive
+    number of tokens or nothing, DEFAULT_ZONE speaking when absent. A bad value refuses wherever
+    budget's would: dispatch, before any worktree exists, and `wave prompt` too."""
+    raw = repo.cfg.get("smart_zone")
+    if raw is not None and (not isinstance(raw, int) or isinstance(raw, bool) or raw <= 0):
+        raise SystemExit(f"{repo.slug}: `smart_zone` must be a positive number of tokens — `{raw}` is not")
+    return raw or DEFAULT_ZONE
+
+
+def zone_or_none(repo: Repo) -> int | None:
+    """zone_of without the refusal, for read-only prints (`stats`, `agents`): diagnostics never die
+    on config, so an invalid value simply carries no zone clause."""
+    raw = repo.cfg.get("smart_zone")
+    if raw is None:
+        return DEFAULT_ZONE
+    return raw if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0 else None
+
+
 def cmd_dispatch(default: Repo | None, a):
     targets = [parse_ref(r, default) for r in a.issues]
     if not a.dry_run and not a.force:
@@ -1921,6 +1940,7 @@ def cmd_dispatch(default: Repo | None, a):
                              f"{', '.join('{' + x + '}' for x in left)} and no seat resolves it — declare `resources` "
                              "in `.wave.json` (one value per parallel agent) or fix the gate")
         budget_of(a, repo)  # the flag and the config value validated before any worktree exists
+        zone_of(repo)  # `smart_zone` validated the same way, the same moment (#121)
         repo.fetch()
         sync_provider(repo, a.dry_run)
         repo.handoffs.mkdir(exist_ok=True)
@@ -1975,6 +1995,8 @@ def cmd_dispatch(default: Repo | None, a):
             raise SystemExit(f"dispatch refused: addendum {addendum_file} is not a file")
         addendum = addendum_file.read_text() if addendum_file else ""
         budget = budget_of(a, repo)  # --budget wins over the .wave.json default, both validated
+        zone = zone_of(repo)  # the same validated default `dispatch` applies, like budget (#121)
+        size = issue_size(iss.get("body") or "")
         path.write_text(render_prompt(repo, iss, branch, sha, len(targets), seats.get(key(repo, n)), budget=budget) + addendum)
         if not a.dry_run:  # the stamp `agents`, `doctor` and the retry ceiling read; a re-dispatch (--force) is a new agent, so a new stamp
             stamp = {"issue": n, "repo": repo.slug, "dispatched_at": now_iso(), "prompt": str(path),
@@ -1997,7 +2019,10 @@ def cmd_dispatch(default: Repo | None, a):
                     excl_path.parent.mkdir(parents=True, exist_ok=True)
                     excl_path.write_text(text + ("\n" if text and not text.endswith("\n") else "") + "\n".join(missing) + "\n")
         print(f"{key(repo, n)}: {branch} -> {wt}\n    prompt: {path}   (base origin/{repo.base} = {sha})")
-        print(f"    {size_note(issue_size(iss.get('body') or ''))}")
+        print(f"    {size_note(size, zone)}")
+        if zone_estimate(size) > zone:  # a warning, never a refusal: the budget ceiling stays the only hard brake
+            print(f"    ! context estimate ~{zone_estimate(size)} tokens is over the zone of {zone} — a crude "
+                  f"estimate from the issue's text, not a live context window: split this issue before dispatching it")
     print("\nDispatch one Agent (general-purpose) per prompt file, all in ONE message; prompt = file content verbatim.")
     print("Arm the stall watchdog in the background: `wave agents --watch` — it exits 1 with the worktree's line the moment an agent stalls (no process) or dies.")
 
@@ -2007,6 +2032,7 @@ def cmd_prompt(default: Repo | None, a):
     repo.fetch()
     iss = repo.issue(n)
     budget = budget_of(a, repo)  # the same validated default `dispatch` applies (#120, round 2)
+    zone_of(repo)  # `smart_zone` validated on the prompt path too, exactly like budget (#121)
     print(render_prompt(repo, iss, branch_for(iss), repo.origin_sha(), a.parallel, budget=budget))
 
 
@@ -3245,6 +3271,28 @@ PREPARE_COMMENT = "handoff added by `wave prepare`"
 
 SIZE_FILE = re.compile(r"[\w./-]+\.(?:rs|ts|tsx|js|jsx|py|go|swift|kt|rb|php|cs|java|yml|yaml|toml|json|md)\b")
 
+# the smart zone (#121): models perform best near ~100k tokens of context — the owner's heuristic,
+# not a scientific constant, so the number is `smart_zone` in .wave.json and the estimate prints as an
+# estimate. The crude math: one Done-when item of reading + work, one cited file read into context.
+DEFAULT_ZONE = 100000
+TOKENS_PER_ITEM = 8000
+TOKENS_PER_FILE = 4000
+
+
+def zone_estimate(size: dict) -> int:
+    """Crude, documented estimate of the implementer's context (#121): Done-when items x TOKENS_PER_ITEM
+    plus cited files x TOKENS_PER_FILE. An estimate from the issue's text alone — never a live context
+    reading, and the wording that says so rides every print of it."""
+    return size["items"] * TOKENS_PER_ITEM + size["files"] * TOKENS_PER_FILE
+
+
+def zone_state(used: int | None, zone: int) -> str:
+    """The zone words every seat and stats row prints: in-zone | near-edge (>= 80% of the zone) | over.
+    No usage recorded is its own word — the zone reads spend, and spend needs the usage file."""
+    if used is None:
+        return "no usage"
+    return "over" if used > zone else "near-edge" if used >= int(zone * 0.8) else "in-zone"
+
 
 def issue_size(body: str) -> dict:
     """#119: small | medium | large from the Done-when item count and the cited files — a small issue runs
@@ -3255,25 +3303,32 @@ def issue_size(body: str) -> dict:
     return {"size": size, "items": items, "files": len(files)}
 
 
-def size_note(size: dict) -> str:
-    """The handoff's `Size:` line: the classification and what it means for the pipeline."""
+def size_note(size: dict, zone: int | None = None) -> str:
+    """The handoff's `Size:` line: the classification, what it means for the pipeline and — when a
+    zone is given — the fit of the crude context estimate (#121). The fit wording is always estimate
+    wording; the line never claims to read a live context window."""
     pipe = {"small": "one agent, no judge/fix phase — the owner reviews the diff directly",
             "medium": "the full pipeline: implement, judge, fix only on a blocking finding",
             "large": "the full pipeline, and consider splitting the issue before dispatch"}[size["size"]]
-    return f"Size: {size['size']} ({size['items']} Done-when items, {size['files']} files cited) — {pipe}"
+    line = f"Size: {size['size']} ({size['items']} Done-when items, {size['files']} files cited) — {pipe}"
+    if zone is None:
+        return line
+    est = zone_estimate(size)
+    return line + f"; crude context estimate ~{est} tokens vs zone {zone} — " + \
+        ("fits the zone" if est <= zone else "over the zone — split")
 
 
-def refresh_size(body: str) -> str:
+def refresh_size(body: str, zone: int | None = None) -> str:
     """The body with the Handoff's `Size:` line recomputed from the current Done when: the line prepare
     stamped can predate the owner's answers (`prepare` runs before `amend`), and a stale `small (0 items)`
     would route a four-item issue to one agent with no judge/fix (#120). Upserted in place, every other
-    byte kept; a body without a Handoff is returned unchanged."""
+    byte kept; a body without a Handoff is returned unchanged. The zone clause follows the same body."""
     lines = body.splitlines(keepends=True)
     start = next((i for i, l in enumerate(lines) if HANDOFF.match(l.rstrip("\r\n"))), None)
     if start is None:
         return body
     end = next((i for i in range(start + 1, len(lines)) if HEADING.match(lines[i])), len(lines))
-    line = size_note(issue_size(body))
+    line = size_note(issue_size(body), zone)
     at = next((i for i in range(start + 1, end) if lines[i].startswith("Size: ")), None)
     if at is not None:
         lines[at] = line + "\n"
@@ -3299,7 +3354,7 @@ def handoff_block(repo: Repo, iss: dict) -> str:
         f"Base `origin/{repo.base}` at `{repo.origin_sha()}`. Gate:",
         "", "```bash", *gate, "```", "",
         "Skills: " + skill_list(skills), "",
-        size_note(issue_size(iss.get("body") or "")), "",
+        size_note(issue_size(iss.get("body") or ""), zone_of(repo)), "",
         "Non-negotiables: no AI attribution in commits or PRs; never `git gc --prune`, `git reflog expire`, "
         "`git stash`, `git reset --hard`, `git clean -f`, `git push --force*`, `git branch -D`, `rm -rf`; "
         "never merge — the owner merges; never touch the main checkout or a sibling worktree; "
@@ -3382,7 +3437,7 @@ def cmd_prepare(default: Repo | None, a):
                                      "updated": "Handoff updated in place in the body",
                                      "current": "Handoff already current — nothing written"}[what]
               + f" (branch {branch_for(iss)}, worktree {repo.worktree(n)}, base {repo.base} @ {repo.origin_sha()})")
-        print(f"  {size_note(issue_size(iss.get('body') or ''))}")
+        print(f"  {size_note(issue_size(iss.get('body') or ''), zone_of(repo))}")
         if not gaps:
             print("  nothing to ask: the issue carries its own judgement")
         else:
@@ -3413,7 +3468,7 @@ def cmd_amend(default: Repo | None, a):
     except ValueError as e:
         print(f"amend refused: {key(repo, n)}: {e}", file=sys.stderr)
         sys.exit(2)
-    new = refresh_size(new)  # the Size the handoff stamped may predate these answers: routing reads it (#120)
+    new = refresh_size(new, zone_of(repo))  # the Size the handoff stamped may predate these answers: routing reads it (#120)
     edit_issue_body(repo, n, body, new)
     print(f"{key(repo, n)}: Done-when written ({len(items)} item(s)); verify can now compare the PR's ledger")
 
@@ -3567,11 +3622,13 @@ def cmd_agents(default: Repo | None, a):
         for r in bad:
             print("\n".join(wake_lines(default, r)))
         raise SystemExit(1)
+    zone = zone_or_none(default)  # diagnostics never refuse on config; an invalid value carries no zone clause
     print(f"{len(rows)} worktree(s) of {default.slug} — working < {WORKING_MIN} min since the newest change, quiet turns stalled (no process) up to {DEAD_MIN}, then likely dead unless a PR is open")
     for r in sorted(rows, key=lambda x: x["issue"]):
+        z = f"zone: {zone_state(tokens_used(Path(r['worktree'])), zone)} (estimate)   " if zone else ""
         print(f"  {key(default, r['issue']):<24} {Path(r['worktree']).name:<20} "
               f"dispatched {'?' if r['age_min'] is None else r['age_min']} min ago   changed {r['idle_min']} min ago   "
-              f"{'PR #' + str(r['pr']) if r['pr'] else 'no PR':<8} {r['state']:<9} {agent_verdict(r)}")
+              f"{'PR #' + str(r['pr']) if r['pr'] else 'no PR':<8} {r['state']:<9} {z}{agent_verdict(r)}")
 
 
 def pinned_destination(g: str) -> bool:
@@ -4038,6 +4095,7 @@ GUARANTEES = [
     ("lint warns when the title/body promises a visible result (tela, copy, layout) and no Done-when item verifies one", "lint_body (title=) -> VISIBLE", "WARNING: ... promises a visible result ...", True),
     ("dispatch refuses a prompt whose gate still carries a placeholder no seat resolves", "cmd_dispatch + render_prompt -> unresolved_seats", "dispatch/prompt refused: the gate carries {SIMULATOR} and no seat resolves it", True),
     ("merge never arms the CI wait for a repo that cannot produce checks, even when the checks read fails; every NO-CI stop — the verify gate's, the no-evidence refusal's and the wait's — prints the ready gh pr merge command", "merge_ci_step + match_head_commit_cmd <- cmd_merge", "NO-CI stop in seconds with `gh pr merge <N> -R <slug> --squash --match-head-commit <sha>`", True),
+    ("the smart zone keeps every implementer in the context band where models perform best (#121): `smart_zone` in .wave.json validated exactly like `budget` (positive int, default 100000 — the owner's heuristic, never claimed as science), the Size line states the fit of a crude documented context estimate, dispatch warns `!` with split advice over the zone and never refuses, and stats/agents show spend and state vs zone", "zone_of -> size_note, cmd_dispatch, budget_rows, cmd_agents", "the zone clause of the Size line; the `!` over-zone warning; the zone words in `wave stats` and `wave agents` — estimate wording everywhere", True),
 ]
 
 
@@ -4421,13 +4479,15 @@ def budget_rows() -> list[str]:
             wts = issue_worktrees(repo)
         except SystemExit:
             continue
+        zone = zone_or_none(repo)  # read-only: an invalid `smart_zone` simply carries no zone clause
         for wt, _branch, n in wts:
             b = stamp_of(wt).get("budget")
             if not isinstance(b, int) or isinstance(b, bool) or b <= 0:
                 continue
             used = tokens_used(wt)
+            z = f" — zone {zone}: {zone_state(used, zone)} (crude estimate)" if zone else ""
             rows.append(f"  {slug}#{n}: " + (f"{used} / {b} tokens ({round(used * 100 / b)}%)" if used is not None
-                                             else f"ceiling {b}, no usage recorded"))
+                                             else f"ceiling {b}, no usage recorded") + z)
     return rows
 
 
