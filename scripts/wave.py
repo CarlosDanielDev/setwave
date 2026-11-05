@@ -2306,6 +2306,11 @@ def verify_one(repo: Repo, pr: dict, epic_nodes: dict | None = None) -> dict:
 
 
 VERDICTS = ("pass", "fail", "concerns")
+# #135, the evidence gate: the kinds of proof a finding may cite, and the only two a blocking finding
+# may stand on — `executed` (the judge ran the failing command) and `verified` (the judge read the
+# fault directly in the diff or the repo). `inferred` and `proposed` are for nits.
+EVIDENCE_KINDS = ("executed", "verified", "inferred", "proposed")
+BLOCKING_EVIDENCE = ("verified", "executed")
 
 
 def bad_ref(where: str, i: int, f) -> str | None:
@@ -2319,8 +2324,10 @@ def bad_ref(where: str, i: int, f) -> str | None:
 
 def verdict_problems(v) -> list[str]:
     """What disqualifies `v` as a judge verdict: the enum, a full 40-hex sha, findings that cite file and a 1-based
-    line; fail and concerns must name at least one finding. A `recheck` present in any verdict is format-checked
-    here; whether a round verdict must carry one is `round_problems`, judged after staleness. Extra keys are tolerated."""
+    line, an `evidence` kind inside the enum and a `quote` that is a quoted line when present; fail and concerns
+    must name at least one finding. A `recheck` present in any verdict is format-checked here; whether a round
+    verdict must carry one is `round_problems`, judged after staleness. Extra keys are tolerated. Whether a
+    blocking finding's evidence is good enough is not a schema question — that is `judge_check`'s gate."""
     if not isinstance(v, dict):
         return ["the verdict is not a JSON object"]
     bad = []
@@ -2345,6 +2352,10 @@ def verdict_problems(v) -> list[str]:
                 bad.append(f"findings[{i}].note must say what is wrong")
             elif f.get("severity") not in ("blocking", "nit"):
                 bad.append(f"findings[{i}].severity must be blocking|nit")
+            elif "evidence" in f and f.get("evidence") not in EVIDENCE_KINDS:
+                bad.append(f"findings[{i}].evidence must be one of {'|'.join(EVIDENCE_KINDS)}")
+            elif "quote" in f and (not isinstance(f.get("quote"), str) or not f["quote"]):
+                bad.append(f"findings[{i}].quote must be the excerpt of the file the finding cites")
             elif "scope" in f and not isinstance(f.get("scope"), bool):
                 bad.append(f"findings[{i}].scope must be a boolean when present")
         if v.get("verdict") in ("fail", "concerns") and not fs:
@@ -2527,7 +2538,7 @@ def reality_note(reality: dict) -> str:
 
 def judge_check(repo: Repo, n: int, head_sha: str, round_: bool = False, body: str = "") -> dict:
     """The judge's verdict for PR `n`, re-validated by the kernel: `flag` is None only when a schema-valid verdict
-    says `pass` at exactly `head_sha` with a certified, fake-done-free patch; anything else is one of the five
+    says `pass` at exactly `head_sha` with a certified, fake-done-free patch; anything else is one of the six
     JUDGE refusals (merge never trusts the file, the plan, or this command's earlier answer — the sha is re-checked
     where the merge happens)."""
     path = repo.handoffs / f"judge-{n}.json"
@@ -2540,6 +2551,22 @@ def judge_check(repo: Repo, n: int, head_sha: str, round_: bool = False, body: s
     bad = verdict_problems(v)
     if bad:
         return {"flag": "JUDGE-MISSING", "detail": f"{path.name}: " + "; ".join(bad)}
+    # #135, the evidence gate: a blocking finding without cited evidence is the judge's opinion, not a fact the
+    # merge can stand on. The refusal (JUDGE-EVIDENCE) sends the verdict back for a re-judge with the reason —
+    # never a silent demotion: demoting would smuggle the unproven opinion into the verdict as a nit, hiding it
+    # from the exact decision (merge or not) it was written to inform. Nits never need evidence, never block.
+    unevidenced = [f for f in v["findings"] if f["severity"] == "blocking"
+                   and (f.get("evidence") not in BLOCKING_EVIDENCE
+                        or not isinstance(f.get("quote"), str) or not f["quote"])]
+    if unevidenced:
+        where = "; ".join(f"{f['file']}:{f['line']} (evidence {f.get('evidence') or 'none'}, quote "
+                          f"{'present' if isinstance(f.get('quote'), str) and f['quote'] else 'none'})"
+                          for f in unevidenced[:3])
+        return {"flag": "JUDGE-EVIDENCE",
+                "detail": (f"blocking finding without evidence: {where} — a blocking claim carries `evidence` "
+                           "`verified` or `executed` and the `quote` (file:line + the excerpt) it stands on; "
+                           "refused, never demoted: judge again with the evidence in hand"),
+                "verdict": v["verdict"], "head_sha": v["head_sha"], "findings": v["findings"]}
     blocking = [f for f in v["findings"] if f["severity"] == "blocking"]
     if v["verdict"] == "fail" or blocking:
         where = "; ".join(f"{f['file']}:{f['line']} {f['note']}" for f in (blocking or v["findings"])[:3])
@@ -2685,10 +2712,13 @@ def cmd_judge(default: Repo | None, a):
                   ' {"verdict": "pass|fail|concerns", "head_sha": "<the 40-hex sha above>",'
                   ' "patch_sha": "<the sha256 printed above, verbatim>",'
                   ' "reality": "<clean|MAJOR|BLOCKER — the grade of the reality scan printed above, verbatim>",'
-                  ' "findings": [{"file": "<path>", "line": <N>, "severity": "blocking|nit", "note": "<what is wrong>"}]}'
+                  ' "findings": [{"file": "<path>", "line": <N>, "severity": "blocking|nit", "note": "<what is wrong>",'
+                  ' "evidence": "executed|verified|inferred|proposed", "quote": "<the excerpt of the file the finding cites>"}]}'
+                  ' — a `blocking` finding must carry `evidence` `verified` or `executed` plus its `quote`,'
+                  ' or the kernel refuses the verdict (JUDGE-EVIDENCE), it is never demoted'
                   + (' — a round adds "previous": [<the findings it was asked to re-check, verbatim>] and "recheck": [{"file": "<path>", "line": <N>, "status": "fixed|not fixed"}], one answer per previous finding' if a.since else ''))
             print(f"  then re-run this command; `merge` refuses a PR without a pass verdict at the head it merges"
-                  f" (JUDGE-MISSING / JUDGE-FAIL / JUDGE-STALE / JUDGE-PATCH-STALE / JUDGE-REALITY-BLOCKER); only `fail` or a `blocking` finding blocks — nits ride to the owner")
+                  f" (JUDGE-MISSING / JUDGE-FAIL / JUDGE-STALE / JUDGE-PATCH-STALE / JUDGE-REALITY-BLOCKER / JUDGE-EVIDENCE); only `fail` or a `blocking` finding blocks — nits ride to the owner")
         if jc["flag"]:
             bad += 1
     sys.exit(1 if bad else 0)
@@ -4390,6 +4420,7 @@ GUARANTEES = [
     ("no merge of a PR the judge failed, or where a blocking finding stands — nits and a nits-only concerns never refuse", "cmd_merge -> judge_check", "JUDGE-FAIL[verdict fail: <file:line, ...>]", True),
     ("no merge on a verdict whose head_sha is not the head being merged: any push invalidates the judgement", "cmd_merge -> judge_check", "JUDGE-STALE[the verdict is for abc1234, the head is def5678]", True),
     ("a judge round re-judges the delta against the previous findings — `judge <PR> --since` writes `judge-<PR>.delta.patch` (`<previous head>..<head>`) and the round prompt cites each earlier finding; only `fail` or a `blocking` finding refuses a merge, a `concerns` carrying nits alone never does", "judge_check + cmd_judge --since <- cmd_merge", "JUDGE-FAIL names the blocking finding; nits-only concerns is fresh with its nit count; the round prompt lists every previous finding", True),
+    ("#108: a verdict never certifies a patch that is not the diff of the head it names — `wave judge` anchors the cut at cut time (the patch content's sha256 + the head, in `judge-<PR>.patch.sha`) and the verdict may carry the same `patch_sha`; `judge_check` refuses (`JUDGE-PATCH-STALE`) when the patch on disk is not the diff the verdict certified, not the patch the last cut wrote, or was cut at another head — the #107 hole (a push between cut and judgement let a round certify a head whose diff it never saw) is refused by the anchor, not by the head sha alone", "judge_check -> judge_patch_problems", "JUDGE-PATCH-STALE[...]; tests/test_judge.py::PatchStaleness; the mutation evidence lives in PR #136", True),
     ("tick changes only the open lines it names, every other byte kept; a body without `## Done when` is refused", "tick_body (cmd_tick, apply_ledger)", "exit 2: tick refused: ...", True),
     ("verify names sibling issues that cite files the PR touched", "verify_one --epic", "notify lines", False),
     ("order predicts pairwise and chained textual conflicts", "cmd_order", "pairs + chain ✗", True),
@@ -4447,6 +4478,7 @@ GUARANTEES = [
     ("the Miller attention gate (#126, the kit's META 5 / TETO DURO 7 / acima de 7 reproves): lint fails (exit != 0) on vermelho with the split-the-issue message, warns on âmbar with exit 0, prints nothing new on verde, and every Size stamp (prepare, amend, refresh, dispatch) carries `Miller: <class>`", "cmd_lint -> lint_body -> miller_class; issue_size -> size_note", "wave lint o/r#74 exits 1 naming the ceiling; the boundary 4/5/6/7/8 per dimension is pinned in tests/test_pure.py", True),
     ("a concerns verdict whose findings all carry scope:true is not a fix round: judge says so and the owner is asked accept / follow-up", "verdict_problems + judge_check -> cmd_judge; the SKILL's step 5", "`scope-only concerns` in `wave judge` output", True),
     ("#134: a mechanical fake-done scan (the REALITY_PATTERNS classes) runs on what the PR delivers — the added diff lines, the destination paths the diff headers name, and the PR body minus its echoed ledger — before the judge spawns; a BLOCKER grade refuses — at judge time before any spawn, at merge time re-run by judge_check at the same scope — and MAJOR (context-line matches only) never refuses, it rides the judge prompt; the verdict echoes the grade in `reality`, the kernel never trusts that echo", "cmd_judge + judge_check -> judge_reality", "`reality scan:` line; JUDGE-REALITY-BLOCKER[...]; the verdict schema's `reality` field; tests/test_reality.py", True),
+    ("#135: a blocking finding without cited evidence is refused, never silently demoted — every finding may carry an `evidence` kind (executed|verified|inferred|proposed, validated against the enum) and a `quote`, and a blocking one must carry `verified` or `executed` plus the `quote` it cites, or `judge_check` refuses with JUDGE-EVIDENCE and the judge spawns again with the reason; nits never need evidence and never block", "verdict_problems + judge_check -> cmd_judge", "JUDGE-EVIDENCE[...]; the verdict schema's `evidence`/`quote`; tests/test_judge.py (Evidence, Docs)", True),
     ("lint warns when the title/body promises a visible result (tela, copy, layout) and no Done-when item verifies one", "lint_body (title=) -> VISIBLE", "WARNING: ... promises a visible result ...", True),
     ("dispatch refuses a prompt whose gate still carries a placeholder no seat resolves", "cmd_dispatch + render_prompt -> unresolved_seats", "dispatch/prompt refused: the gate carries {SIMULATOR} and no seat resolves it", True),
     ("merge never arms the CI wait for a repo that cannot produce checks, even when the checks read fails; every NO-CI stop — the verify gate's, the no-evidence refusal's and the wait's — prints the ready gh pr merge command", "merge_ci_step + match_head_commit_cmd <- cmd_merge", "NO-CI stop in seconds with `gh pr merge <N> -R <slug> --squash --match-head-commit <sha>`", True),

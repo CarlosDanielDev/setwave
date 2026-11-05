@@ -34,12 +34,13 @@ Write `{{OUT}}` with exactly this shape:
   "head_sha": "{{SHA}}",
   "patch_sha": "<the sha256 printed next to the patch path, verbatim>",
   "reality": "clean | MAJOR | BLOCKER",
-  "findings": [{"file": "path/relative/to/the/repo", "line": 12, "severity": "blocking | nit", "note": "what is wrong and why it matters"}]
+  "findings": [{"file": "path/relative/to/the/repo", "line": 12, "severity": "blocking | nit", "note": "what is wrong and why it matters", "evidence": "executed | verified | inferred | proposed", "quote": "the exact excerpt of the file at that line"}]
 }
 ```
 
 - `pass` only when you would bet the merge on it. A doubt you cannot cite is `concerns`, never `pass`.
 - Every finding carries a `severity`: `blocking` when the diff must not merge as it stands (it breaks what the issue asked, or it breaks something else); `nit` when the merge can go ahead and the owner should just read it. Only a `fail` verdict or a `blocking` finding stops the merge — a `concerns` carrying nits alone does not.
+- A blocking finding must carry its evidence or the kernel refuses the whole verdict (`JUDGE-EVIDENCE`) and you judge again — a blocking claim without evidence is an opinion, and the kernel refuses rather than demote it. Cite `evidence`: `executed` (you ran the failing command yourself) or `verified` (you read the fault directly in the diff or the repo) are the only kinds a `blocking` finding may carry; `inferred` (you concluded it without seeing it) and `proposed` (you suggest it) are for nits — and `quote`, the exact excerpt from the cited file:line that shows the fault. A nit needs no evidence at all: nits never block.
 - A finding may also carry `"scope": true`: set it when the finding's point is that the diff does something the issue never asked (or skips something nobody asked for either). That is the owner's decision, not a fix round: a `concerns` whose findings all carry `"scope": true` goes to the owner as "accept as is / split a follow-up", never back to the implementing agent. Never set `scope` on a `blocking` finding or a `fail` — those refuse the merge on their own.
 - `fail`: the diff must not merge (it does not do the issue, or it breaks something). `concerns`: it can merge, and the findings it carries are nits. `fail` and `concerns` carry at least one finding; every finding cites `file`, a 1-based `line`, a `severity`, and its `note` says why it matters.
 - `head_sha` is the sha above, verbatim: a push after the patch invalidates the verdict, and the kernel refuses a stale one.

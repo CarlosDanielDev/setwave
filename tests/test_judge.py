@@ -109,7 +109,7 @@ class Scope(unittest.TestCase):
         self.assertNotIn("scope-only concerns", p.stdout)
 
     def test_scope_does_not_soften_a_fail_or_a_blocker(self):
-        self.seed([self.scope_concern(severity="blocking")], verdict="fail")
+        self.seed([self.scope_concern(severity="blocking", evidence="verified", quote="g")], verdict="fail")
         p = run_wave("judge", "20")
         self.assertIn("JUDGE-FAIL", p.stdout)
 
@@ -215,6 +215,138 @@ class Schema(unittest.TestCase):
                       "findings": [{"file": "a.py", "line": 1, "severity": "meh", "note": "x"}]}):
             with self.subTest(body=body):
                 self.assertTrue(wave.verdict_problems(body))
+
+
+class Evidence(unittest.TestCase):
+    """#135, the evidence gate: a blocking finding without cited evidence is the judge's opinion, not a
+    fact — the kernel refuses the verdict (JUDGE-EVIDENCE) and the judge spawns again with the reason;
+    it is never silently demoted to a nit. Every finding may carry an `evidence` kind
+    (executed|verified|inferred|proposed) validated against the enum; only `verified` and `executed`
+    are evidence a blocking finding may stand on, and it must carry the `quote` it cites. Nits never
+    need evidence and never block, by design."""
+
+    def tearDown(self):
+        VERDICT.unlink(missing_ok=True)
+
+    def seed(self, findings, verdict="concerns"):
+        HANDOFFS.mkdir(parents=True, exist_ok=True)
+        VERDICT.write_text(json.dumps({"verdict": verdict, "head_sha": head_sha(), "reality": "clean", "findings": findings}))
+
+    def blocking(self, **extra):
+        return {"file": "g.txt", "line": 1, "severity": "blocking", "note": "the seeded fault", **extra}
+
+    def test_a_blocking_finding_without_evidence_is_refused_by_name(self):
+        self.seed([self.blocking()])
+        p = run_wave("judge", "20")
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("JUDGE-EVIDENCE", p.stdout, "the verdict goes back to the judge with the reason")
+        self.assertNotIn("not blocking", p.stdout, "no silent demotion: the finding keeps its severity")
+
+    def test_a_blocking_finding_with_inferred_evidence_is_refused(self):
+        self.seed([self.blocking(evidence="inferred", quote="g")])
+        p = run_wave("judge", "20")
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("JUDGE-EVIDENCE", p.stdout, "inferred is not evidence a blocking finding may stand on")
+
+    def test_a_blocking_finding_without_the_quote_is_refused(self):
+        self.seed([self.blocking(evidence="verified")])
+        p = run_wave("judge", "20")
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("JUDGE-EVIDENCE", p.stdout)
+
+    def test_a_blocking_finding_with_verified_evidence_and_quote_blocks_as_itself(self):
+        self.seed([self.blocking(evidence="verified", quote="g")], verdict="fail")
+        p = run_wave("judge", "20")
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("JUDGE-FAIL", p.stdout, "with the evidence in hand the finding blocks as a finding")
+        self.assertNotIn("JUDGE-EVIDENCE", p.stdout)
+
+    def test_a_concerns_carrying_nits_without_evidence_passes(self):
+        self.seed([{"file": "g.txt", "line": 2, "severity": "nit", "note": "a plain nit, no evidence attached"}])
+        p = run_wave("judge", "20")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr + " — nits never block, by design")
+
+    def test_an_evidence_outside_the_enum_is_refused(self):
+        for severity in ("blocking", "nit"):
+            for bad in ("meh", "VERIFIED", ""):
+                with self.subTest(severity=severity, evidence=bad):
+                    self.seed([self.blocking(severity=severity, evidence=bad, quote="g")])
+                    p = run_wave("judge", "20")
+                    self.assertEqual(p.returncode, 1, p.stdout)
+                    self.assertIn("JUDGE-MISSING", p.stdout, f"{bad!r}: not an evidence kind the kernel knows")
+                    self.assertIn("evidence", p.stdout)
+
+    def test_a_quote_that_is_not_a_quoted_line_is_refused(self):
+        for bad in ("", 3):
+            with self.subTest(quote=bad):
+                self.seed([self.blocking(evidence="verified", quote=bad)])
+                p = run_wave("judge", "20")
+                self.assertEqual(p.returncode, 1, p.stdout)
+                self.assertIn("JUDGE-MISSING", p.stdout)
+                self.assertIn("quote", p.stdout)
+
+    def test_merge_refuses_a_blocking_finding_without_evidence(self):
+        self.seed([self.blocking()])
+        before = len(gh_calls())
+        p = run_wave("merge", "20", "--yes")
+        merges = [c for c in gh_calls()[before:] if c[:2] == ["pr", "merge"]]
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        self.assertIn("JUDGE-EVIDENCE", p.stdout + p.stderr)
+        self.assertEqual(merges, [], "nothing merged")
+
+    def test_the_schema_validates_the_enum_and_leaves_the_gate_to_judge_check(self):
+        good = {"verdict": "pass", "head_sha": "0" * 40, "reality": "clean", "findings": []}
+        nit = {"file": "a.py", "line": 3, "severity": "nit", "note": "x"}
+        self.assertEqual(wave.verdict_problems({**good, "findings": [{**nit, "evidence": "executed"}]}), [])
+        self.assertEqual(wave.verdict_problems({**good, "findings": [{**nit, "evidence": "proposed", "quote": "the line"}]}), [])
+        self.assertEqual(wave.verdict_problems({**good, "findings": [dict(nit)]}), [],
+                         "evidence stays optional: a finding without it is schema-valid here")
+        for bad in ("meh", "VERIFIED", True):
+            with self.subTest(evidence=bad):
+                problems = wave.verdict_problems({**good, "findings": [{**nit, "evidence": bad}]})
+                self.assertTrue(problems)
+                self.assertTrue(any("evidence" in p for p in problems), problems)
+
+
+class Docs(unittest.TestCase):
+    """#135: the evidence contract lives in the judge template, pinned here — the template is the
+    judge's only reading of the rule, so the pin fails if the contract or the guarantee leaves."""
+
+    REPO = WAVE.parent.parent
+
+    def test_the_judge_template_carries_the_evidence_contract(self):
+        text = (self.REPO / "templates" / "judge.md").read_text()
+        self.assertIn("JUDGE-EVIDENCE", text, "the template names the refusal the kernel produces")
+        for kind in ("executed", "verified", "inferred", "proposed"):
+            self.assertIn(kind, text, f"the enum names {kind}")
+        self.assertIn('"evidence"', text)
+        self.assertIn('"quote"', text)
+        flat = " ".join(text.lower().split())
+        self.assertIn("opinion", flat, "why: a blocking claim without evidence is an opinion")
+        self.assertIn("demote", flat, "the kernel refuses rather than demotes")
+
+    def test_the_round_template_carries_the_evidence_contract_too(self):
+        text = (self.REPO / "templates" / "judge-round.md").read_text()
+        self.assertIn("JUDGE-EVIDENCE", text, "a round verdict's blocking finding is gated exactly the same")
+
+    def test_the_guarantees_table_pins_the_evidence_gate(self):
+        row = next(r for r in wave.GUARANTEES if "JUDGE-EVIDENCE" in r[2])
+        self.assertTrue(row[3], "the promise is pinned by a test")
+        self.assertIn("never", row[0], "refuse, never a silent demotion — the issue's ADR call")
+        self.assertIn("nits", row[0], "nits never need evidence and never block")
+
+    def test_the_guarantees_table_pins_the_patch_anchor(self):
+        # #108, item 3, gated at the wave's final review: the patch-anchor promise has its row
+        row = next(r for r in wave.GUARANTEES if "judge_patch_problems" in r[1])
+        self.assertTrue(row[3], "the promise is pinned by a test")
+        self.assertIn("never certifies", row[0], "a verdict is bound to the diff it judged, not just a head")
+        self.assertIn("JUDGE-PATCH-STALE", row[2])
+
+    def test_the_docs_flag_lists_name_all_six_refusals(self):
+        for path in ("README.md", "skills/wave/SKILL.md", "docs/index.html"):
+            text = (self.REPO / path).read_text()
+            for flag in ("JUDGE-PATCH-STALE", "JUDGE-REALITY-BLOCKER", "JUDGE-EVIDENCE"):
+                self.assertIn(flag, text, f"{path} names {flag}")
 
 
 def seed_round(pr: int, previous: list[dict], statuses: list[str]) -> Path:
