@@ -6,6 +6,7 @@ and validates; `merge` refuses a PR without a pass verdict at the head it is mer
 absent (`JUDGE-MISSING`), negative (`JUDGE-FAIL`) or made for a head that has since moved (`JUDGE-STALE`
 — any push invalidates it). PR 20 (`feat/4-x`, clean, closes #4) is the PR under judgement here.
 """
+import hashlib
 import json
 import os
 import subprocess
@@ -284,6 +285,114 @@ class Severity(unittest.TestCase):
                 p = run_wave("judge", "20")
                 self.assertEqual(p.returncode, 1, p.stdout)
                 self.assertIn("JUDGE-MISSING", p.stdout, f"{severity!r}: not a severity the kernel knows")
+
+
+class PatchStaleness(unittest.TestCase):
+    """#108: a verdict certifies a diff, not just a head sha — round 2 on PR #107 re-read a stale
+    `judge-107.patch` and certified a head whose diff it never saw. The kernel anchors the patch:
+    `wave judge` records the patch content's sha256 at cut time in a sidecar (`judge-<PR>.patch.sha`,
+    head + patch_sha), the verdict may carry the same `patch_sha`, and `judge_check` refuses
+    (`JUDGE-PATCH-STALE`) when the patch on disk is not the diff the verdict certified. Re-cutting
+    the patch invalidates the previous verdict explicitly."""
+
+    def tearDown(self):
+        for f in ("judge-20.json", "judge-20.patch", "judge-20.patch.sha",
+                  "judge-20.delta.patch", "judge-20.delta.patch.sha"):
+            (HANDOFFS / f).unlink(missing_ok=True)
+
+    def digest(self, name: str = "judge-20.patch") -> str:
+        return hashlib.sha256((HANDOFFS / name).read_bytes()).hexdigest()
+
+    def anchor(self) -> dict:
+        return json.loads((HANDOFFS / "judge-20.patch.sha").read_text())
+
+    def verdict_with_patch_sha(self, patch_sha):
+        HANDOFFS.mkdir(parents=True, exist_ok=True)
+        VERDICT.write_text(json.dumps(
+            {"verdict": "pass", "head_sha": head_sha(), "findings": [], "patch_sha": patch_sha}))
+
+    def test_the_cut_records_the_patch_sha_of_the_round_in_the_sidecar(self):
+        p = run_wave("judge", "20")
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)  # nothing has been judged yet
+        a = self.anchor()
+        self.assertEqual(a["head"], head_sha(), "the sidecar names the head the patch was cut at")
+        self.assertEqual(a["patch_sha"], self.digest(), "the sidecar names the sha256 of the patch content")
+        self.assertIn(self.digest(), p.stdout, "the printed sha256 is what the judge copies into the verdict")
+
+    def test_a_verdict_carrying_its_own_patch_sha_is_fresh(self):
+        run_wave("judge", "20")
+        self.verdict_with_patch_sha(self.digest())
+        p = run_wave("judge", "20")  # a same-head re-cut writes the same bytes: the sha still matches
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
+    def test_a_verdict_whose_patch_sha_is_not_the_disk_patch_is_refused(self):
+        run_wave("judge", "20")
+        self.verdict_with_patch_sha("0" * 64)
+        p = run_wave("judge", "20")
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("JUDGE-PATCH-STALE", p.stdout, "the verdict names a diff it did not judge")
+
+    def test_a_patch_sha_in_the_verdict_must_be_a_sha256(self):
+        for bad in ("abc", "0" * 63, "Z" * 64):
+            with self.subTest(bad=bad):
+                self.verdict_with_patch_sha(bad)
+                p = run_wave("judge", "20")
+                self.assertEqual(p.returncode, 1, p.stdout)
+                self.assertIn("JUDGE-MISSING", p.stdout, f"{bad!r}: not a digest the kernel knows")
+                self.assertIn("patch_sha", p.stdout)
+
+    def merge(self):
+        before = len(gh_calls())
+        p = run_wave("merge", "20", "--yes")
+        merges = [c for c in gh_calls()[before:] if c[:2] == ["pr", "merge"]]
+        return p, merges
+
+    def test_a_patch_tampered_after_the_verdict_is_refused_at_merge(self):
+        run_wave("judge", "20")
+        judge_pass(20)
+        (HANDOFFS / "judge-20.patch").write_text("# tampered after the verdict\n")
+        p, merges = self.merge()
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        self.assertIn("JUDGE-PATCH-STALE", p.stdout + p.stderr)
+        self.assertEqual(merges, [], "nothing merged")
+
+    def test_a_verdict_for_a_head_whose_patch_was_cut_earlier_is_refused(self):
+        # the #107 bug: the patch is cut at head H, a push moves the head, the judge reads the
+        # stale patch and certifies the new head — head_sha matches, so only the anchor can refuse
+        run_wave("judge", "20")
+        push_new_commit("g2.txt")
+        judge_pass(20, sha=head_sha())
+        p, merges = self.merge()
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        self.assertIn("JUDGE-PATCH-STALE", p.stdout + p.stderr,
+                      "the verdict certifies a head whose diff was never cut into this patch")
+        self.assertEqual(merges, [], "nothing merged")
+
+    def test_recutting_the_patch_invalidates_the_previous_verdict_explicitly(self):
+        judge_pass(20)
+        run_wave("judge", "20")  # a fresh pass at the current head
+        push_new_commit("g2.txt")
+        p = run_wave("judge", "20")  # the re-cut: the old verdict certified the old cut
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn(f"previous verdict invalidated: patch re-cut at {head_sha()}", p.stdout)
+        self.assertIn("JUDGE-STALE", p.stdout, "the re-cut also moves the head: the old verdict is stale")
+
+    def test_a_same_head_recut_leaves_the_verdict_standing(self):
+        judge_pass(20)
+        p = run_wave("judge", "20")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertNotIn("previous verdict invalidated", p.stdout,
+                         "the same head cuts the same bytes: nothing was invalidated")
+        p = run_wave("judge", "20")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertNotIn("previous verdict invalidated", p.stdout)
+
+    def test_the_schemas_anchor_is_optional_but_checked(self):
+        good = {"verdict": "pass", "head_sha": "0" * 40, "findings": []}
+        self.assertEqual(wave.verdict_problems({**good, "patch_sha": "a" * 64}), [])
+        self.assertTrue(wave.verdict_problems({**good, "patch_sha": "abc"}))
+        self.assertTrue(wave.verdict_problems({**good, "patch_sha": "a" * 64 + "\n"}))
+        self.assertEqual(wave.verdict_problems(good), [], "a verdict without the anchor is still schema-valid")
 
 
 class Round(unittest.TestCase):
