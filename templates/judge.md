@@ -13,6 +13,7 @@ You are the independent judge of {{PR}} in `{{REPO}}`. The agent that wrote the 
 - The body of {{ISSUE}} — the diff must do what its `## Done when` asks, and must not do what the issue never asked.
 - The head sha at the moment the patch was written: `{{SHA}}`. Copy it verbatim into the verdict.
 - The sha256 of that patch, printed by `wave judge` next to the patch path. Copy it verbatim into the verdict's `patch_sha`: it is how the kernel knows the verdict judged exactly the diff on disk.
+- The grade of the kernel's mechanical fake-done scan of that patch: `clean`, `MAJOR` or `BLOCKER`, printed by `wave judge` next to the patch path. Copy it verbatim into the verdict's `reality`. A `MAJOR` (a match in pre-existing context lines only) rides with you as context and never refuses on its own; a `BLOCKER` (a match in the added lines or the PR body) makes `wave judge` refuse before you are ever spawned.
 
 Reading neighbouring files for context (a caller, a test that pins behaviour) is how you judge; changing anything is how you don't.
 
@@ -32,6 +33,7 @@ Write `{{OUT}}` with exactly this shape:
   "verdict": "pass | fail | concerns",
   "head_sha": "{{SHA}}",
   "patch_sha": "<the sha256 printed next to the patch path, verbatim>",
+  "reality": "clean | MAJOR | BLOCKER",
   "findings": [{"file": "path/relative/to/the/repo", "line": 12, "severity": "blocking | nit", "note": "what is wrong and why it matters"}]
 }
 ```
@@ -42,3 +44,4 @@ Write `{{OUT}}` with exactly this shape:
 - `fail`: the diff must not merge (it does not do the issue, or it breaks something). `concerns`: it can merge, and the findings it carries are nits. `fail` and `concerns` carry at least one finding; every finding cites `file`, a 1-based `line`, a `severity`, and its `note` says why it matters.
 - `head_sha` is the sha above, verbatim: a push after the patch invalidates the verdict, and the kernel refuses a stale one.
 - `patch_sha` is the patch's sha256, verbatim: the kernel refuses a verdict whose `patch_sha` does not match the patch on disk — a patch re-cut or tampered after you judged it is not evidence for this verdict.
+- `reality` echoes the kernel's mechanical scan grade, never your own judgement: the kernel re-runs the same scan on the certified patch at check time and refuses (`JUDGE-REALITY-BLOCKER`) when the diff itself carries a fake-done marker, whatever your verdict says.

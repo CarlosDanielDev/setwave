@@ -2331,6 +2331,8 @@ def verdict_problems(v) -> list[str]:
     ps = v.get("patch_sha")
     if ps is not None and (not isinstance(ps, str) or not re.fullmatch(r"[0-9a-f]{64}", ps)):
         bad.append("patch_sha must be the full 64-hex sha256 of the patch that was judged")
+    if v.get("reality") not in REALITY_GRADES:
+        bad.append("reality must echo the mechanical fake-done scan's grade: clean|MAJOR|BLOCKER")
     fs = v.get("findings")
     if not isinstance(fs, list):
         bad.append("findings must be a list")
@@ -2420,10 +2422,114 @@ def _read_anchor(side: Path) -> dict | None:
     return a if isinstance(a, dict) else None
 
 
-def judge_check(repo: Repo, n: int, head_sha: str, round_: bool = False) -> dict:
+REALITY_GRADES = ("clean", "MAJOR", "BLOCKER")
+
+# #134, the reality gate: a mechanical fake-done scan, ported from claud-framework
+# `backend/superframework/audit/reality_gate.py` (stdlib regex, zero network; there it is
+# `gate_realidade`, fourteen prohibitions — the six false-completion classes a diff can carry are
+# kept here, named in the table below). Every regex is written split ("lo" "rem") so this table
+# never trips the gate on the very diff that ships it. A match in what the PR delivers (added
+# lines + the PR body) is BLOCKER; a match only in pre-existing context lines is MAJOR and never
+# refuses — it rides the judge prompt as context.
+REALITY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("lorem_ipsum", re.compile(r"(?i)lor" r"em ipsum|\blor" r"em\b")),
+    ("todo_fixme", re.compile(r"(?i)\b(TOD" r"O|FIXM" r"E)\b")),
+    ("placeholder_text", re.compile(r"(?i)\bplace" r"holder\b|preench[ae]r? aqui|\[inse" r"rir|insira (aqui|seu)")),
+    ("invented_number", re.compile(r"(?i)\bXX%|\bXXX\b|\[value\]|\[number\]|\[price\]|invented " r"number")),
+    ("simulated_integration",
+     re.compile(r"(?i)simulated integrat" r"ion|integraç(ão|ao) simulada|simula(ção|cao) de integraç")),
+    ("truncation",
+     re.compile(r"(?i)rest of (the )?code|resto d[oa] c[oó]digo|//\s*\.\.\.|\(\.\.\.\)|etc\.? etc\.?|and so " r"on")),
+)
+
+
+def reality_scan(text: str, definitive: bool) -> list[dict]:
+    """One finding per pattern class whose regex matches `text`: BLOCKER when the text is definitive
+    delivery, MAJOR when it is a preview."""
+    found = []
+    for name, rx in REALITY_PATTERNS:
+        m = rx.search(text)
+        if m:
+            found.append({"pattern": name, "match": m.group(0),
+                          "severity": "BLOCKER" if definitive else "MAJOR"})
+    return found
+
+
+def _added_lines(patch: str) -> str:
+    return "\n".join(l[1:] for l in patch.splitlines() if l.startswith("+") and not l.startswith("+++"))
+
+
+def _context_lines(patch: str) -> str:
+    return "\n".join(l[1:] for l in patch.splitlines() if l.startswith(" "))
+
+
+CHECKLIST = re.compile(r"(?m)^- \[[ x]\] ")
+
+def _deliverable_body(body: str) -> str:
+    """The PR body minus its echoed Done-when ledger: every wave PR must carry its issue's checklist
+    verbatim inside the `## Done when` section (the kernel refuses a ledger that differs), and that
+    checklist names the pattern classes — it is the contract, not the delivered content. The
+    exclusion is exactly congruent with what `done_when` pins: the first `## Done when` section,
+    ended by a heading of any level (`HEADING`, `^#{1,6} `); a later `## Done when` heading starts
+    no second exclusion. A checkbox line anywhere else is unpinned prose — a claim the body makes
+    about the work — and is scanned like the rest of the body."""
+    out, in_ledger, seen = [], False, False
+    for l in body.splitlines():
+        if HEADING.match(l):
+            in_ledger = not seen and DONE_WHEN.match(l) is not None
+            seen = seen or in_ledger
+        elif in_ledger and CHECKLIST.match(l):
+            continue
+        out.append(l)
+    return "\n".join(out)
+
+
+def _header_paths(patch: str) -> str:
+    """The destination paths the diff headers name (`+++ b/…`, `rename to …`, `copy to …`): a
+    fake-done marker can live in a path the PR creates, and `_added_lines` never sees header
+    lines. Source paths (`---`, `rename from`, `copy from`, the a-side of `diff --git`) are the
+    pre-existing name, not what the PR delivers; `+++ /dev/null` names no file."""
+    out = []
+    for l in patch.splitlines():
+        if l.startswith("+++ ") and l[4:] != "/dev/null":
+            p = l[4:].split("\t")[0]
+        elif l.startswith("rename to "):
+            p = l[len("rename to "):]
+        elif l.startswith("copy to "):
+            p = l[len("copy to "):]
+        else:
+            continue
+        p = p.strip('"')
+        if p.startswith("b/"):
+            p = p[2:]
+        out.append(p)
+    return "\n".join(out)
+
+
+def judge_reality(patch: str, body: str = "") -> dict:
+    """The mechanical grade of a cut patch (+ the PR body): what the PR delivers is the added lines,
+    the destination paths the diff headers name, and the body — a match in any of them is BLOCKER;
+    pre-existing context lines are preview — MAJOR, never a refusal, context for the judge. A
+    removed marker or a source-path rename is a fix, never a match."""
+    delivery = "\n".join((_added_lines(patch), _header_paths(patch), body))
+    blockers = reality_scan(delivery, True)
+    seen = {b["pattern"] for b in blockers}
+    majors = [m for m in reality_scan(_context_lines(patch), False) if m["pattern"] not in seen]
+    grade = "BLOCKER" if blockers else ("MAJOR" if majors else "clean")
+    return {"grade": grade, "blockers": blockers, "majors": majors}
+
+
+def reality_note(reality: dict) -> str:
+    """One line for the output and the prompt: the grade and every match behind it."""
+    hits = "; ".join(f"{f['pattern']} ({f['match']!r})" for f in reality["blockers"] + reality["majors"])
+    return reality["grade"] + (f" — {hits}" if hits else "")
+
+
+def judge_check(repo: Repo, n: int, head_sha: str, round_: bool = False, body: str = "") -> dict:
     """The judge's verdict for PR `n`, re-validated by the kernel: `flag` is None only when a schema-valid verdict
-    says `pass` at exactly `head_sha`; anything else is one of the four JUDGE refusals (merge never trusts the
-    file, the plan, or this command's earlier answer — the sha is re-checked where the merge happens)."""
+    says `pass` at exactly `head_sha` with a certified, fake-done-free patch; anything else is one of the five
+    JUDGE refusals (merge never trusts the file, the plan, or this command's earlier answer — the sha is re-checked
+    where the merge happens)."""
     path = repo.handoffs / f"judge-{n}.json"
     if not path.exists():
         return {"flag": "JUDGE-MISSING", "detail": f"no verdict at {path}: `wave judge` writes the patch, the plugin's judge agent writes the verdict"}
@@ -2446,6 +2552,19 @@ def judge_check(repo: Repo, n: int, head_sha: str, round_: bool = False) -> dict
     if patch_bad:
         return {"flag": "JUDGE-PATCH-STALE", "detail": patch_bad,
                 "verdict": "pass", "head_sha": v["head_sha"], "findings": []}
+    # #134: the kernel re-runs the mechanical scan itself, on exactly the patch the verdict certified
+    # (which is why this sits after the patch-anchor check) at the same scope `wave judge` graded —
+    # patch + PR body (`body`, checklist lines excluded) — so the grade cannot differ between the
+    # two moments; the refusal never depends on what the verdict echoed in `reality`
+    certified = repo.handoffs / (f"judge-{n}.delta.patch" if round_ else f"judge-{n}.patch")
+    if certified.exists():
+        reality = judge_reality(certified.read_text(), _deliverable_body(body))
+        if reality["grade"] == "BLOCKER":
+            return {"flag": "JUDGE-REALITY-BLOCKER",
+                    "detail": (f"the mechanical fake-done scan of {certified.name} is BLOCKER: "
+                               + "; ".join(f"{f['pattern']} ({f['match']!r})" for f in reality["blockers"])
+                               + " — the diff carries fake-done markers: fix it and judge again"),
+                    "verdict": "pass", "head_sha": v["head_sha"], "findings": []}
     if round_:
         gaps = round_problems(v)
         if gaps:
@@ -2470,6 +2589,7 @@ def render_round_prompt(repo: Repo, n: int, issue: int | None, prev: dict, sha: 
     fields = {"PR": str(n), "REPO": repo.slug, "ISSUE": f"#{issue}" if issue else "(the PR body names no issue)",
               "PREV_SHA": prev["head_sha"], "SHA": sha, "DELTA": str(delta),
               "PATCH_SHA": hashlib.sha256(delta.read_bytes()).hexdigest(),
+              "REALITY": reality_note(judge_reality(delta.read_text())),
               "OUT": str(repo.handoffs / f"judge-{n}.json"), "PREV_FINDINGS": findings}
     return fill_template(tpl, fields)
 
@@ -2537,9 +2657,16 @@ def cmd_judge(default: Repo | None, a):
         if isinstance(old_verdict, dict) and (old_verdict.get("head_sha") != sha
                                               or (old_anchor and old_anchor.get("patch_sha") != digest)):
             print(f"  previous verdict invalidated: patch re-cut at {sha}")
+        reality = judge_reality(patch.read_text(), _deliverable_body(pr.get("body") or ""))  # #134: zero-token, before any spawn
+        print(f"  reality scan: {reality_note(reality)}")
+        if reality["grade"] == "BLOCKER":
+            print(f"  JUDGE-REALITY-BLOCKER[the mechanical fake-done scan refused before any judge was spawned: "
+                  f"{', '.join(f['pattern'] for f in reality['blockers'])} — fix the diff, then `wave judge` again]")
+            bad += 1
+            continue
         if a.since:
             print(render_round_prompt(repo, n, n_issue, prev, sha, patch))
-        jc = judge_check(repo, n, sha, round_=a.since)
+        jc = judge_check(repo, n, sha, round_=a.since, body=pr.get("body") or "")
         if jc["flag"] is None:
             fresh = "fresh" if jc["verdict"] == "pass" else f"fresh ({jc['nits']} nit(s) only, not blocking — the owner reads them in the verdict file)"
             print(f"  verdict {jc['verdict']} at {sha[:7]} — {fresh}; `merge` re-checks the sha before merging")
@@ -2557,10 +2684,11 @@ def cmd_judge(default: Repo | None, a):
             print(f'  it writes {repo.handoffs / f"judge-{n}.json"}:' +
                   ' {"verdict": "pass|fail|concerns", "head_sha": "<the 40-hex sha above>",'
                   ' "patch_sha": "<the sha256 printed above, verbatim>",'
+                  ' "reality": "<clean|MAJOR|BLOCKER — the grade of the reality scan printed above, verbatim>",'
                   ' "findings": [{"file": "<path>", "line": <N>, "severity": "blocking|nit", "note": "<what is wrong>"}]}'
                   + (' — a round adds "previous": [<the findings it was asked to re-check, verbatim>] and "recheck": [{"file": "<path>", "line": <N>, "status": "fixed|not fixed"}], one answer per previous finding' if a.since else ''))
             print(f"  then re-run this command; `merge` refuses a PR without a pass verdict at the head it merges"
-                  f" (JUDGE-MISSING / JUDGE-FAIL / JUDGE-STALE / JUDGE-PATCH-STALE); only `fail` or a `blocking` finding blocks — nits ride to the owner")
+                  f" (JUDGE-MISSING / JUDGE-FAIL / JUDGE-STALE / JUDGE-PATCH-STALE / JUDGE-REALITY-BLOCKER); only `fail` or a `blocking` finding blocks — nits ride to the owner")
         if jc["flag"]:
             bad += 1
     sys.exit(1 if bad else 0)
@@ -2662,11 +2790,12 @@ def cmd_order(default: Repo | None, a):
                 chain.append((n, sorted(set(re.findall(r"Merge conflict in (.+)", out + err))) or ["<conflict>"]))
                 trees.append(None)
         head_shas = {n: repo.git(["rev-parse", heads[n]]).strip() for n in nums}
+        bodies = {x["number"]: x.get("body") or "" for x in repo.open_prs()}
         result[slug] = {"order": order, "pairs": {f"{x}x{y}": v for (x, y), v in pairs.items()}, "against_base": against_base,
                         "serial": serial_prs, "chain": chain,
                         "base_sha": base_sha,
                         "heads": head_shas,
-                        "judges": {n: judge_check(repo, n, sha) for n, sha in head_shas.items()}}
+                        "judges": {n: judge_check(repo, n, sha, body=bodies.get(n, "")) for n, sha in head_shas.items()}}
         if a.run_gate:
             result[slug]["chain_gate"] = gate_chain(repo, base_sha, order, trees, sys.stderr if a.json else sys.stdout)
         if not a.json:
@@ -2923,7 +3052,7 @@ def cmd_merge(default: Repo | None, a):
                 if head_now != pl["heads"][str(n)]:
                     raise SystemExit(f"{slug}#{n}: its branch moved since the plan ({pl['heads'][str(n)][:7]} -> {head_now[:7]}). Re-run `order --plan` and ask again.")
                 if not a.force:
-                    jc = judge_check(repo, n, head_now)
+                    jc = judge_check(repo, n, head_now, body=pr.get("body") or "")
                     if jc["flag"]:
                         raise SystemExit(f"{slug}#{n}: {jc['flag']}[{jc['detail']}] — the OK was for a judged delta: `wave judge` and ask again, or --force and say why in the PR.")
                 planned.append((repo, n))
@@ -2972,7 +3101,8 @@ def cmd_merge(default: Repo | None, a):
         # judged here too, where it cannot be skipped: the plan's verdict may predate a push, a direct merge never had one,
         # and a PR that still has to be resolved first would only be re-judged after resolve moved its head
         if not a.force:
-            jc = judge_check(repo, n, repo.git(["rev-parse", f"origin/{pr['headRefName']}"]).strip())
+            jc = judge_check(repo, n, repo.git(["rev-parse", f"origin/{pr['headRefName']}"]).strip(),
+                             body=pr.get("body") or "")
             if jc["flag"]:
                 print(f"{key(repo, n)}: {jc['flag']}[{jc['detail']}]. Not merging — `wave judge {key(repo, n)}` and let the judge agent write the verdict.")
                 sys.exit(2)
@@ -4316,6 +4446,7 @@ GUARANTEES = [
     ("the Size line follows the final Done when: amend recomputes the line prepare stamped (it can predate the owner's answers) and dispatch prints the classification from the body it dispatches", "cmd_amend -> refresh_size; cmd_dispatch -> size_note(issue_size)", "Size: medium (4 Done-when items, ...) where prepare had stamped small (0 items)", True),
     ("the Miller attention gate (#126, the kit's META 5 / TETO DURO 7 / acima de 7 reproves): lint fails (exit != 0) on vermelho with the split-the-issue message, warns on âmbar with exit 0, prints nothing new on verde, and every Size stamp (prepare, amend, refresh, dispatch) carries `Miller: <class>`", "cmd_lint -> lint_body -> miller_class; issue_size -> size_note", "wave lint o/r#74 exits 1 naming the ceiling; the boundary 4/5/6/7/8 per dimension is pinned in tests/test_pure.py", True),
     ("a concerns verdict whose findings all carry scope:true is not a fix round: judge says so and the owner is asked accept / follow-up", "verdict_problems + judge_check -> cmd_judge; the SKILL's step 5", "`scope-only concerns` in `wave judge` output", True),
+    ("#134: a mechanical fake-done scan (the REALITY_PATTERNS classes) runs on what the PR delivers — the added diff lines, the destination paths the diff headers name, and the PR body minus its echoed ledger — before the judge spawns; a BLOCKER grade refuses — at judge time before any spawn, at merge time re-run by judge_check at the same scope — and MAJOR (context-line matches only) never refuses, it rides the judge prompt; the verdict echoes the grade in `reality`, the kernel never trusts that echo", "cmd_judge + judge_check -> judge_reality", "`reality scan:` line; JUDGE-REALITY-BLOCKER[...]; the verdict schema's `reality` field; tests/test_reality.py", True),
     ("lint warns when the title/body promises a visible result (tela, copy, layout) and no Done-when item verifies one", "lint_body (title=) -> VISIBLE", "WARNING: ... promises a visible result ...", True),
     ("dispatch refuses a prompt whose gate still carries a placeholder no seat resolves", "cmd_dispatch + render_prompt -> unresolved_seats", "dispatch/prompt refused: the gate carries {SIMULATOR} and no seat resolves it", True),
     ("merge never arms the CI wait for a repo that cannot produce checks, even when the checks read fails; every NO-CI stop — the verify gate's, the no-evidence refusal's and the wait's — prints the ready gh pr merge command", "merge_ci_step + match_head_commit_cmd <- cmd_merge", "NO-CI stop in seconds with `gh pr merge <N> -R <slug> --squash --match-head-commit <sha>`", True),
