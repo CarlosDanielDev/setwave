@@ -115,9 +115,14 @@ class ForbiddenGit(unittest.TestCase):
     DENIED = ["git gc --prune", "git gc --prune=now", "git reflog expire --expire=now --all", "git stash", "git stash pop",
               "git reset --hard origin/main", "git clean -f", "git clean -fd build", "git push --force origin x",
               "git push -f origin x", "git branch -D feat/35-guard-hooks", "rm -rf build", "rm -fr build",
-              "rm --recursive --force build"]
+              "rm --recursive --force build",
+              # global options and shims between the command word and the subcommand are the same command
+              "git -c core.hooksPath=/dev/null reset --hard origin/main", "git --no-pager reflog expire --all",
+              "git -C /tmp gc --prune=now", "command git stash", "env git clean -fd",
+              "sudo git branch -D feat/35-guard-hooks", "GIT_EXTERNAL_DIFF=x git reset --hard"]
     ALLOWED = ["git push origin x", "git branch -d feat/35-guard-hooks", "git clean -n", "git gc", "git reset --soft HEAD~1",
-               "git checkout -- f.txt", "rm build.log", "rm -r drafts"]
+               "git checkout -- f.txt", "rm build.log", "rm -r drafts",
+               "git -c color.ui=always log --oneline -5", "command git push origin x"]
 
     def test_denies_each_with_the_safe_alternative(self):
         for cmd in self.DENIED:
@@ -137,9 +142,14 @@ class ForbiddenGit(unittest.TestCase):
 class SecretRead(unittest.TestCase):
     DENIED = ["cat ~/.config/setwave/repos.json", "cat /Users/me/.config/setwave/repos.json", "cat .env",
               "cat .env.production", "head credentials", "vim auth.json", "grep TOKEN .env", "cat .env | head -5",
-              "base64 .env > /tmp/out"]
+              "base64 .env > /tmp/out",
+              # the decision is an allowlist: any reader verb not on the metadata list is a read
+              "python3 -c \"print(open('.env').read())\"", "nl .env", "tr 'a' 'b' < .env",
+              "cut -c1-10 .env", "ruby -e 'puts File.read(%q(.env))'", "node -e 'console.log(require(\"fs\").readFileSync(\".env\",\"utf8\"))'"]
     ALLOWED = ["ls -la ~/.config/setwave", "stat .env", "ls .env", "grep -c TOKEN .env", "grep -q TOKEN .env",
-               "cat .env | wc -l", "cat README.md", "grep TOKEN src/auth.py"]
+               "cat .env | wc -l", "cat README.md", "grep TOKEN src/auth.py",
+               "test -f .env", "[ -f .env ]", "grep --count TOKEN .env", "grep -ci TOKEN .env", "stat -f %z .env",
+               "file .env", "git check-ignore -q .env"]
 
     def test_denies_printing_the_contents_of_a_secret(self):
         for cmd in self.DENIED:
@@ -222,6 +232,29 @@ class BackgroundGate(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 p = run_guard("background-gate", self.event(cmd, self.STAMPED, background=False))
                 self.assertEqual(p.returncode, 0, f"{cmd}: {p.stderr}")
+
+    def test_escaped_quotes_do_not_hide_an_unquoted_amp(self):
+        """`cmd \\\"&\\\"` shells as cmd, an unquoted &, and stray quotes: the background op is real."""
+        for cmd in ('cargo test \\\"&\\\"', "cargo test \\'&\\'"):
+            with self.subTest(cmd=cmd):
+                p = run_guard("background-gate", self.event(cmd, self.STAMPED, background=False))
+                self.assertEqual(p.returncode, 2, f"{cmd}: {p.stderr}")
+
+    def test_detached_and_reparsed_forms_are_refused_in_a_seat(self):
+        """tmux/screen/at/parallel detach or multiplex; coproc backgrounds; eval and `sh -c` re-parse a
+        payload the outer scan cannot see — in a seat they are refused whenever an & rides anywhere."""
+        for cmd in ("tmux new-session -d 'cargo test'", "screen -dm make test", "coproc cargo test",
+                    "at now <<< 'make test'", "parallel --jobs 4 ::: gate", "eval 'cargo test &'",
+                    "bash -c 'make test &'", "ba'sh' -c 'make test &'", 'bash "-c" "make test &"',
+                    "ev\"al\" 'cargo test &'", "sh -euo pipefail -c 'make test &'",
+                    "bash -lc 'make test &'"):
+            with self.subTest(cmd=cmd):
+                p = run_guard("background-gate", self.event(cmd, self.STAMPED, background=False))
+                self.assertEqual(p.returncode, 2, f"{cmd}: {p.stderr}")
+
+    def test_a_foreground_shell_invocation_stays_open(self):
+        p = run_guard("background-gate", self.event("bash -c 'make test'", self.STAMPED, background=False))
+        self.assertEqual(p.returncode, 0, p.stderr)
 
     def test_a_backgrounded_command_in_the_main_checkout_stays_open(self):
         p = run_guard("background-gate", self.event("wave agents --watch", CLONE))
