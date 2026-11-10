@@ -183,13 +183,22 @@ def judge_background_gate(event):
 
 
 def shelled_to_background(command: str) -> bool:
-    """True when the command string backgrounds work at the shell level: an unquoted `&` that is not `&&`
-    (and not a redirect like `2>&1` / `&>`), or nohup / disown / setsid."""
-    stripped = re.sub(r"'[^']*'|\"[^\"]*\"", " ", command)  # a quoted `&` is data, never a control char
-    stripped = stripped.replace("&&", " ").replace("&>", " ").replace(">&", " ").replace("&>", " ")
+    """True when the command string backgrounds, detaches or re-parses work at the shell level: an unquoted
+    `&` that is not `&&` (nor a redirect like `2>&1` / `&>`), nohup / disown / setsid / coproc, a detached
+    or multiplexed session (tmux, screen, at, batch, parallel), or eval / `<shell> -c` with an `&` anywhere
+    in the command — a payload they re-parse is one the outer scan cannot see. Known limit, documented: a
+    determined daemonizer (ssh -f, systemd-run, `| at now`) with no flagged token still passes — the judge
+    is a backstop for the prose, and verify plus the judge gate the PR."""
+    stripped = command.replace("\\'", " ").replace('\\"', " ")  # an escaped quote is a literal char: the span it opens is not a quoted span
+    stripped = re.sub(r"'[^']*'|\"[^\"]*\"", " ", stripped)  # a quoted `&` is data, never a control char
+    stripped = stripped.replace("&&", " ").replace("&>", " ").replace(">&", " ")
     if re.search(r"&", stripped):
         return True
-    return bool(re.search(r"\b(?:nohup|disown|setsid)\b", stripped))
+    if re.search(r"\b(?:nohup|disown|setsid|coproc|tmux|screen|at|batch|parallel)\b", stripped):
+        return True
+    if re.search(r"\beval\b|\b(?:ba|z|da|k)?sh\s+(?:-\w+\s+)*-c\b", stripped) and "&" in command:
+        return True
+    return False
 
 
 JUDGES = {"attribution": judge_attribution, "forbidden-git": judge_forbidden_git,

@@ -223,6 +223,27 @@ class BackgroundGate(unittest.TestCase):
                 p = run_guard("background-gate", self.event(cmd, self.STAMPED, background=False))
                 self.assertEqual(p.returncode, 0, f"{cmd}: {p.stderr}")
 
+    def test_escaped_quotes_do_not_hide_an_unquoted_amp(self):
+        """`cmd \\\"&\\\"` shells as cmd, an unquoted &, and stray quotes: the background op is real."""
+        for cmd in ('cargo test \\\"&\\\"', "cargo test \\'&\\'"):
+            with self.subTest(cmd=cmd):
+                p = run_guard("background-gate", self.event(cmd, self.STAMPED, background=False))
+                self.assertEqual(p.returncode, 2, f"{cmd}: {p.stderr}")
+
+    def test_detached_and_reparsed_forms_are_refused_in_a_seat(self):
+        """tmux/screen/at/parallel detach or multiplex; coproc backgrounds; eval and `sh -c` re-parse a
+        payload the outer scan cannot see — in a seat they are refused whenever an & rides anywhere."""
+        for cmd in ("tmux new-session -d 'cargo test'", "screen -dm make test", "coproc cargo test",
+                    "at now <<< 'make test'", "parallel --jobs 4 ::: gate", "eval 'cargo test &'",
+                    "bash -c 'make test &'"):
+            with self.subTest(cmd=cmd):
+                p = run_guard("background-gate", self.event(cmd, self.STAMPED, background=False))
+                self.assertEqual(p.returncode, 2, f"{cmd}: {p.stderr}")
+
+    def test_a_foreground_shell_invocation_stays_open(self):
+        p = run_guard("background-gate", self.event("bash -c 'make test'", self.STAMPED, background=False))
+        self.assertEqual(p.returncode, 0, p.stderr)
+
     def test_a_backgrounded_command_in_the_main_checkout_stays_open(self):
         p = run_guard("background-gate", self.event("wave agents --watch", CLONE))
         self.assertEqual(p.returncode, 0, p.stderr)
