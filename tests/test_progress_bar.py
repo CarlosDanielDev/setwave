@@ -371,8 +371,9 @@ class Docs(unittest.TestCase):
     def test_the_line_help_carries_the_precedence_note(self):
         p = run_wave("agents", "--help")
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertIn("--line", p.stdout)
-        self.assertIn("wins over --check/--watch", p.stdout,
+        out = " ".join(p.stdout.split())  # argparse wraps at a column that moves with the parser's options: pin the words, not the line breaks
+        self.assertIn("--line", out)
+        self.assertIn("wins over --check/--watch", out,
                       "the statusline segment ignores --check/--watch silently: the help says so")
 
     def test_the_guarantees_table_pins_the_seat_progress(self):

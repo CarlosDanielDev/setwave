@@ -36,6 +36,15 @@
             "command": "python3 \"$CLAUDE_PROJECT_DIR/hooks/guards.py\" dispatch-contract"
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/hooks/guards.py\" background-gate"
+          }
+        ]
       }
     ]
   }

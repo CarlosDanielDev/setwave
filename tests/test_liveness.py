@@ -13,6 +13,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import time
 import unittest
@@ -20,15 +21,16 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest import mock
 
-from helpers import TMP, git, run_wave, sandbox, wave
+from helpers import TMP, TESTS, git, run_wave, sandbox, wave
 
 L = TMP / "l"
 
 
 NOW = time.time()  # the fixtures' "now", reset by settle(); liveness is asked against it, so the wall clock cannot tick a minute over
-STAMPED = {9: 90, 10: 90, 11: 60, 4: 90}  # worktree -> minutes since its dispatch stamp
-EDITED = {9: ("edit.txt", 45), 10: ("busy.txt", 2), 11: ("slow.txt", 20), 12: ("c.txt", 50)}  # newest edit
-COMMITTED = (12, 50)  # worktree, minutes since its one commit
+STAMPED = {9: 90, 10: 90, 11: 60, 4: 90, 15: 60}  # worktree -> minutes since its dispatch stamp
+EDITED = {9: ("edit.txt", 45), 10: ("busy.txt", 2), 11: ("slow.txt", 20), 12: ("c.txt", 50), 15: ("pushed.txt", 20)}  # newest edit
+COMMITTED = {12: 50, 15: 20}  # worktree -> minutes since its one commit (15's is pushed: no PR, the wake names `gh pr create`)
+PUSHED = 15
 
 
 def ago(minutes: float, now: float | None = None) -> float:
@@ -52,10 +54,12 @@ def settle() -> None:
         stamp = TMP / f"l-{n}" / ".setwave.json"
         stamp.write_text(json.dumps({"issue": n, "repo": "o/l", "dispatched_at": iso(minutes, "%Y-%m-%dT%H:%M:%SZ"), "prompt": "p.md"}))
         age(stamp, minutes, NOW)
-    n, minutes = COMMITTED
-    at = iso(minutes, "%Y-%m-%dT%H:%M:%S+0000")
-    subprocess.run(["git", "commit", "-q", "--amend", "--no-edit", "--date", at], cwd=TMP / f"l-{n}", check=True,
-                   capture_output=True, env={**os.environ, "GIT_COMMITTER_DATE": at})
+    for n, minutes in COMMITTED.items():
+        at = iso(minutes, "%Y-%m-%dT%H:%M:%S+0000")
+        subprocess.run(["git", "commit", "-q", "--amend", "--no-edit", "--date", at], cwd=TMP / f"l-{n}", check=True,
+                       capture_output=True, env={**os.environ, "GIT_COMMITTER_DATE": at})
+    subprocess.run(["git", "push", "-q", "--force", "origin", "feat/15-pushed"], cwd=TMP / "l-15", check=True,
+                   capture_output=True)  # the amend rewrote the pushed commit: this throwaway fixture remote takes the force
     for n, (name, minutes) in EDITED.items():
         age(TMP / f"l-{n}" / name, minutes, NOW)
 
@@ -73,16 +77,21 @@ def setUpModule():
     bare = TMP / "remote" / "o" / "l.git"
     git("init", "-q", "--bare", str(bare), cwd=TMP)
     git("clone", "-q", str(bare), str(L), cwd=TMP)
+    (L / ".git" / "info" / "exclude").write_text(".setwave.json\n")  # what `wave dispatch` excludes in a real repo: a stamp is never a dirty file
     (L / ".wave.json").write_text(json.dumps({"base": "main", "gate": ["true"]}))
     git("add", ".", cwd=L)
     git("commit", "-q", "-m", "base", cwd=L)
     git("push", "-q", "origin", "main", cwd=L)
-    for n, branch in ((9, "feat/9-dead"), (10, "feat/10-busy"), (11, "feat/11-quiet"), (12, "feat/12-committed"), (4, "feat/4-l")):
+    for n, branch in ((9, "feat/9-dead"), (10, "feat/10-busy"), (11, "feat/11-quiet"), (12, "feat/12-committed"),
+                      (4, "feat/4-l"), (15, "feat/15-pushed")):
         wt = worktree(n, branch)
         if n in EDITED:
             (wt / EDITED[n][0]).write_text("work\n" if n != 12 else "c\n")
     git("add", "c.txt", cwd=TMP / "l-12")
     git("commit", "-q", "-m", "c", cwd=TMP / "l-12")
+    git("add", "pushed.txt", cwd=TMP / "l-15")
+    git("commit", "-q", "-m", "pushed", cwd=TMP / "l-15")
+    git("push", "-q", "origin", "feat/15-pushed", cwd=TMP / "l-15")
     settle()
 
 
@@ -249,6 +258,34 @@ class Stalled(unittest.TestCase):
         self.assertFalse(rec["busy"])
         self.assertEqual(rec["progress"], "stalled")
 
+    def test_a_recent_transcript_keeps_a_thinking_agent_working(self):
+        """A Claude Code agent thinking touches no file in its worktree: its session transcript, under the
+        --transcripts dir in the host's munged-per-worktree layout, is the trace that keeps it working."""
+        tdir = TMP / "transcripts"
+        munged = tdir / str(TMP / "l-11").replace("/", "-").replace(".", "-")  # the host's real layout, seen live
+        munged.mkdir(parents=True, exist_ok=True)
+        (munged / "session.jsonl").write_text("{}\n")
+        age(munged / "session.jsonl", 1, NOW)  # the agent wrote its transcript 1 min ago
+        with mock.patch.object(wave, "worktree_processes", return_value=[]):
+            rec = wave.worktree_state(repo(), TMP / "l-11", "feat/11-quiet", 11, now=NOW + 5 * 60, transcripts=tdir)
+        self.assertEqual(rec["progress"], "working", "idle 6 min by the transcript: working, never stalled")
+        age(munged / "session.jsonl", 30, NOW)  # the control: a 30 min old transcript rescues nothing
+        with mock.patch.object(wave, "worktree_processes", return_value=[]):
+            rec = wave.worktree_state(repo(), TMP / "l-11", "feat/11-quiet", 11, now=NOW + 5 * 60, transcripts=tdir)
+        self.assertEqual(rec["progress"], "stalled")
+
+    def test_work_pushed_without_a_pr_is_a_stall_whose_wake_names_pr_create(self):
+        """Pushed work with no PR and no process is not a respawn case: the wake tells the agent to open the PR."""
+        with mock.patch.object(wave, "worktree_processes", return_value=[]):
+            rec = wave.worktree_state(repo(), TMP / "l-15", "feat/15-pushed", 14, now=NOW)
+        self.assertEqual(rec["progress"], "stalled")
+        self.assertTrue(rec["needs_pr"])
+        self.assertIn("gh pr create", "\n".join(wave.wake_lines(repo(), rec)))
+        with mock.patch.object(wave, "worktree_processes", return_value=[]):  # the control: quiet with no commits keeps the generic wake
+            quiet = wave.worktree_state(repo(), TMP / "l-11", "feat/11-quiet", 11, now=NOW)
+        self.assertFalse(quiet["needs_pr"])
+        self.assertNotIn("gh pr create", "\n".join(wave.wake_lines(repo(), quiet)))
+
 
 class Check(unittest.TestCase):
     def test_stalled_and_likely_dead_exit_1_naming_the_recovery(self):
@@ -272,9 +309,12 @@ class WatchStopped(Exception):
 
 
 class Watch(unittest.TestCase):
-    def watch(self, *args, probe, clock, sleep) -> tuple[str, int | None]:
-        """`agents --watch` in-process with the clock, the sleep and the probe injected."""
-        out, code = io.StringIO(), None
+    def watch(self, *args, probe, clock, sleep, out=None) -> tuple[str, int | None]:
+        """`agents --watch` in-process with the clock, the sleep and the probe injected. `out` lets a test
+        read what was printed even when the sleep raises past the harness (the persistent watch's exit is
+        the test's WatchStopped, not a return)."""
+        out = out or io.StringIO()
+        code = None
         here = os.getcwd()
         os.chdir(L)
         try:
@@ -290,20 +330,80 @@ class Watch(unittest.TestCase):
             os.chdir(here)
         return out.getvalue(), code
 
-    def test_watch_blocks_until_a_worktree_stalls_then_exits_1(self):
+    def test_watch_once_blocks_until_a_worktree_stalls_then_exits_1(self):
         clock = {"now": NOW}
 
         def tick(seconds):
             clock["now"] += seconds
 
         def probe(wt):
-            return [f"xcodebuild {wt}"] if wt.name in ("l-9", "l-11", "l-12") else []  # only l-10 is left to stall
+            return [f"xcodebuild {wt}"] if wt.name in ("l-9", "l-11", "l-12", "l-15") else []  # only l-10 is left to stall
 
-        out, code = self.watch("--every", "5m", probe=probe, clock=clock, sleep=tick)
+        out, code = self.watch("--once", "--every", "5m", probe=probe, clock=clock, sleep=tick)
         self.assertEqual(code, 1, out)
         self.assertIn("o/l#10", out)
         self.assertIn("stalled", out)
         self.assertGreaterEqual(clock["now"] - NOW, 10 * 60, "it polled on the injected clock until the stall")
+
+    def test_a_pr_opened_mid_watch_ends_the_stall_not_the_watch(self):
+        """The watch re-asks GitHub every cycle: a PR that opens after the first poll makes the seat done —
+        the stale-cache false hit (#115/#140) must never print twice, and must never end the watch."""
+        fx = TMP / "watch-fixtures-35"
+        fx.mkdir(exist_ok=True)
+        shutil.copy(TESTS / "fixtures" / "pr_list_all_o_l.json", fx / "pr_list_all_o_l.json")  # the only gh read on the watch path
+        clock = {"now": NOW}
+        cycle = {"n": 0}
+        sink = io.StringIO()
+
+        def tick(seconds):
+            cycle["n"] += 1
+            clock["now"] += seconds
+            if cycle["n"] == 5:
+                raise WatchStopped  # how the harness kills an armed watchdog; the test stops it here
+
+        def probe(wt):
+            if cycle["n"] == 4:  # rewritten after cycle 3 read no PR: cycle 4 must see it fresh
+                (fx / "pr_list_all_o_l.json").write_text(
+                    json.dumps([{"number": 30, "state": "OPEN", "headRefName": "feat/10-busy"}]))
+            return [f"gate {wt}"] if wt.name != "l-10" else []
+
+        with mock.patch.dict(os.environ, {"FAKE_GH_FIXTURES": str(fx)}):
+            with self.assertRaises(WatchStopped):
+                self.watch("--every", "5m", probe=probe, clock=clock, sleep=tick, out=sink)
+        out = sink.getvalue()
+        stalls = [l for l in out.splitlines() if "o/l#10" in l and "stalled" in l]
+        self.assertEqual(len(stalls), 1, f"one false-or-true stall, never a repeat (cycle 4 knows PR #30):\n{out}")
+        self.assertIn("o/l#10", out)
+        self.assertGreaterEqual(clock["now"] - NOW, 20 * 60, "the watch kept polling past the stall")
+
+    def test_watch_reports_each_new_stall_and_keeps_polling(self):
+        """Plain --watch never ends on a hit (#140): it prints each new stall once — a first hit consumes
+        nothing — and the orchestrator stops it, not it."""
+        clock = {"now": NOW}
+        cycle = {"n": 0}
+        sink = io.StringIO()
+
+        def tick(seconds):
+            cycle["n"] += 1
+            clock["now"] += seconds
+            if cycle["n"] == 8:
+                raise WatchStopped
+
+        def probe(wt):
+            if wt.name == "l-11":
+                return [f"gate {wt}"] if cycle["n"] <= 4 else []  # stalls, then goes dead, from cycle 5 on
+            return [f"gate {wt}"] if wt.name in ("l-9", "l-12") else []  # l-10 stalls from cycle 3 on
+
+        with self.assertRaises(WatchStopped):
+            self.watch("--every", "5m", probe=probe, clock=clock, sleep=tick, out=sink)
+        out = sink.getvalue()
+        for n, needle in ((10, "stalled"), (11, "likely dead")):
+            lines = [l for l in out.splitlines() if f"o/l#{n}" in l and needle in l]
+            self.assertEqual(len(lines), 1, f"o/l#{n}: the {needle} hit prints once, never again:\n{out}")
+        i10 = next(i for i, l in enumerate(out.splitlines()) if "o/l#10" in l)
+        i11 = next(i for i, l in enumerate(out.splitlines()) if "o/l#11" in l)
+        self.assertLess(i10, i11, "the first stall is printed when it happens, the second one later")
+        self.assertGreaterEqual(clock["now"] - NOW, 35 * 60, "alive well past the first stall at cycle 3")
 
     def test_watch_with_everyone_busy_keeps_polling_on_the_default_interval(self):
         clock = {"now": NOW}
@@ -335,9 +435,9 @@ class Watch(unittest.TestCase):
             polls["n"] += 1
             if polls["n"] == 2:
                 raise SystemExit("git index.lock: unable to lock")  # what `sh()` raises on a bounced git call
-            return [f"gate {wt}"] if wt.name in ("l-9", "l-11", "l-12") else []
+            return [f"gate {wt}"] if wt.name in ("l-9", "l-11", "l-12", "l-15") else []
 
-        out, code = self.watch("--every", "5m", probe=flaky, clock=clock, sleep=tick)
+        out, code = self.watch("--once", "--every", "5m", probe=flaky, clock=clock, sleep=tick)
         self.assertEqual(code, 1, "a transient failure keeps the watchdog alive; only a stall ends it with 1")
         self.assertIn("probe failed, still watching", out, "a transient failure is logged, never silent")
         self.assertIn("git index.lock", out)
