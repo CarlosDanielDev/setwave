@@ -61,7 +61,7 @@ Higiene de contexto — fique na zona: checkpointe achados intermediários em ar
 
 ## 4. Gate — na worktree, cole tudo no PR
 
-O gate roda em **foreground**, um passo por chamada, com o timeout máximo da ferramenta: `run_in_background`, Monitor e `sleep`-poll são proibidos para o gate. Gate maior que o timeout → quebre em passos foreground. **Nunca encerre o turno** com um comando ainda rodando ou "aguardando": um turno encerrado não volta sozinho, e um relatório interino ("waiting on GREEN") é lido como stall — rode `wave agents` e retome com `SendMessage` mandando o gate em foreground.
+O gate roda em **foreground**, um passo por chamada, com o timeout máximo da ferramenta: `run_in_background`, Monitor e `sleep`-poll são proibidos para o gate — e o guard `background-gate` recusa qualquer Bash em background dentro da worktree. Gate maior que o timeout → quebre em passos foreground (ex.: `cargo test --lib` e depois `cargo test --doc`, ou um alvo de `make` por chamada), nunca em background. **Nunca encerre o turno** com um comando ainda rodando ou "aguardando": um turno encerrado não volta sozinho, e um relatório interino ("waiting on GREEN") é lido como stall — rode `wave agents` e retome com `SendMessage` mandando o gate em foreground.
 
 ```bash
 cd {{WORKTREE}}

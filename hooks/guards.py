@@ -9,8 +9,8 @@ construction — a broken guard must never wedge the loop it guards. What is
 refused here is what the wave prompt already forbids in prose (templates/agent.md);
 the guard is the environment-level backstop for the agent that ignores the prose.
 
-    python3 guards.py <attribution|forbidden-git|secret-read|dispatch-contract>   # judge one stdin event
-    python3 guards.py <name> --ping                                               # liveness probe for `wave hooks status`
+    python3 guards.py <attribution|forbidden-git|secret-read|dispatch-contract|background-gate>   # judge one stdin event
+    python3 guards.py <name> --ping                                                               # liveness probe for `wave hooks status`
 
 Stdlib only. The command being judged is never executed — a guard reads strings
 and, for attribution, the body/message file the command itself names.
@@ -58,6 +58,10 @@ CONTRACT = [
 ]
 LEDGER = "the Done-when ledger the PR must carry"
 EXEMPT_SUBAGENTS = {"fork"}  # a fork inherits the parent's whole conversation: the premise does not hold
+# the dispatch stamp dispatch writes into each wave worktree: its presence in the event's cwd is what
+# makes this seat a wave agent's, and the background-gate judge applies only there — the orchestrator's
+# own main checkout has no stamp and may background `wave agents --watch` freely
+DISPATCH_STAMP = ".setwave.json"
 
 
 def judge_attribution(event):
@@ -149,8 +153,31 @@ def judge_dispatch_contract(event):
     return None
 
 
+def judge_background_gate(event):
+    """A backgrounded Bash call inside a dispatch worktree ends the turn while the gate still runs, and an
+    ended turn never wakes up on its own (#140): refuse it — the gate runs in foreground, one step per call.
+    Only a seat carries the stamp, so the orchestrator's own checkout stays open."""
+    if event.get("tool_name") != "Bash":
+        return None
+    if not (event.get("tool_input") or {}).get("run_in_background"):
+        return None
+    cwd = event.get("cwd")
+    if not cwd:
+        return None  # no cwd in the event: nothing says this is a seat, and a guard never guesses
+    try:
+        stamped = (Path(cwd) / DISPATCH_STAMP).exists()
+    except OSError:
+        return None  # unreadable cwd is no evidence: fail open, the prose still forbids it
+    if stamped:
+        return ("a backgrounded command inside a wave worktree ends the turn while the gate still runs, and "
+                "nothing wakes the turn: run the gate in foreground, one step per call, and never end the "
+                "turn while it runs")
+    return None
+
+
 JUDGES = {"attribution": judge_attribution, "forbidden-git": judge_forbidden_git,
-          "secret-read": judge_secret_read, "dispatch-contract": judge_dispatch_contract}
+          "secret-read": judge_secret_read, "dispatch-contract": judge_dispatch_contract,
+          "background-gate": judge_background_gate}
 
 
 def run_guard(name: str, raw: str) -> int:

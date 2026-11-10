@@ -182,8 +182,47 @@ class DispatchContract(unittest.TestCase):
         self.assertEqual(run_guard("dispatch-contract", task_event("go look")).returncode, 2)
 
 
+class BackgroundGate(unittest.TestCase):
+    """The background-gate guard: inside a dispatch worktree (a cwd with the .setwave.json stamp) a
+    backgrounded Bash call is refused — the gate runs in foreground, one step per call, and the turn
+    never ends while it runs (#140). The main checkout has no stamp: the orchestrator's own
+    `wave agents --watch` stays open."""
+
+    STAMPED = TMP / "hook-bg-35"
+
+    def setUp(self):
+        self.STAMPED.mkdir(parents=True, exist_ok=True)
+        (self.STAMPED / ".setwave.json").write_text(json.dumps({"issue": 35, "repo": "o/r", "dispatched_at": "2026-11-10T00:00:00Z"}))
+
+    def event(self, command: str, cwd, background: bool = True) -> dict:
+        tool_input = {"command": command}
+        if background:
+            tool_input["run_in_background"] = True
+        return {"tool_name": "Bash", "tool_input": tool_input, "cwd": str(cwd)}
+
+    def test_a_backgrounded_gate_in_a_dispatch_worktree_is_refused(self):
+        p = run_guard("background-gate", self.event("cargo test --all", self.STAMPED))
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("background-gate-guard", p.stderr)
+        self.assertIn("foreground", p.stderr)
+
+    def test_a_backgrounded_command_in_the_main_checkout_stays_open(self):
+        p = run_guard("background-gate", self.event("wave agents --watch", CLONE))
+        self.assertEqual(p.returncode, 0, p.stderr)
+
+    def test_a_foreground_command_in_a_worktree_stays_open(self):
+        p = run_guard("background-gate", self.event("cargo test --all", self.STAMPED, background=False))
+        self.assertEqual(p.returncode, 0, p.stderr)
+
+    def test_other_tools_and_unstamped_pass(self):
+        for payload in ({"tool_name": "Monitor", "tool_input": {}, "cwd": str(self.STAMPED)},
+                        {"tool_name": "Bash", "tool_input": {"command": "make test"}, "cwd": str(TMP)}):
+            with self.subTest(payload=payload):
+                self.assertEqual(run_guard("background-gate", payload).returncode, 0)
+
+
 class FailOpen(unittest.TestCase):
-    CRASH = ["attribution", "forbidden-git", "secret-read", "dispatch-contract"]
+    CRASH = ["attribution", "forbidden-git", "secret-read", "dispatch-contract", "background-gate"]
 
     def test_a_crashed_judge_exits_zero(self):
         def boom(event):
@@ -225,14 +264,14 @@ class Install(unittest.TestCase):
         self.assertEqual(data["model"], "opus")
         self.assertEqual(guard_commands(data),
                          [("attribution", "Bash"), ("forbidden-git", "Bash"), ("secret-read", "Bash"),
-                          ("dispatch-contract", "Task")])
+                          ("dispatch-contract", "Task"), ("background-gate", "Bash")])
         self.assertEqual(len(backups()), 1, backups())
         self.assertEqual(json.loads((SETTINGS.parent / backups()[0]).read_text()), FOREIGN)
 
     def test_install_on_a_clean_project_creates_the_file_without_a_backup(self):
         p = run_wave("hooks", "install")
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertEqual(len(guard_commands(json.loads(SETTINGS.read_text()))), 4)
+        self.assertEqual(len(guard_commands(json.loads(SETTINGS.read_text()))), 5)
         self.assertEqual(backups(), [], "nothing to back up when there was no settings file")
 
     def test_install_is_idempotent(self):
@@ -240,7 +279,7 @@ class Install(unittest.TestCase):
         again = run_wave("hooks", "install")
         self.assertEqual(again.returncode, 0, again.stderr)
         self.assertIn("already installed", again.stdout)
-        self.assertEqual(len(guard_commands(json.loads(SETTINGS.read_text()))), 4, "no duplicates")
+        self.assertEqual(len(guard_commands(json.loads(SETTINGS.read_text()))), 5, "no duplicates")
         self.assertEqual(backups(), [], "a no-op run backs nothing up")
 
     def test_dry_run_prints_the_diff_and_writes_nothing(self):
@@ -273,15 +312,15 @@ class Install(unittest.TestCase):
         p = run_wave("hooks", "status")
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("does not parse", p.stdout)
-        self.assertEqual(p.stdout.count("missing"), 4, p.stdout)
+        self.assertEqual(p.stdout.count("missing"), 5, p.stdout)
 
     def test_status_tells_active_from_missing(self):
         p = run_wave("hooks", "status")
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertEqual(p.stdout.count("missing"), 4, p.stdout)
+        self.assertEqual(p.stdout.count("missing"), 5, p.stdout)
         self.assertEqual(run_wave("hooks", "install").returncode, 0)
         p = run_wave("hooks", "status")
-        self.assertEqual(p.stdout.count("active"), 4, p.stdout)
+        self.assertEqual(p.stdout.count("active"), 5, p.stdout)
         self.assertNotIn("missing", p.stdout)
 
     def test_status_names_a_hook_whose_target_is_gone_as_missing_target(self):
@@ -298,13 +337,13 @@ class Install(unittest.TestCase):
         p = run_wave("doctor",)
         warn = line(p.stdout, "guard hooks installed")
         self.assertTrue(warn.startswith("  ! "), warn)
-        self.assertIn("0/4", warn)
+        self.assertIn("0/5", warn)
         self.assertIn("`wave hooks install`", warn)
         self.assertEqual(run_wave("hooks", "install").returncode, 0)
         p = run_wave("doctor",)
         ok = line(p.stdout, "guard hooks installed")
         self.assertTrue(ok.startswith("  ✓ "), ok)
-        self.assertIn("4/4", ok)
+        self.assertIn("5/5", ok)
 
 
 STALE = "/gone-76/plugins/cache/setwave/setwave/0.7.0/hooks/guards.py"
@@ -315,7 +354,8 @@ PROJECT_GUARDS = CLONE / "hooks" / "guards.py"
 def settings_with(command_for) -> dict:
     return {"hooks": {"PreToolUse": [
         {"matcher": m, "hooks": [{"type": "command", "command": command_for(n)}]}
-        for n, m in (("attribution", "Bash"), ("forbidden-git", "Bash"), ("secret-read", "Bash"), ("dispatch-contract", "Task"))]}}
+        for n, m in (("attribution", "Bash"), ("forbidden-git", "Bash"), ("secret-read", "Bash"),
+                     ("dispatch-contract", "Task"), ("background-gate", "Bash"))]}}
 
 
 class TargetDrift(unittest.TestCase):
@@ -339,7 +379,7 @@ class TargetDrift(unittest.TestCase):
         write_settings(settings_with(lambda n: f"python3 {STALE} {n}"))
         p = run_wave("hooks", "status")
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertEqual(p.stdout.count("missing target"), 4, p.stdout)
+        self.assertEqual(p.stdout.count("missing target"), 5, p.stdout)
         self.assertIn(STALE, line(p.stdout, "attribution"))
         self.assertNotIn("active", p.stdout)
 
@@ -348,7 +388,7 @@ class TargetDrift(unittest.TestCase):
         warn = line(run_wave("doctor",).stdout, "guard hooks installed")
         self.assertTrue(warn.startswith("  ! "), warn)
         self.assertIn("missing target", warn)
-        self.assertIn("0/4", warn)
+        self.assertIn("0/5", warn)
         self.assertIn("`wave hooks install`", warn)
 
     def test_check_lists_each_guard_with_its_target_and_whether_it_exists(self):
@@ -378,17 +418,17 @@ class TargetDrift(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr)
         data = json.loads(SETTINGS.read_text())
         self.assertEqual(data["model"], "opus")
-        self.assertEqual(len(guard_commands(data)), 4, "the dead entries went, the live ones came")
+        self.assertEqual(len(guard_commands(data)), 5, "the dead entries went, the live ones came")
         self.assertNotIn(STALE, SETTINGS.read_text())
 
     def test_the_project_relative_entry_is_active_when_it_resolves_to_the_projects_guards(self):
         self.project_guards()
         write_settings(settings_with(lambda n: RELATIVE + n))
         p = run_wave("hooks", "status")
-        self.assertEqual(p.stdout.count("active"), 4, p.stdout)
+        self.assertEqual(p.stdout.count("active"), 5, p.stdout)
         ok = line(run_wave("doctor",).stdout, "guard hooks installed")
         self.assertTrue(ok.startswith("  ✓ "), ok)
-        self.assertIn("4/4", ok)
+        self.assertIn("5/5", ok)
 
     def test_install_does_not_duplicate_what_the_project_relative_entry_covers(self):
         self.project_guards()
@@ -402,7 +442,7 @@ class TargetDrift(unittest.TestCase):
     def test_the_project_relative_entry_without_the_projects_guards_is_a_missing_target(self):
         write_settings(settings_with(lambda n: RELATIVE + n))
         p = run_wave("hooks", "status")
-        self.assertEqual(p.stdout.count("missing target"), 4, p.stdout)
+        self.assertEqual(p.stdout.count("missing target"), 5, p.stdout)
         self.assertIn("$CLAUDE_PROJECT_DIR/hooks/guards.py", line(p.stdout, "attribution"))
 
 
@@ -429,7 +469,7 @@ class Untrusted(unittest.TestCase):
         status = run_wave("hooks", "status")
         doctor = run_wave("doctor",)
         self.assertFalse(self.mark.exists(), "the sentinel ran: a diagnostic executed repo-supplied code")
-        self.assertEqual(status.stdout.count("untrusted"), 4, status.stdout)
+        self.assertEqual(status.stdout.count("untrusted"), 5, status.stdout)
         self.assertNotIn("active", status.stdout)
         warn = line(doctor.stdout, "guard hooks installed")
         self.assertTrue(warn.startswith("  ! "), warn)
@@ -441,7 +481,7 @@ class Untrusted(unittest.TestCase):
         write_settings(settings_with(lambda n: RELATIVE + n))
         out = {args: run_wave(*args) for args in (("hooks", "status"), ("doctor",), ("hooks", "install", "--check"), ("hooks", "install", "--dry-run"))}
         self.assertFalse(self.mark.exists(), "the sentinel ran")
-        self.assertEqual(out[("hooks", "status")].stdout.count("untrusted"), 4, out[("hooks", "status")].stdout)
+        self.assertEqual(out[("hooks", "status")].stdout.count("untrusted"), 5, out[("hooks", "status")].stdout)
         self.assertNotIn("active", out[("hooks", "status")].stdout)
         self.assertIn("untrusted", line(out[("doctor",)].stdout, "guard hooks installed"))
         self.assertEqual(out[("hooks", "install", "--check")].returncode, 1)
@@ -471,7 +511,7 @@ class Untrusted(unittest.TestCase):
         PROJECT_GUARDS.write_text(GUARDS.read_text() + "\n# not the plugin's\n")
         write_settings(settings_with(lambda n: RELATIVE + n))
         p = run_wave("hooks", "status")
-        self.assertEqual(p.stdout.count("untrusted"), 4, p.stdout)
+        self.assertEqual(p.stdout.count("untrusted"), 5, p.stdout)
         self.assertNotIn("active", p.stdout)
         self.assertIn("untrusted", line(run_wave("doctor",).stdout, "guard hooks installed"))
 
@@ -480,8 +520,8 @@ class Untrusted(unittest.TestCase):
         PROJECT_GUARDS.write_text(GUARDS.read_text() + "\n# not the plugin's\n")
         write_settings(settings_with(lambda n: RELATIVE + n))
         self.assertEqual(run_wave("hooks", "install").returncode, 0)
-        self.assertEqual(len(guard_commands(json.loads(SETTINGS.read_text()))), 4, "the plugin's own, one per guard")
-        self.assertEqual(run_wave("hooks", "status").stdout.count("active"), 4)
+        self.assertEqual(len(guard_commands(json.loads(SETTINGS.read_text()))), 5, "the plugin's own, one per guard")
+        self.assertEqual(run_wave("hooks", "status").stdout.count("active"), 5)
 
 
 class GuaranteesTable(unittest.TestCase):
@@ -495,11 +535,11 @@ class GuaranteesTable(unittest.TestCase):
 
 
 class Dogfood(unittest.TestCase):
-    """The committed .claude/settings.json lists the four guards of GUARD_HOOKS (names, matchers, order), each exactly as `python3 "$CLAUDE_PROJECT_DIR/hooks/guards.py" <name>`: project-relative, never an absolute path."""
+    """The committed .claude/settings.json lists the five guards of GUARD_HOOKS (names, matchers, order), each exactly as `python3 "$CLAUDE_PROJECT_DIR/hooks/guards.py" <name>`: project-relative, never an absolute path."""
 
-    def test_the_committed_settings_carry_the_four_guards(self):
+    def test_the_committed_settings_carry_the_five_guards(self):
         committed = TESTS.parent / ".claude" / "settings.json"
-        self.assertTrue(committed.exists(), "commit .claude/settings.json with the four guards")
+        self.assertTrue(committed.exists(), "commit .claude/settings.json with the five guards")
         found = []
         for block in json.loads(committed.read_text())["hooks"]["PreToolUse"]:
             for h in block["hooks"]:
@@ -526,7 +566,7 @@ class Dogfood(unittest.TestCase):
     def test_the_repo_ships_the_script_the_settings_name(self):
         self.assertTrue(GUARDS.is_file(), "the settings name $CLAUDE_PROJECT_DIR/hooks/guards.py: without it python3 exits 2 and blocks Bash")
 
-    def test_a_clone_with_the_same_guards_py_reads_4_of_4_active(self):
+    def test_a_clone_with_the_same_guards_py_reads_5_of_5_active(self):
         health = self._health(GUARDS.read_bytes())
         self.assertEqual({n: st for n, (st, _) in health.items()}, {n: "active" for n, _, _ in wave.GUARD_HOOKS})
 
