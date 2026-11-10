@@ -1422,7 +1422,10 @@ def _epoch(iso: str | None) -> float | None:
 
 def munged_seat(path: str) -> str:
     """The host's projects-dir name for a session cwd: `/` and `.` become `-` (seen live:
-    `/Users/x/p/maestro-1048` sits at `-Users-x-p-maestro-1048`). Exact match — a sibling seat never bleeds in."""
+    `/Users/x/p/maestro-1048` sits at `-Users-x-p-maestro-1048`). NOT injective — `/a/b` and `/a-b`
+    munge to the same name — so a dash-or-dot-ambiguous sibling could lend this seat a fresh transcript
+    mtime. The error runs toward `working`, never toward a false stall; the process probe and the files
+    still answer for a seat whose transcript read is doubted."""
     return path.replace("/", "-").replace(".", "-")
 
 

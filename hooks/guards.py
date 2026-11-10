@@ -156,11 +156,15 @@ def judge_dispatch_contract(event):
 def judge_background_gate(event):
     """A backgrounded Bash call inside a dispatch worktree ends the turn while the gate still runs, and an
     ended turn never wakes up on its own (#140): refuse it — the gate runs in foreground, one step per call.
-    Only a seat carries the stamp, so the orchestrator's own checkout stays open."""
+    The tool's `run_in_background` flag is not the only door: a trailing `&` (not `&&`), `nohup`, `disown`
+    or `setsid` in the command string backgrounds the same gate past the flag, and is refused too.
+    Only a seat carries the stamp, so the orchestrator's own checkout stays open. (Known limit, by design:
+    the stamp sits in the agent-writable worktree, so an agent that erases it escapes this judge — the
+    guards are fail-open, and `wave verify` plus the judge still gate the PR.)"""
     if event.get("tool_name") != "Bash":
         return None
-    if not (event.get("tool_input") or {}).get("run_in_background"):
-        return None
+    tool_input = event.get("tool_input") or {}
+    flagged = bool(tool_input.get("run_in_background"))
     cwd = event.get("cwd")
     if not cwd:
         return None  # no cwd in the event: nothing says this is a seat, and a guard never guesses
@@ -168,11 +172,24 @@ def judge_background_gate(event):
         stamped = (Path(cwd) / DISPATCH_STAMP).exists()
     except OSError:
         return None  # unreadable cwd is no evidence: fail open, the prose still forbids it
-    if stamped:
+    if not stamped:
+        return None
+    command = tool_input.get("command") or ""
+    if flagged or shelled_to_background(command):
         return ("a backgrounded command inside a wave worktree ends the turn while the gate still runs, and "
                 "nothing wakes the turn: run the gate in foreground, one step per call, and never end the "
                 "turn while it runs")
     return None
+
+
+def shelled_to_background(command: str) -> bool:
+    """True when the command string backgrounds work at the shell level: an unquoted `&` that is not `&&`
+    (and not a redirect like `2>&1` / `&>`), or nohup / disown / setsid."""
+    stripped = re.sub(r"'[^']*'|\"[^\"]*\"", " ", command)  # a quoted `&` is data, never a control char
+    stripped = stripped.replace("&&", " ").replace("&>", " ").replace(">&", " ").replace("&>", " ")
+    if re.search(r"&", stripped):
+        return True
+    return bool(re.search(r"\b(?:nohup|disown|setsid)\b", stripped))
 
 
 JUDGES = {"attribution": judge_attribution, "forbidden-git": judge_forbidden_git,

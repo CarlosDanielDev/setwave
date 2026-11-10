@@ -206,6 +206,23 @@ class BackgroundGate(unittest.TestCase):
         self.assertIn("background-gate-guard", p.stderr)
         self.assertIn("foreground", p.stderr)
 
+    def test_shell_level_backgrounding_is_refused_too(self):
+        """The flag is not the only door: a trailing &, nohup, disown or setsid backgrounds the same gate
+        past the tool flag."""
+        for cmd in ("cargo test --all &", "cargo test &  make lint", "nohup make test", "make test & disown",
+                    "setsid cargo test"):
+            with self.subTest(cmd=cmd):
+                p = run_guard("background-gate", self.event(cmd, self.STAMPED, background=False))
+                self.assertEqual(p.returncode, 2, f"{cmd}: {p.stderr}")
+                self.assertIn("foreground", p.stderr)
+
+    def test_redirects_conjunctions_and_quoted_amps_are_not_backgrounding(self):
+        for cmd in ("cargo test 2>&1 | tee gate.log", "make lint && make test", 'echo "a & b" > notes.md',
+                    "echo done > gate.log", "cargo test --all -- --quiet"):
+            with self.subTest(cmd=cmd):
+                p = run_guard("background-gate", self.event(cmd, self.STAMPED, background=False))
+                self.assertEqual(p.returncode, 0, f"{cmd}: {p.stderr}")
+
     def test_a_backgrounded_command_in_the_main_checkout_stays_open(self):
         p = run_guard("background-gate", self.event("wave agents --watch", CLONE))
         self.assertEqual(p.returncode, 0, p.stderr)
