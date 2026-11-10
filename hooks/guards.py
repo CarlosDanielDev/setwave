@@ -87,18 +87,40 @@ def judge_attribution(event):
 
 
 def judge_forbidden_git(event):
-    """None of the destructive commands survives Bash; the refusal carries the way back."""
+    """None of the destructive commands survives Bash; the refusal carries the way back. Global options
+    (`git -c x=y reset --hard`), pager flags and command shims (`sudo|command|env git`, `VAR=v git`) are
+    peeled before matching: they change nothing about what the command does."""
     if event.get("tool_name") != "Bash":
         return None
     statement: str
     for statement in re.split(r"&&|\|\||[;\n]", (event.get("tool_input") or {}).get("command") or ""):
         for pattern, instead in FORBIDDEN:
-            m = pattern.search(statement)
+            m = pattern.search(git_normalized(statement))
             if m:
                 return f"`{m.group(0).strip()}` is refused: {instead}"
         if rm_recursive_force(statement):
             return "`rm -rf` is refused: delete the specific paths you named, without -r and -f together, instead"
     return None
+
+
+GIT_SHIMS = re.compile(r"^\s*(?:\w+=\S+\s+)*(?:sudo|command|env|nohup)?\s*git\b")
+GIT_GLOBAL_OPTION = re.compile(r"\s+(?:-[cC]\s+\S+|--[\w-]+=(?:\"[^\"]*\"|'[^']*'|\S+)|--[\w-]+)(?=\s|$)")
+
+
+def git_normalized(statement: str) -> str:
+    """`command git -c x=y --no-pager reset --hard` reads as `git reset --hard`: leading VAR=... and shim
+    words go, and every option token between `git` and the first subcommand token goes with them — global
+    options only, the subcommand and everything after it are left verbatim for the patterns."""
+    m = GIT_SHIMS.match(statement)
+    if not m:
+        return statement
+    rest = statement[m.end():]
+    while True:
+        n = GIT_GLOBAL_OPTION.match(rest)
+        if not n:
+            break
+        rest = rest[n.end():]
+    return statement[:m.start()] + "git" + rest
 
 
 def rm_recursive_force(statement: str) -> bool:
@@ -111,8 +133,16 @@ def rm_recursive_force(statement: str) -> bool:
     return has_r and has_f
 
 
+# the allowlist a secret path must survive: metadata only — names, sizes, counts, presence (#142 review:
+# a denylist of reader verbs loses to `python3 -c`, `nl`, `tr < file`, and every reader not yet invented)
+METADATA_VERB = re.compile(
+    r"\b(?:ls|stat|file|wc|test|check-ignore)\b|\[\s"
+    r"|\bgrep\b[^|;&]*\s-\w*[cq]\w*\b|\bgrep\b[^|;&]*(?:--count|--quiet)")
+
+
 def judge_secret_read(event):
-    """The contents of a secret file are never printed; ls, stat and grep -c stay open."""
+    """When a statement names a secret path, only its metadata may cross: the allowlist above decides, and
+    everything else — any reader verb, known or not — is refused."""
     if event.get("tool_name") != "Bash":
         return None
     command = (event.get("tool_input") or {}).get("command") or ""
@@ -122,14 +152,10 @@ def judge_secret_read(event):
         if not m:
             continue
         last = statement.split("|")[-1]  # a pipeline answers with its last stage: `cat .env | wc -l` is a count
-        if GREP_LIKE.search(last) and COUNT_FLAG.search(last):
+        if METADATA_VERB.search(last):
             continue
-        if re.search(r"\bwc\b", last):
-            continue
-        denied = SHOW_VERB.search(statement) or (GREP_LIKE.search(statement) and not COUNT_FLAG.search(statement))
-        if denied:
-            return (f"this command would print the contents of a secret ({m.group(0)}) — to check it is there use "
-                    "`ls -la`, `stat` or `grep -c` instead")
+        return (f"this command reads a secret ({m.group(0)}), and only its metadata is safe here — use "
+                "`ls -la`, `stat`, `file`, `wc -l`, `test -f` or `grep -c`/`grep -q` instead")
     return None
 
 
@@ -185,18 +211,20 @@ def judge_background_gate(event):
 def shelled_to_background(command: str) -> bool:
     """True when the command string backgrounds, detaches or re-parses work at the shell level: an unquoted
     `&` that is not `&&` (nor a redirect like `2>&1` / `&>`), nohup / disown / setsid / coproc, a detached
-    or multiplexed session (tmux, screen, at, batch, parallel), or eval / `<shell> -c` with an `&` anywhere
-    in the command — a payload they re-parse is one the outer scan cannot see. Known limit, documented: a
-    determined daemonizer (ssh -f, systemd-run, `| at now`) with no flagged token still passes — the judge
-    is a backstop for the prose, and verify plus the judge gate the PR."""
+    or multiplexed session (tmux, screen, at, batch, parallel), or a re-parsing launcher (eval, any *sh)
+    with an `&` anywhere in the command — the launcher's payload is judged on a quote-NORMALIZED string
+    (quote characters deleted after escape pairs), so `ba'sh' -c 'x &'` and `bash "-c"` spellings read as
+    what they run. Known limit, documented: a determined daemonizer (ssh -f, systemd-run, `| at now`) with
+    no flagged token still passes — the judge is a backstop, and verify plus the judge gate the PR."""
     stripped = command.replace("\\'", " ").replace('\\"', " ")  # an escaped quote is a literal char: the span it opens is not a quoted span
-    stripped = re.sub(r"'[^']*'|\"[^\"]*\"", " ", stripped)  # a quoted `&` is data, never a control char
-    stripped = stripped.replace("&&", " ").replace("&>", " ").replace(">&", " ")
-    if re.search(r"&", stripped):
+    spans_gone = re.sub(r"'[^']*'|\"[^\"]*\"", " ", stripped)  # a quoted `&` is data for the outer shell's operator scan
+    ops = spans_gone.replace("&&", " ").replace("&>", " ").replace(">&", " ")
+    if re.search(r"&", ops):
         return True
-    if re.search(r"\b(?:nohup|disown|setsid|coproc|tmux|screen|at|batch|parallel)\b", stripped):
+    if re.search(r"\b(?:nohup|disown|setsid|coproc|tmux|screen|at|batch|parallel)\b", ops):
         return True
-    if re.search(r"\beval\b|\b(?:ba|z|da|k)?sh\s+(?:-\w+\s+)*-c\b", stripped) and "&" in command:
+    normalized = re.sub(r"[\"']", "", stripped)  # the launcher reads through the quotes: judge its spelling dequoted
+    if re.search(r"\beval\b|\b(?:ba|z|da|k|mk|s)?sh\b", normalized) and "&" in command:
         return True
     return False
 
